@@ -235,6 +235,10 @@ A sandboxed Python environment is the difference between a chatbot and a worker.
 - Memory limit (default 1 GB, max 4 GB).
 - Disk limit (default 1 GB, ephemeral — wiped on teardown).
 - No shell access, no privileged operations, no kernel features.
+- **Credential vault.** Sandboxes never hold raw API keys. When sandboxed code makes an outbound HTTP request, it routes through a Wolfpaw proxy that injects credentials at request time and enforces per-agent rate limits and access policy. Pattern adapted from NanoClaw. Effects: a malicious tool call or prompt injection that runs `os.environ`, scans files, or greps the disk finds nothing useful; keys can be rotated without rebuilding sandboxes; every credentialed request is logged with which task / agent / tool initiated it for audit.
+  - Implemented as `wolfpaw/sandbox/proxy.py` — a small HTTP proxy each sandbox is configured to use as its egress.
+  - Per-task policy: which credentials are reachable (Tavily, Anthropic, user OAuth tokens for Drive/Calendar/etc), which destinations are allowed, per-credential rate limits.
+  - User OAuth tokens (Drive, Dropbox, Gmail, Calendar, Notion) flow through the same vault — sandboxed code never sees the user's tokens directly.
 
 **Metering**
 - Compute-seconds tracked in `compute_usage`, costed per second.
