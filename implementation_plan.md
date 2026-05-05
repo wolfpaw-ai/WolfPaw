@@ -4,6 +4,7 @@ Living document. Updated as decisions are made.
 
 ## Guiding principles
 
+- **Agentic worker, not just an assistant.** Wolfpaw's bar is "gets real work done while you sleep" — not "answers questions in chat." That implies code execution, long-running tasks, real deliverables, and sub-agent delegation as core capabilities, not nice-to-haves.
 - **General agent.** Wolfpaw is broadly useful, not a specialist. Architecture biases toward generality: pluggable tools, model tiering, retrieval-driven memory.
 - **Plug-and-play for end users.** The hosted product asks for nothing beyond an email and a credit card. No API keys, no bot tokens, no install.
 - **One codebase, two distributions.** Hosted SaaS and self-host OSS ship from the same repo. Differences are config, not separate forks.
@@ -34,7 +35,11 @@ Living document. Updated as decisions are made.
 12. **Billing:** Stripe (Checkout + customer portal + webhooks). Tier specifics deferred — we set numbers after we have real usage data.
 13. **Token metering:** Mandatory in the hot path for every model call from day one. Recorded per request, per agent, per model. Always-on regardless of subscription state.
 14. **At cap:** Hard pause + one-click upgrade or opt-in overage. No silent overage. (Behavior locked; threshold numbers TBD.)
-15. **`/usage` command:** First-class, available in every channel. Reports tokens in/out per model, estimated cost per model, and totals — for the current billing period and today. Useful as a user feature; equally useful as a dev tool while building.
+15. **`/usage` command:** First-class, available in every channel. Reports tokens in/out per model, estimated cost per model, sandbox-compute cost, and totals — for the current billing period and today.
+16. **Code execution sandbox:** First-class v1 capability. Sandboxed Python environment per task, network egress restricted, time/memory/disk limits, compute time metered alongside tokens. Provider: E2B for hosted (purpose-built for agent code execution); Docker for self-host. Without this, Wolfpaw can't really *do* most things.
+17. **Tasks as first-class objects:** Persistent units of work distinct from chat threads or single plans. Have status (pending/running/blocked/awaiting_user/completed/failed/cancelled), survive across days, can be paused/resumed, ping the user via their preferred channel when blocked or done. A thread can spawn many tasks; a task can have many plans over its life.
+18. **Artifact production tools:** Wolfpaw produces real deliverables — `.xlsx`, `.pdf`, `.pptx`, charts as `.png`/`.svg`. Stored in user's workspace folder (Drive/Dropbox via OAuth, or Wolfpaw S3 prefix).
+19. **Sub-agent delegation:** Planner can mark plan branches as parallelizable; executor spawns sub-tasks with allocated budget from the parent. Hard limits on depth (3 levels) and concurrency (5 sub-agents) per task.
 
 ## Architecture commitments
 
@@ -150,9 +155,16 @@ wolfpaw/
 
 - `threads(id, user_id, channel enum, created_at, soul_version)`
 - `messages(id, thread_id, role, content, metadata jsonb, created_at)`
-- `plans(id, user_id, thread_id, query, query_embedding vector(1024), steps jsonb, final_answer, success bool, score int, error text, trace_id, created_at)` — IVFFlat index on `query_embedding`
+- `plans(id, user_id, thread_id, task_id nullable, query, query_embedding vector(1024), steps jsonb, final_answer, success bool, score int, error text, trace_id, created_at)` — IVFFlat index on `query_embedding`
 - `tools(name, description, signature jsonb, embedding vector(1024))`
-- `user_data` schema — sandboxed namespace where `create_table` / `sql_query` / `write_doc`-via-DB operate. `user_data.<user_id>_<table>`-style naming, or per-user schema (`user_data_42.*`). Lean per-user schema for cleaner isolation.
+- `user_data` schema — sandboxed namespace where `create_table` / `sql_query` / `write_doc`-via-DB operate. Per-user schema (`user_data_42.*`) for clean isolation.
+
+### Tasks & artifacts
+
+- `tasks(id, user_id, parent_task_id nullable, title, description, status enum, current_plan_id, budget_cents nullable, spent_cents, blocking_reason text nullable, channel_for_completion enum, schedule_pattern text nullable, created_at, started_at, completed_at, last_active_at)` — `status` ∈ {`pending`, `running`, `blocked`, `awaiting_user`, `completed`, `failed`, `cancelled`}
+- `task_events(id, task_id, event_type, content jsonb, created_at)` — append-only log of state transitions, agent updates, user inputs
+- `artifacts(id, task_id, user_id, filename, mime_type, storage_url, size_bytes, created_at)` — produced files (xlsx, pdf, pptx, png, etc.)
+- `sandboxes(id, task_id, provider, external_id, status, started_at, terminated_at, compute_seconds, cost_cents)` — one sandbox per active task, torn down on task pause/complete
 
 ### Channels
 
@@ -162,23 +174,119 @@ wolfpaw/
 
 ### Metering
 
-- `token_usage(id, user_id, trace_id, request_id, agent enum, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_cents int, created_at)` — partitioned by `created_at` month for query speed
-- `usage_summaries(user_id, period_start, period_end, total_cost_cents, by_agent jsonb, by_model jsonb)` — rolled up nightly
-- `cost_notifications(user_id, period_start, threshold_pct, sent_at)` — dedup so we only notify once per threshold per period
+- `token_usage(id, user_id, task_id nullable, trace_id, request_id, agent enum, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_cents int, created_at)` — partitioned by `created_at` month
+- `compute_usage(id, user_id, task_id, sandbox_id, compute_seconds, memory_gb_seconds, cost_cents int, created_at)` — sandbox time, separate dimension from tokens
+- `usage_summaries(user_id, period_start, period_end, total_cost_cents, by_agent jsonb, by_model jsonb, compute_cost_cents)` — rolled up nightly
+- `cost_notifications(user_id, period_start, threshold_pct, sent_at)` — dedup
 
 ## Tools (v1)
 
+### Information & data
 | Tool | Purpose | Backed by |
 |------|---------|-----------|
 | `web_search` | LLM-friendly ranked web results | Tavily |
 | `http_get` | Fetch URL → readable text | `httpx` + `readability-lxml` |
 | `calculator` | Safe arithmetic / unit conversions | restricted-AST eval |
-| `read_doc` | Read file from per-user workspace | local FS / S3 |
-| `write_doc` | Write file to per-user workspace | local FS / S3 |
 | `sql_query` | Read-only against user's `user_data_<id>` schema | `asyncpg` with `READ ONLY` tx |
 | `create_table` | DDL into `user_data_<id>` schema, whitelisted patterns | `asyncpg` |
 
-`write_doc` and `create_table` give Wolfpaw durable storage for things it learns or produces. Per-user schema/workspace keeps tenants isolated.
+### Files & workspace
+| Tool | Purpose | Backed by |
+|------|---------|-----------|
+| `read_doc` | Read file from per-user workspace | local FS / S3 / Drive / Dropbox |
+| `write_doc` | Write text/markdown to per-user workspace | local FS / S3 / Drive / Dropbox |
+
+### Code execution (sandbox)
+| Tool | Purpose | Backed by |
+|------|---------|-----------|
+| `run_python` | Execute Python in the task's sandbox; returns stdout, stderr, return values, files written | E2B (hosted) / Docker (self-host) |
+| `install_package` | `pip install` into sandbox | sandbox runtime |
+| `sandbox_read_file` / `sandbox_write_file` | I/O against the sandbox FS | sandbox runtime |
+
+### Artifact production
+| Tool | Purpose | Backed by |
+|------|---------|-----------|
+| `create_spreadsheet` | `.xlsx` with sheets, formulas, formatting | `openpyxl` (in sandbox) |
+| `create_pdf` | HTML/Markdown → `.pdf` | `weasyprint` (in sandbox) |
+| `create_chart` | Chart from data → `.png`/`.svg` | `matplotlib` (in sandbox) |
+| `create_slides` | `.pptx` decks | `python-pptx` (in sandbox) |
+
+Artifacts land in the user's workspace folder and are recorded in the `artifacts` table linked to the originating task.
+
+`write_doc` and `create_table` give Wolfpaw durable structured storage. Per-user schema/workspace keeps tenants isolated.
+
+## Code execution sandbox
+
+A sandboxed Python environment is the difference between a chatbot and a worker. Every task that needs computation gets its own sandbox.
+
+**Provider**
+- **Hosted:** [E2B](https://e2b.dev) — purpose-built for AI agent code execution, handles isolation/networking/lifecycle, pay-per-second.
+- **Self-host:** Docker container with a locked-down image. Slower spin-up but no third-party dependency.
+- Abstracted behind a `Sandbox` interface so the rest of the code is provider-agnostic.
+
+**Lifecycle**
+- One sandbox per active task. Created on first `run_python` call. Torn down on task pause/complete or after idle timeout (15 min).
+- State persists across calls within the same task — variables, installed packages, files all stick around.
+- `sandboxes` table tracks lifetime + compute-seconds for metering.
+
+**Security**
+- Network egress disabled by default. Agent can request specific URL allowlists per task; the planner has to declare them up front.
+- CPU time limit per execution (default 60s, max 5 min).
+- Memory limit (default 1 GB, max 4 GB).
+- Disk limit (default 1 GB, ephemeral — wiped on teardown).
+- No shell access, no privileged operations, no kernel features.
+
+**Metering**
+- Compute-seconds tracked in `compute_usage`, costed per second.
+- Shows up in `/usage` as a separate line from tokens.
+- Counted against user's allowance like inference is.
+
+## Tasks (long-running work)
+
+A `Task` is a persistent unit of work distinct from a chat thread or a single plan. Tasks are how Wolfpaw "works while you sleep."
+
+**Lifecycle**
+```
+pending → running → (blocked | awaiting_user) → running → completed
+                                                        ↘ failed | cancelled
+```
+
+- **pending:** queued, not yet started.
+- **running:** an agent is actively working on it (or just finished a plan and is choosing the next one).
+- **blocked:** external dependency stalled (rate limit, downstream service, missing data the agent can't get).
+- **awaiting_user:** needs the user's input or approval; pings them on their preferred channel.
+- **completed:** all goals met; final artifacts attached; user notified.
+- **failed:** unrecoverable error. Includes diagnosis of why.
+- **cancelled:** user stopped it.
+
+**Plans are subordinate to tasks.** A task can produce many plans over its life — initial attempt, retry after blocked, sub-plans for branches. Procedural memory stores plans (with their outcome scores) the same way as today; tasks add the persistence layer above them.
+
+**Worker process**
+- `arq` worker continuously picks up runnable tasks, runs the next plan step, persists state, repeats.
+- Task spend tracked against `budget_cents` (defaults to remaining period allowance; user can cap a single task lower).
+- Hard system ceiling: no single task exceeds $50 by default without user authorization (separate from the system-wide overage cap).
+
+**User-facing**
+- Web app shows a task list with status, last activity, spend, artifacts.
+- Channels can return `/tasks` slash command for a quick text summary.
+- Notifications on `awaiting_user` and `completed` via user's preferred channel.
+
+**How tasks are created**
+- Agent decides: if the user asks for something that needs more than a single chat turn or that produces a real deliverable, the planner creates a task and starts working. Quick lookups remain in-thread.
+- User can also explicitly create a task ("Wolfpaw, take this on as a project: ...").
+- Recurring tasks via `schedule_pattern` (cron-style) — tied into the v2 Sleep Cycle.
+
+## Sub-agent delegation
+
+Plans can mark branches as parallelizable. The executor spawns a sub-task per branch with its own sandbox, its own thread, and a budget allocated from the parent.
+
+- **Depth limit:** 3 levels (sub-tasks of sub-tasks of root). Beyond that, the planner has to flatten.
+- **Concurrency limit:** 5 sub-tasks running concurrently per root.
+- **Budget:** parent allocates `budget_cents` per sub-task at spawn time. Sub-task spend rolls up to parent for `usage_summaries`.
+- **Synthesis:** parent task waits for all sub-tasks to reach a terminal state, then runs a synthesis step (a reasoning step that combines the outputs).
+- **Failure handling:** if a sub-task fails, parent decides: retry with a different plan, drop the branch and continue, or fail the whole task. Planner emits this policy at spawn time.
+
+The schema piece is `tasks.parent_task_id`, which already lets us query "all sub-tasks of root X" and roll up costs. The execution piece is the worker spawning multiple `arq` jobs and coordinating their results.
 
 ## Channel abstraction
 
@@ -196,10 +304,13 @@ Channels normalize inbound messages into a common shape. Before dispatching to t
 
 | Command | Behavior |
 |---|---|
-| `/usage` | Current period + today, by model, tokens in/out + cost. See "/usage" section below. |
+| `/usage` | Current period + today, by model, tokens in/out + cost + sandbox compute. See "/usage" section below. |
 | `/usage today` | Just today. |
 | `/usage month` | Current billing period, with by-agent breakdown. |
 | `/usage all` | Lifetime totals. |
+| `/tasks` | List of active + recent tasks with status, spend, artifact count. |
+| `/task <id>` | Detail on a specific task (current step, last activity, blocking reason if any). |
+| `/cancel <task_id>` | Cancel a running task. |
 | `/help` | Lists available commands and channels. |
 | `/reset` | Starts a new conversation thread. (Doesn't delete memory — just opens a fresh thread.) |
 
@@ -359,26 +470,30 @@ OTel is the long-term-correct answer but adds setup complexity. v1 is a single F
 
 ## Build order
 
-1. **Foundation.** `pyproject.toml`, FastAPI skeleton, `config.py`, `tracing.py`, health endpoint. (LICENSE file added later, when decided.)
-2. **Database.** `001_init.sql` (users, threads, messages, plans, tools, user_data schema, token_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded with current Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Voyage-3 prices.
-3. **Auth.** Magic link via SES. `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"` for every user (no enforcement yet).
-4. **Metering harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`. Token-recording `call_model()` wrapper. Enforcer is a no-op stub at this stage — the recording path is what matters early.
-5. **Channel skeleton + slash commands.** `Channel` ABC, web channel with SSE, command dispatcher with `/help`. No agents yet — just echoes and commands.
-6. **`/usage` command.** Implement against `token_usage` + `model_prices`. Returns empty/zero state cleanly. Available in web from this step on; will light up in Telegram when that channel lands. Once steps 7+ start making model calls, `/usage` immediately becomes useful for monitoring your own dev spend.
-7. **Toolbox.** Static registry + the 7 tools.
-8. **Quick Agent.** Haiku + tools. Wired through `call_model()` so every call is metered. First step where `/usage` shows non-zero numbers.
-9. **Triage.** Routes between Quick and (stubbed) Plan.
-10. **Planner.** Procedural memory retrieval + plan generation.
-11. **Executor.** Functional / reasoning / evaluation step types. SSE event stream.
-12. **Post-Evaluator.** Scoring + plan persistence.
-13. **Soul integration.** `soul.md` into every system prompt; `soul_version` on threads.
-14. **Telegram channel.** `@WolfpawBot`, webhook, `channel_links`, deep-link onboarding. `/usage` and other commands work in Telegram from this step. `002_channels.sql`.
-15. **Web app.** React + Vite. Onboard, chat, usage dashboard, channel settings.
-16. **CloudWatch dashboards + Logs Insights queries.** Committed in `infra/dashboards/`.
-17. **Infra: Terraform.** EC2 + RDS + ElastiCache + SES + Secrets + IAM + Caddy + systemd.
-18. **OSS packaging (v1.5 entry).** Docker Compose, install script, README, env-template.
-19. **Email forwarding (v1.5).** SES inbound, Lambda dispatcher, `email_aliases`, verified owners, drafts-out constraint.
-20. **Billing + tier enforcement (when ready to monetize).** Stripe Checkout + customer portal + webhook → `subscriptions` table. Flip enforcer from no-op to real cap checks. Cost notifications at 50/80/100%. `003_billing.sql`.
-21. **Slack (v2).** OAuth workspace install, app manifest, slash command + DMs.
+1. **Foundation.** `pyproject.toml`, FastAPI skeleton, `config.py`, `tracing.py`, health endpoint.
+2. **Database.** `001_init.sql` (users, threads, messages, plans, tools, user_data schema, tasks, task_events, artifacts, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
+3. **Auth.** Magic link via SES. `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"`.
+4. **Metering harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`. Token-recording `call_model()` wrapper. Enforcer no-op stub.
+5. **Channel skeleton + slash commands.** `Channel` ABC, web channel with SSE, command dispatcher with `/help`.
+6. **`/usage` command.** Against `token_usage` + `compute_usage` + `model_prices`. Returns empty/zero state cleanly.
+7. **Information & data tools.** `web_search`, `http_get`, `calculator`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
+8. **Code execution sandbox.** `Sandbox` interface + E2B adapter (Docker adapter for self-host). `run_python`, `install_package`, `sandbox_read_file`, `sandbox_write_file`. `sandboxes` table tracks lifecycle. Compute metering wired through `compute_usage`.
+9. **Artifact production tools.** `create_spreadsheet`, `create_pdf`, `create_chart`, `create_slides` — all run inside the sandbox. Artifacts saved to user workspace, recorded in `artifacts` table.
+10. **Quick Agent.** Haiku + non-sandbox tools. First step where `/usage` shows real numbers.
+11. **Triage.** Routes between Quick, Plan, and Task creation.
+12. **Planner.** Procedural memory retrieval + plan generation. Decides if request needs a Task (long-running) or just a single plan.
+13. **Executor.** Functional / reasoning / evaluation step types. SSE event stream. Handles sandbox-tool calls.
+14. **Post-Evaluator.** Scoring + plan persistence.
+15. **Tasks: persistent layer.** Task lifecycle (pending → running → blocked → … → completed), `arq` worker that picks up runnable tasks, `task_events` log, channel notifications on `awaiting_user` / `completed`. `/tasks`, `/task <id>`, `/cancel <id>` commands.
+16. **Sub-agent delegation.** Planner can mark parallel branches; executor spawns sub-tasks via `parent_task_id`. Budget allocation, depth/concurrency limits, synthesis step.
+17. **Soul integration.** `soul.md` into every system prompt; `soul_version` on threads.
+18. **Telegram channel.** `@WolfpawBot`, webhook, `channel_links`, deep-link onboarding. All slash commands work here. `002_channels.sql`.
+19. **Web app.** React + Vite. Onboard, chat, task list, artifact browser, usage dashboard, channel settings.
+20. **CloudWatch dashboards + Logs Insights queries.** Committed in `infra/dashboards/`.
+21. **Infra: Terraform.** EC2 + RDS + ElastiCache + SES + Secrets + IAM + Caddy + systemd. E2B account/keys.
+22. **OSS packaging (v1.5 entry).** Docker Compose (incl. Docker-based sandbox runtime for self-host), install script, README, env-template.
+23. **Email forwarding (v1.5).** SES inbound, Lambda dispatcher, `email_aliases`, verified owners, drafts-out constraint.
+24. **Billing + tier enforcement (when ready to monetize).** Stripe Checkout + customer portal + webhook → `subscriptions`. Flip enforcer from no-op to real cap checks. Cost notifications at 50/80/100%. `003_billing.sql`.
+25. **Slack (v2).** OAuth workspace install, app manifest, slash command + DMs.
 
-The reordering is deliberate: metering and `/usage` come up in steps 4–6, *before* any agent makes a model call. From the very first model invocation in step 8, every token is recorded and `/usage` works. Billing and tier enforcement (step 20) become "flip a switch" rather than "instrument the codebase" since the instrumentation is already there.
+The reordering keeps metering + `/usage` ahead of any model call and adds sandbox + artifact tools (steps 8–9) before any agent uses them, so from step 10 forward every model call is metered AND every code execution is metered AND every artifact is tracked. Tasks (15) and sub-agents (16) sit between the agent loop and the channels — once they exist, Wolfpaw can take on multi-day work.

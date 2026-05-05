@@ -1,7 +1,7 @@
 # Wolfpaw
 ### Tread lightly.
 
-Wolfpaw is an agentic personal assistant — an intelligent employee who can follow instructions, learn, and create on your behalf. You decide what Wolfpaw can see and how you want to talk to it: web, Telegram, email forwarding, voice (later), Slack (later). You control your data; Wolfpaw earns its keep through quiet, careful, useful work.
+Wolfpaw is an agentic worker — an intelligent employee who can follow instructions, learn, and *get real work done* on your behalf. Not just an assistant that answers questions in chat: Wolfpaw runs code, takes on multi-day tasks, produces real deliverables (spreadsheets, PDFs, slide decks), and works in the background while you're doing other things. You decide what it can see and how you want to talk to it: web, Telegram, email forwarding, voice (later), Slack (later). You control your data; Wolfpaw earns its keep through quiet, careful, useful work.
 
 Wolfpaw learns from resources you give it (links, uploaded documents, forwarded emails) and from the work you ask it to do. Over time it gets better at *your* tasks: tracking bills and receipts, summarizing newsletters and research, drafting replies for you to send, watching the data you care about (markets, fitness, news, calendar), reminding you of things, doing your bookkeeping or marketing or inventory if you give it the inputs. Whatever you want a careful assistant for.
 
@@ -15,6 +15,9 @@ This is the WordPress.org / WordPress.com model: one project, two distributions.
 
 ## What makes Wolfpaw different
 
+- **Actually does work.** Wolfpaw runs Python in a sandbox, processes files, hits APIs, produces real deliverables (Excel, PDF, charts, slides). Not a chatbot — a worker.
+- **Long-running tasks.** Hand Wolfpaw a multi-step job ("research my upcoming vendors and put together a comparison spreadsheet"); it works in the background, pings you when blocked or done, picks up where it left off across days.
+- **Sub-agents in parallel.** Big jobs get split into parallel branches with their own budget and their own work. The synthesis comes back as one result.
 - **No setup tax.** Most agent projects ask the user to manage API keys, configure model providers, and stand up infrastructure. Wolfpaw Cloud removes all of that. Click subscribe → talk to your agent.
 - **Multiple ways to talk to it.** Web chat for the rich UI, Telegram for everyday pings from your phone, email forwarding for "here, deal with this" handoffs. Each channel is built for the way it's actually used.
 - **Predictable cost.** Flat-rate plans with a clear allowance. When you hit the cap, the service pauses — it never silently runs up a bill. Overage is opt-in.
@@ -99,6 +102,18 @@ These are areas where OpenClaw's local-first architecture gives it abilities Wol
 | Persona / soul file that shapes agent behavior | ❓ | 🚧 v1 |
 | Memory inspectable & deletable by user | ❓ | 🚧 v1 |
 
+### Real work (the agentic-worker dimension)
+
+| Feature | OpenClaw | Wolfpaw |
+|---|:---:|:---:|
+| Code execution sandbox (run arbitrary Python) | ✅ via local shell | 🚧 v1 (sandboxed Python via E2B / Docker) |
+| Long-running tasks (work that spans days) | ❓ via heartbeats | 🚧 v1 (first-class `Task` objects, status, resume) |
+| Sub-agent delegation (parallel work streams) | ❓ | 🚧 v1 |
+| Real deliverables (.xlsx, .pdf, .pptx, charts) | ❓ | 🚧 v1 |
+| Background work / scheduled tasks ("heartbeats") | ✅ | 🚧 v2 |
+| Per-task budgets independent of period allowance | ❌ | 🚧 v1 |
+| Compute-time metering separate from token metering | ❌ | 🚧 v1 |
+
 ### Cost & billing
 
 This is where Wolfpaw is most clearly ahead — by design, since the hosted product can only work if cost is transparent and bounded.
@@ -160,11 +175,11 @@ A few takeaways an honest reader should walk away with:
 A user message — typed in the web app, sent to the Telegram bot, or forwarded by email — flows through a structured loop:
 
 1. **Triage.** A small fast model figures out what the user actually wants and how big a job it is.
-2. **Plan** (when the job is non-trivial). A larger model breaks the goal into steps, consults procedural memory for similar past plans, and assembles a plan using the available tools.
-3. **Execute.** Each step runs — some are pure tool calls (search, calculator, SQL, file read), some are reasoning steps that use a model.
+2. **Plan** (when the job is non-trivial). A larger model breaks the goal into steps, consults procedural memory for similar past plans, and assembles a plan. If the work is multi-step or produces deliverables, Wolfpaw creates a **Task** — a persistent unit of work that can run for hours or days, pause when blocked, and resume later.
+3. **Execute.** Each step runs — pure tool calls (search, SQL, file read), reasoning steps that use a model, or **code execution** in a sandboxed Python environment. Big plans branch into parallel **sub-agents** with their own budgets, then synthesize their outputs.
 4. **Evaluate.** The plan's outcome is scored and stored, so the next similar request can build on it.
 
-Memory is built in at multiple layers: conversational (per-thread chat), procedural (past plans + scores), and a soul file that defines Wolfpaw's persona. A static toolbox handles the common operations; later versions will let Wolfpaw create its own tools.
+Memory is built in at multiple layers: conversational (per-thread chat), procedural (past plans + scores), and a soul file that defines Wolfpaw's persona. Tasks persist across sessions; artifacts (spreadsheets, PDFs, slides, charts) are saved to your workspace folder.
 
 For technical detail, schema, deployment, and build order, see [implementation_plan.md](implementation_plan.md).
 
