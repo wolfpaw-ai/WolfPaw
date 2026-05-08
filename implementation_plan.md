@@ -40,6 +40,7 @@ Living document. Updated as decisions are made.
 17. **Tasks as first-class objects:** Persistent units of work distinct from chat threads or single plans. Have status (pending/running/blocked/awaiting_user/completed/failed/cancelled), survive across days, can be paused/resumed, ping the user via their preferred channel when blocked or done. A thread can spawn many tasks; a task can have many plans over its life.
 18. **Artifact production tools:** Wolfpaw produces real deliverables — `.xlsx`, `.pdf`, `.pptx`, charts as `.png`/`.svg`. Stored in user's workspace folder (Drive/Dropbox via OAuth, or Wolfpaw S3 prefix).
 19. **Sub-agent delegation:** Planner can mark plan branches as parallelizable; executor spawns sub-tasks with allocated budget from the parent. Hard limits on depth (3 levels) and concurrency (5 sub-agents) per task.
+20. **Framework choice:** Build the agent loop, planner, executor, all memory subsystems, prompt versioning, channel abstraction, and tool registry from scratch on the Anthropic SDK. No LangChain, no LangGraph in v1. Adopt **LangSmith** for LLM-specific observability (per-call tracing, replay, eval datasets). CloudWatch + structured logs continue to own ops-tier observability. Rationale, alternatives, and the named fallback (LangGraph for task checkpointing if persistence work blocks the timeline) in [docs/decisions/framework-choice.md](docs/decisions/framework-choice.md) and [docs/decisions/observability.md](docs/decisions/observability.md).
 
 ## Architecture commitments
 
@@ -57,7 +58,8 @@ Living document. Updated as decisions are made.
 - **Telegram:** webhook on `/channels/telegram/webhook`, dispatches into the same chat pipeline as web.
 - **Email:** SES inbound → S3 → SES event Lambda → `POST /channels/email/inbound` (with shared secret) → chat pipeline.
 - **Stripe:** webhook on `/billing/webhook`.
-- **Logging:** structured JSON to stdout → CloudWatch Logs. `trace_id` threaded everywhere.
+- **Logging (ops):** structured JSON to stdout → CloudWatch Logs. `trace_id` threaded everywhere.
+- **LLM observability:** LangSmith for per-call tracing, replay, eval datasets. Gated on `LANGSMITH_ENABLED`. See [docs/decisions/observability.md](docs/decisions/observability.md).
 - **Secrets:** AWS Secrets Manager (hosted) / `.env` (self-host).
 
 ## Repo layout (in `wolfpaw/` for now)
@@ -70,6 +72,10 @@ wolfpaw/
   spec.md
   implementation_plan.md
   soul.md
+  docs/
+    decisions/
+      framework-choice.md
+      observability.md
   alake_memory_manager.py            # reference (course material)
   alake_toolbox.py                   # reference (course material)
   migrations/
@@ -125,6 +131,8 @@ wolfpaw/
       recorder.py                    # writes token_usage rows
       enforcer.py                    # checks cap before model calls
       summarizer.py                  # rolls token_usage → usage_summaries
+      prompt_versions.py             # prompt_versions accessor + bump helper
+      langsmith_client.py            # LangSmith trace forwarding (gated on LANGSMITH_ENABLED)
     workers/
       arq_app.py                     # arq worker entrypoint
       jobs/                          # scheduled tasks, notifications
@@ -174,10 +182,11 @@ wolfpaw/
 
 ### Metering
 
-- `token_usage(id, user_id, task_id nullable, trace_id, request_id, agent enum, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_cents int, created_at)` — partitioned by `created_at` month
+- `token_usage(id, user_id, task_id nullable, trace_id, request_id, agent enum, model, prompt_version_id FK, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_cents int, created_at)` — partitioned by `created_at` month
 - `compute_usage(id, user_id, task_id, sandbox_id, compute_seconds, memory_gb_seconds, cost_cents int, created_at)` — sandbox time, separate dimension from tokens
 - `usage_summaries(user_id, period_start, period_end, total_cost_cents, by_agent jsonb, by_model jsonb, compute_cost_cents)` — rolled up nightly
 - `cost_notifications(user_id, period_start, threshold_pct, sent_at)` — dedup
+- `prompt_versions(id, agent enum, version_label, content_hash, content_template jsonb, created_at)` — versioned agent prompts; every `token_usage` row references the version active at call time. See [docs/decisions/observability.md](docs/decisions/observability.md).
 
 ## Tools (v1)
 
@@ -338,17 +347,26 @@ Commands are dispatched in `channels/commands.py`, shared across all channel ada
 
 ## Token metering
 
-Metering is in the hot path. Every model call goes through a wrapper:
+Metering is in the hot path. Every model call goes through a wrapper that records to all three observability layers:
 
 ```python
-async def call_model(user_id, agent, model, messages, ...) -> ModelResponse:
+async def call_model(user_id, agent, model, messages, prompt_version_id, ...) -> ModelResponse:
     enforcer.check_can_spend(user_id)            # raises if at cap
-    response = await anthropic.messages.create(...)
+    async with langsmith_client.trace(            # gated on LANGSMITH_ENABLED
+        agent=agent, model=model, trace_id=trace_id,
+        prompt_version_id=prompt_version_id, user_id=user_id, task_id=task_id,
+    ):
+        response = await anthropic.messages.create(...)
     cost_cents = pricing.compute(model, response.usage)
-    await recorder.write(user_id, agent, model, response.usage, cost_cents, trace_id)
+    await recorder.write(
+        user_id, agent, model, prompt_version_id,
+        response.usage, cost_cents, trace_id,
+    )
     cost_notifications.maybe_send(user_id, cost_cents)
     return response
 ```
+
+`prompt_version_id` is resolved by the caller from the active prompt template for that agent (see `metering/prompt_versions.py`). Recording it on every `token_usage` row is what lets procedural memory scope plan retrieval to "produced under prompt version X or later" — important once any agent's prompt has materially changed.
 
 **Enforcer** checks `usage_summaries` for the current period. If `total_cost_cents >= allowance_cents` and overage not authorized → raise `OverCap`. Caller surfaces a "you've hit your cap" message and a link.
 
@@ -418,11 +436,23 @@ Until tiers are decided, every authenticated user runs as `tier = "dev"` with me
 
 ## Observability
 
-End-to-end traceability is a v1 requirement.
+End-to-end traceability is a v1 requirement. Three layers, each scoped to a different question:
+
+| Layer | Tool | Question it answers |
+|---|---|---|
+| Operational metrics + logs | CloudWatch (structured JSON) | "Is the system healthy? Where's the latency? Are users hitting their cap?" |
+| LLM-call detail | LangSmith | "What did the planner generate on request X? Replay it. Diff prompts. Score against a dataset." |
+| Prompt versioning | Custom (`prompt_versions` table) | "Which prompt template produced this output? Did v8 outperform v7 across the procedural-memory dataset?" |
+
+`trace_id` is the through-line. It's emitted on every structured log line, attached to every LangSmith trace, and recorded on every `token_usage` row alongside `prompt_version_id`. Pulling a `trace_id` out of a CloudWatch log lands you on the matching LangSmith trace and the relevant `token_usage` rows.
+
+Full design rationale and rejected alternatives in [docs/decisions/observability.md](docs/decisions/observability.md).
+
+### Operational layer (CloudWatch)
 
 **Logging shape**
 - Structured JSON to stdout (one event per line). systemd → CloudWatch via the CloudWatch agent.
-- Every line includes: `trace_id`, `user_id`, `thread_id`, `agent`, `step_id`, `event`, `model`, `input_tokens`, `output_tokens`, `latency_ms`, `extra` (jsonb).
+- Every line includes: `trace_id`, `user_id`, `thread_id`, `agent`, `step_id`, `event`, `model`, `prompt_version_id`, `input_tokens`, `output_tokens`, `latency_ms`, `extra` (jsonb).
 - Events: `request.start`, `agent.start`, `agent.end`, `tool.call`, `tool.result`, `step.start`, `step.end`, `model.call`, `cap.exceeded`, `notification.sent`, `request.end`, `error`.
 
 **Metrics**
@@ -431,8 +461,23 @@ End-to-end traceability is a v1 requirement.
 **Dashboards**
 - CloudWatch Dashboard JSON in `infra/dashboards/wolfpaw.json` — single pane: request rate, latency, token spend, plan-success rate, cap-pause rate, errors. Public/shared URL for the "online dashboard."
 
-**Why structured logs, not OpenTelemetry, for v1**
-OTel is the long-term-correct answer but adds setup complexity. v1 is a single FastAPI process — `trace_id` in JSON logs gives us the same query power for ~10% of the cost. Reconsider OTel if Logs Insights becomes limiting.
+### LLM-call layer (LangSmith)
+
+- Every model call is wrapped in a LangSmith trace alongside the token-recorder write. Implementation in `metering/langsmith_client.py`.
+- Trace tags: `trace_id`, `user_id`, `agent`, `model`, `prompt_version_id`, `task_id` (when applicable).
+- LangSmith handles: per-call replay, prompt-version diffs, eval-dataset runs against historical prompts, dashboards for plan-success rate by prompt version.
+- Gated by `LANGSMITH_ENABLED` config flag — defaults on in dev/private-beta, evaluated before public launch (third-party data handler; privacy disclosure required).
+
+### Prompt-versioning layer (custom)
+
+- `prompt_versions` table holds every version of every agent's prompt template, with `content_hash` for change detection.
+- Bumping a prompt is intentional: edit the template, bump the version label, run an idempotent loader to insert the new row, deploy.
+- Every `token_usage` row carries the active `prompt_version_id` so we can ask "what did planner v8 do that v7 didn't" in raw SQL or as a LangSmith eval dataset.
+- Procedural memory respects this: plan retrieval can scope to plans produced by a given prompt version range, so we don't recommend old plans that ran under a meaningfully different planner.
+
+### Why not OpenTelemetry for v1
+
+OTel is the long-term-correct answer for cross-service tracing. v1 is a single FastAPI process — `trace_id` in structured JSON logs plus LangSmith for LLM-specific traces gives us the same query power at ~10% of the setup cost. Reconsider OTel when the system grows beyond one runtime.
 
 ## Deferred to v2+
 
@@ -477,7 +522,7 @@ OTel is the long-term-correct answer but adds setup complexity. v1 is a single F
 1. **Foundation.** `pyproject.toml`, FastAPI skeleton, `config.py`, `tracing.py`, health endpoint.
 2. **Database.** `001_init.sql` (users, threads, messages, plans, tools, user_data schema, tasks, task_events, artifacts, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
 3. **Auth.** Magic link via SES. `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"`.
-4. **Metering harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`. Token-recording `call_model()` wrapper. Enforcer no-op stub.
+4. **Metering + observability harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`, `metering/prompt_versions.py`, `metering/langsmith_client.py`. Token-recording `call_model()` wrapper writes a `token_usage` row (with `prompt_version_id`), forwards a trace to LangSmith (gated on `LANGSMITH_ENABLED`), and emits a structured log line with `trace_id`. Enforcer no-op stub. The `prompt_versions` table is seeded as each agent comes online in steps 10+.
 5. **Channel skeleton + slash commands.** `Channel` ABC, web channel with SSE, command dispatcher with `/help`.
 6. **`/usage` command.** Against `token_usage` + `compute_usage` + `model_prices`. Returns empty/zero state cleanly.
 7. **Information & data tools.** `web_search`, `http_get`, `calculator`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
