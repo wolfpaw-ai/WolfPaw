@@ -41,6 +41,7 @@ Living document. Updated as decisions are made.
 18. **Artifact production tools:** Wolfpaw produces real deliverables — `.xlsx`, `.pdf`, `.pptx`, charts as `.png`/`.svg`. Stored in user's workspace folder (Drive/Dropbox via OAuth, or Wolfpaw S3 prefix).
 19. **Sub-agent delegation:** Planner can mark plan branches as parallelizable; executor spawns sub-tasks with allocated budget from the parent. Hard limits on depth (3 levels) and concurrency (5 sub-agents) per task.
 20. **Framework choice:** Build the agent loop, planner, executor, all memory subsystems, prompt versioning, channel abstraction, and tool registry from scratch on the Anthropic SDK. No LangChain, no LangGraph in v1. Adopt **LangSmith** for LLM-specific observability (per-call tracing, replay, eval datasets). CloudWatch + structured logs continue to own ops-tier observability. Rationale, alternatives, and the named fallback (LangGraph for task checkpointing if persistence work blocks the timeline) in [docs/decisions/framework-choice.md](docs/decisions/framework-choice.md) and [docs/decisions/observability.md](docs/decisions/observability.md).
+21. **Two persona inputs.** Every agent prompt is conditioned on both the **Soul File** (agent persona, shared across all users) and a per-user **User File** (the user's persona, preferences, working style, recurring constraints). Soul is global config; User File is a per-`user_id` record. Both are versioned and stamped on `threads` so procedural-memory retrieval can scope to "same persona × same user profile version."
 
 ## Architecture commitments
 
@@ -72,7 +73,9 @@ wolfpaw/
   spec.md
   implementation_plan.md
   soul.md
+  WolfPaw_00.pdf                     # canonical architecture diagram
   docs/
+    uml_class_diagram.md             # anticipated class structure (Mermaid)
     decisions/
       framework-choice.md
       observability.md
@@ -95,26 +98,36 @@ wolfpaw/
       middleware.py                  # request → user resolution
     schemas.py                       # Plan, Step, TriageResult, etc.
     soul.py                          # loads soul.md
+    user_profile.py                  # loads/saves per-user User File
     agents/
       triage.py
       quick.py
       planner.py
       executor.py
       post_evaluator.py
+      pre_evaluator.py               # v2 — plan pre-check (incl. "is it better than past plans?")
     memory/
       db.py                          # asyncpg pool
       conversational.py
-      procedural.py
+      procedural.py                  # recipe-box: description + ingredients + steps + score
+      skills.py                      # v2 — skills emitted by post-evaluator
     toolbox/
       registry.py
       tools/
         web_search.py                # Tavily
         http_get.py
         calculator.py
-        read_doc.py
-        write_doc.py
+        read_doc.py                  # reads through Storage
+        write_doc.py                 # writes through Storage; collision → awaiting_user
         sql_query.py
         create_table.py
+    storage/
+      base.py                        # Storage ABC
+      s3.py                          # hosted
+      local.py                       # self-host default; also MinIO target
+      drive.py                       # v2 OAuth target
+      dropbox.py                     # v2 OAuth target
+      signing.py                     # pre-signed URL issuance + server-side prefix scoping
     channels/
       __init__.py                    # Channel ABC
       web.py                         # /chat SSE endpoint
@@ -153,6 +166,7 @@ wolfpaw/
 ### Identity & billing
 
 - `users(id, email, email_verified, display_name, created_at)`
+- `user_profiles(user_id, version, persona_md, preferences jsonb, timezone, updated_at)` — the "User File" from the diagram. `persona_md` is free-form Markdown the user (or Wolfpaw, with permission) edits; `preferences` is structured (preferred channel, quiet hours, formality, units, comm style, recurring constraints). Loaded into every agent's system prompt for that user. Versioned so we can stamp `threads.user_profile_version` and scope procedural-memory retrieval.
 - `user_auth_methods(user_id, method enum, identifier, secret_hash, ...)` — magic link, Google OAuth, etc.
 - `api_keys(id, user_id, prefix, hash, name, last_used_at, created_at)`
 - `subscriptions(user_id, stripe_customer_id, stripe_subscription_id, tier enum, status, current_period_start, current_period_end, allowance_cents, overage_authorized bool, overage_cap_cents nullable)`
@@ -161,17 +175,18 @@ wolfpaw/
 
 ### Memory
 
-- `threads(id, user_id, channel enum, created_at, soul_version)`
+- `threads(id, user_id, channel enum, created_at, soul_version, user_profile_version)`
 - `messages(id, thread_id, role, content, metadata jsonb, created_at)`
-- `plans(id, user_id, thread_id, task_id nullable, query, query_embedding vector(1024), steps jsonb, final_answer, success bool, score int, error text, trace_id, created_at)` — IVFFlat index on `query_embedding`
+- `plans(id, user_id, thread_id, task_id nullable, query, query_embedding vector(1024), steps jsonb, final_answer, success bool, score int, error text, trace_id, created_at)` — IVFFlat index on `query_embedding`. The "recipe-box" entries: every row carries a `description` (what the user wanted), `ingredients` (tools used + inputs), and `steps` (the executed plan), all derivable from `query` + `steps`. Stored here regardless of success; retrieval filters by `score`.
+- `skills(id, user_id, name, description, ingredients jsonb, steps jsonb, source_plan_id FK, score, created_at)` — **v2.** Auto-emitted by the Post-Evaluator when a plan scores highly and looks reusable. A skill is a generalized procedure ("how to draft a vendor-comparison spreadsheet") that the planner can pull instead of re-deriving from raw plans.
 - `tools(name, description, signature jsonb, embedding vector(1024))`
 - `user_data` schema — sandboxed namespace where `create_table` / `sql_query` / `write_doc`-via-DB operate. Per-user schema (`user_data_42.*`) for clean isolation.
 
-### Tasks & artifacts
+### Tasks & workspace
 
 - `tasks(id, user_id, parent_task_id nullable, title, description, status enum, current_plan_id, budget_cents nullable, spent_cents, blocking_reason text nullable, channel_for_completion enum, schedule_pattern text nullable, created_at, started_at, completed_at, last_active_at)` — `status` ∈ {`pending`, `running`, `blocked`, `awaiting_user`, `completed`, `failed`, `cancelled`}
 - `task_events(id, task_id, event_type, content jsonb, created_at)` — append-only log of state transitions, agent updates, user inputs
-- `artifacts(id, task_id, user_id, filename, mime_type, storage_url, size_bytes, created_at)` — produced files (xlsx, pdf, pptx, png, etc.)
+- `workspace_files(id, user_id, task_id nullable, source enum, filename, mime_type, storage_url, size_bytes, version int, supersedes_id FK nullable, sha256, created_at)` — every file in the user's workspace. `source` ∈ {`user_upload`, `agent_output`}; `task_id` is set for `agent_output` rows. `version` + `supersedes_id` track overwrite history (the "overwrite with confirmation" flow appends a new row pointing back to the prior version rather than mutating). Replaces what was previously called `artifacts`.
 - `sandboxes(id, task_id, provider, external_id, status, started_at, terminated_at, compute_seconds, cost_cents)` — one sandbox per active task, torn down on task pause/complete
 
 ### Channels
@@ -220,7 +235,7 @@ wolfpaw/
 | `create_chart` | Chart from data → `.png`/`.svg` | `matplotlib` (in sandbox) |
 | `create_slides` | `.pptx` decks | `python-pptx` (in sandbox) |
 
-Artifacts land in the user's workspace folder and are recorded in the `artifacts` table linked to the originating task.
+Artifacts land in the user's workspace folder and are recorded as `workspace_files` rows with `source = 'agent_output'` and `task_id` set to the originating task.
 
 `write_doc` and `create_table` give Wolfpaw durable structured storage. Per-user schema/workspace keeps tenants isolated.
 
@@ -253,6 +268,42 @@ A sandboxed Python environment is the difference between a chatbot and a worker.
 - Compute-seconds tracked in `compute_usage`, costed per second.
 - Shows up in `/usage` as a separate line from tokens.
 - Counted against user's allowance like inference is.
+
+## Workspace (per-user files)
+
+Wolfpaw needs a place where the user can drop files for the agent to read, and where the agent's deliverables land for the user to download. Every user gets a durable, isolated workspace — the same workspace whether they arrive via web, Telegram, or email.
+
+**Storage layout**
+- Per-user prefix in a single bucket: `s3://wolfpaw-workspace/<user_id>/...`. The prefix *is* the multi-tenant boundary — same shape as every other table.
+- **Flat namespace in v1.** No nested folders in the UI. The S3 key is still hierarchical underneath, so introducing folders in v2 is a frontend change, not a data migration.
+- One row per file in `workspace_files` (see schema). User uploads and agent outputs sit in the same listing.
+
+**`Storage` interface**
+- Abstract base in `src/wolfpaw/storage/base.py`. Adapters: `s3.py` (hosted), `local.py` (self-host default), `drive.py` / `dropbox.py` (v2 OAuth integrations).
+- Self-host runs against `local.py` out of the box; users who want S3 semantics on their own infra can point the adapter at MinIO via the same code path. No bytes are ever stored in Postgres.
+- Drive / Dropbox (v2) become *additional* storage targets the user can pick per file or per task — not a replacement for the Wolfpaw workspace.
+
+**Frontend ↔ API**
+- Uploads and downloads use **short-lived pre-signed URLs** issued by the API. Bytes never transit EC2.
+- `POST /workspace/upload-url` → API validates the filename, issues a URL scoped to `s3://wolfpaw-workspace/<user_id>/<filename>` with a 5-minute TTL and a max-size header. Client PUTs directly to S3. On client success, `POST /workspace/files` registers the `workspace_files` row.
+- `GET /workspace/files` lists the user's files (read from Postgres, not S3). `GET /workspace/files/<id>/download-url` issues a signed download URL with a 5-minute TTL.
+- The signing endpoint validates the requested key starts with `<authenticated_user_id>/` server-side; the bucket policy denies cross-prefix access defense-in-depth.
+
+**Sandbox interaction**
+- Sandboxes do **not** talk to S3 directly. When a tool needs a file, the executor pre-stages it into the sandbox FS at a known path (e.g. `/workspace/<filename>`); when a tool writes a file, the executor uploads the result back into the user's prefix on tool completion. This keeps the sandbox's network policy locked down (the credential proxy already restricts egress) and gives a clear audit trail of which task touched which file.
+- The agent never sees raw S3 URLs or signed URLs in its tool I/O — only logical filenames in `workspace_files`. Keeps prompts insensitive to storage backend and avoids leaking signing tokens into model context.
+
+**Conflict resolution: overwrite with confirmation**
+- When an agent tool would write to a filename that already exists in `workspace_files`, the executor pauses the task with `status = awaiting_user` and emits a `task_events` row of type `overwrite_request` containing the existing `workspace_files.id`, the incoming bytes' SHA-256, and a diff summary if it's a text-like file.
+- The user gets pinged on their preferred channel with a yes / no / rename prompt (handled by the standard `awaiting_user` notification path; no new channel surface). On approval, the new row is inserted with `version = prior + 1` and `supersedes_id = prior.id`; the prior row stays for history. On rename, the user supplies a new filename. On no, the agent step records the decision and continues without writing.
+- Fits the existing "ask before destructive actions" posture in the soul file. Uses task lifecycle that's already being built — no new state machine.
+
+**Quotas + retention**
+- Per-user storage quota enforced at upload time against `sum(size_bytes) WHERE user_id = ?`. Default quota lives in `tier_limits` (column added when tiers are set; placeholder for `dev` tier is generous).
+- No automatic deletion of agent outputs in v1 — the user owns their files. Lifecycle policies (e.g. expire superseded versions after 90 days) are a v2 concern once we see real usage shapes.
+- S3 bucket has versioning enabled at the AWS level as a belt-and-braces measure against the application layer; cost is negligible at expected file volumes.
+
+**Build placement.** Workspace ships in the same step as the read/write tools — it's the substrate they need. The `Storage` ABC + S3 adapter + signing endpoints + `workspace_files` table land at **build step 7** alongside `read_doc` / `write_doc`. Sandbox pre-staging integrates at step 8.
 
 ## Tasks (long-running work)
 
@@ -430,9 +481,14 @@ What is locked in:
 
 Until tiers are decided, every authenticated user runs as `tier = "dev"` with metering on but no enforcement — same shape as self-host. Lets us build the app and accumulate real usage telemetry before pricing.
 
-## Soul file integration
+## Soul file & User file integration
 
-`soul.md` is loaded once at startup and prepended to every agent's system prompt. Versioned via the `soul_version` column on `threads` so we know which persona was active when a thread started — important for procedural memory: a plan that worked under one persona may not under a different one.
+Every agent prompt is conditioned on **two** persona blocks:
+
+- **Soul File (`soul.md`).** Agent persona — global, shared across all users, loaded once at startup. Versioned via `threads.soul_version` so we know which Wolfpaw was talking when a thread started. A plan that worked under one Wolfpaw persona may not under a different one.
+- **User File (`user_profiles` row).** Per-user persona/preferences — name, timezone, preferred channel, formality, units, quiet hours, recurring constraints, free-form Markdown the user maintains about themselves. Loaded per-request from `user_profiles` for the authenticated `user_id`, prepended to the agent prompt after Soul. Versioned via `threads.user_profile_version` so procedural-memory retrieval can scope to "same persona × same user profile version."
+
+The User File is editable by the user at any time (web UI text editor + structured preferences form) and may be appended-to by Wolfpaw with the user's permission ("I'll remember that you prefer kilometers"). The Triage Agent reads it on every turn to set tone and routing; downstream agents inherit it through the system prompt.
 
 ## Observability
 
@@ -482,9 +538,9 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
 ## Deferred to v2+
 
 - Tool Creator agent (auto-creates new tools beyond `create_table`)
-- Plan Pre-Evaluator
-- Skills store + community marketplace ("Pawhub"?)
-- Sleep Cycle cron (memory organization, summarization, plan re-scoring)
+- **Plan Pre-Evaluator.** Runs between planner and executor. Three checks: (1) will the plan achieve the objective? (2) can it be simplified? (3) **is it an improvement over what we found in procedural memory from past attempts?** On pass → executor; on fail → back to planner with the diagnosis as additional context. Deferred because v1 can ship without it — the planner consults procedural memory directly — but it tightens the loop once we have enough plan history to compare against.
+- **Skills store + community marketplace** ("Pawhub"?). Skills are emitted by the Post-Evaluator: when a plan scores highly and looks reusable, it generalizes the recipe (description + ingredients + steps) into a named `skill` the planner can later pull instead of re-deriving from raw plans. The `skills` table is migrated in v1 so we don't need a schema change later; the emit logic and the planner-side retrieval ship in v2, the share/import marketplace flow in v3.
+- Sleep Cycle cron (memory organization, summarization, plan re-scoring, skill consolidation across users in the marketplace era)
 - Entity / Summary / Knowledge-Base memory types
 - OAuth integrations (v2):
   - **Notion** — read pages user shares; create pages. ~3 days, fast review.
@@ -513,29 +569,28 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
 - **Domain.** `wolfpaw.ai` confirmed? Worth checking `wolfpaw.com` / `wolfpaw.app` availability — `.com` deliverability is materially better for outbound email.
 - **Postgres location for hosted.** RDS (managed, ~$15/mo for db.t4g.micro) vs co-located on the EC2 instance (cheaper, recoverable from snapshot). Lean RDS for hosted, co-located for self-host.
 - **Anthropic vs Bedrock.** Direct Anthropic API for v1 (simpler, cleaner usage data). Reconsider Bedrock if AWS Activate credits move it.
-- **Workspace dir for `read_doc`/`write_doc`.** Per-user S3 prefix (`s3://wolfpaw-workspace/<user_id>/...`) or local FS on EC2? S3 cleaner for hosted, local fine for self-host. Abstract behind a `Storage` interface.
 - **Web app stack.** React + Vite (matching dmitris-fabulous frontend), or something else? Lean React + Vite — known stack, fast.
 - **Mobile app.** Out of scope for v1, but consider whether the Telegram bot is *good enough* as a mobile experience for the first year. (Probably yes.)
 
 ## Build order
 
 1. **Foundation.** `pyproject.toml`, FastAPI skeleton, `config.py`, `tracing.py`, health endpoint.
-2. **Database.** `001_init.sql` (users, threads, messages, plans, tools, user_data schema, tasks, task_events, artifacts, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
+2. **Database.** `001_init.sql` (users, user_profiles, threads, messages, plans, skills, tools, user_data schema, tasks, task_events, workspace_files, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
 3. **Auth.** Magic link via SES. `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"`.
 4. **Metering + observability harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`, `metering/prompt_versions.py`, `metering/langsmith_client.py`. Token-recording `call_model()` wrapper writes a `token_usage` row (with `prompt_version_id`), forwards a trace to LangSmith (gated on `LANGSMITH_ENABLED`), and emits a structured log line with `trace_id`. Enforcer no-op stub. The `prompt_versions` table is seeded as each agent comes online in steps 10+.
 5. **Channel skeleton + slash commands.** `Channel` ABC, web channel with SSE, command dispatcher with `/help`.
 6. **`/usage` command.** Against `token_usage` + `compute_usage` + `model_prices`. Returns empty/zero state cleanly.
-7. **Information & data tools.** `web_search`, `http_get`, `calculator`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
-8. **Code execution sandbox.** `Sandbox` interface + E2B adapter (Docker adapter for self-host). `run_python`, `install_package`, `sandbox_read_file`, `sandbox_write_file`. `sandboxes` table tracks lifecycle. Compute metering wired through `compute_usage`.
-9. **Artifact production tools.** `create_spreadsheet`, `create_pdf`, `create_chart`, `create_slides` — all run inside the sandbox. Artifacts saved to user workspace, recorded in `artifacts` table.
+7. **Workspace + information & data tools.** `Storage` ABC + S3 adapter (local-FS adapter for self-host); `workspace_files` table; pre-signed upload/download endpoints with server-side prefix scoping; minimal frontend list view. Then the tools: `web_search`, `http_get`, `calculator`, `sql_query`, `create_table`, `read_doc`, `write_doc` (the doc tools read/write through `Storage`, never raw paths).
+8. **Code execution sandbox.** `Sandbox` interface + E2B adapter (Docker adapter for self-host). `run_python`, `install_package`, `sandbox_read_file`, `sandbox_write_file`. Executor pre-stages workspace files into the sandbox FS on tool invocation and uploads outputs back to S3 on completion (sandbox never talks to S3 directly). `sandboxes` table tracks lifecycle. Compute metering wired through `compute_usage`.
+9. **Artifact production tools.** `create_spreadsheet`, `create_pdf`, `create_chart`, `create_slides` — all run inside the sandbox. Outputs land in the user's workspace via the pre-staging path from step 8 and are registered in `workspace_files` with `source = 'agent_output'`. Overwrite-with-confirmation flow wired: collisions pause the task with `awaiting_user`.
 10. **Quick Agent.** Haiku + non-sandbox tools. First step where `/usage` shows real numbers.
 11. **Triage.** Routes between Quick, Plan, and Task creation.
-12. **Planner.** Procedural memory retrieval + plan generation. Decides if request needs a Task (long-running) or just a single plan.
-13. **Executor.** Functional / reasoning / evaluation step types. SSE event stream. Handles sandbox-tool calls.
-14. **Post-Evaluator.** Scoring + plan persistence.
+12. **Planner.** Procedural-memory retrieval is the planner's first step (the diagram's "Check Procedural memory to see if a similar challenge has been attempted before"). If a high-scoring past plan matches the query embedding, the planner adapts it; otherwise it generates fresh. Decides if request needs a Task (long-running) or just a single plan.
+13. **Executor.** Functional / reasoning / evaluation step types. SSE event stream. Handles sandbox-tool calls. Renders the planner's plan into the running **Execution Plan** with per-step status.
+14. **Post-Evaluator.** Scoring + plan persistence into procedural memory (recipe-box rows). Emits `task_events` for the score and any error diagnosis.
 15. **Tasks: persistent layer.** Task lifecycle (pending → running → blocked → … → completed), `arq` worker that picks up runnable tasks, `task_events` log, channel notifications on `awaiting_user` / `completed`. `/tasks`, `/task <id>`, `/cancel <id>` commands.
 16. **Sub-agent delegation.** Planner can mark parallel branches; executor spawns sub-tasks via `parent_task_id`. Budget allocation, depth/concurrency limits, synthesis step.
-17. **Soul integration.** `soul.md` into every system prompt; `soul_version` on threads.
+17. **Soul + User File integration.** `soul.md` and per-user `user_profiles` row into every system prompt; `soul_version` and `user_profile_version` on threads. Web UI for the user to view/edit their profile; Markdown body + structured preferences form. Triage Agent uses it for tone and routing.
 18. **Telegram channel.** `@WolfpawBot`, webhook, `channel_links`, deep-link onboarding. All slash commands work here. `002_channels.sql`.
 19. **Web app.** React + Vite. Onboard, chat, task list, artifact browser, usage dashboard, channel settings.
 20. **CloudWatch dashboards + Logs Insights queries.** Committed in `infra/dashboards/`.
