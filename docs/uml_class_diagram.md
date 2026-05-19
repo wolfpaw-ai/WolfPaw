@@ -114,9 +114,11 @@ classDiagram
         +UUID id
         +str description
         +StepStatus status
+        +int parallel_group
         +Any result
         +run(ExecutionContext) StepResult
     }
+    note for Step "parallel_group: steps in the\nsame plan sharing this group ID\nrun concurrently. Null = sequential.\nIntra-plan parallelism, distinct from\nsub-agent (inter-task) delegation."
 
     class FunctionalStep {
         +Tool tool
@@ -288,9 +290,21 @@ classDiagram
     class ConversationalMemory {
         +UUID thread_id
         +fetch_recent(n) List~Message~
+        +fetch_summaries() List~ThreadSummary~
+        +search_relevant(query_embedding, k) List~Message~
         +append(Message)
-        +summarize_for_context() str
     }
+    note for ConversationalMemory "Three tiers, per-thread in v1:\nverbatim recent window,\ntiered summaries (L1, L2),\nvector recall over all msgs.\nVector lookup runs at Planner only."
+
+    class ThreadSummary {
+        +UUID id
+        +UUID thread_id
+        +int level
+        +str summary_md
+        +UUID range_start_message_id
+        +UUID range_end_message_id
+    }
+    ConversationalMemory o-- ThreadSummary
 
     class ProceduralMemory {
         +search_similar(query_embedding, k) List~Plan~
@@ -303,7 +317,7 @@ classDiagram
         +store(Skill)
         +search_by_task(query_embedding, k) List~Skill~
     }
-    note for SkillsMemory "v2 — emitted by PostEvaluator"
+    note for SkillsMemory "v1: retrieval + seeded starter set\n(user_id = NULL rows).\nv2: auto-emission by PostEvaluator."
 
     class Skill {
         +UUID id
@@ -345,6 +359,7 @@ classDiagram
     class CreatePdfTool
     class CreateChartTool
     class CreateSlidesTool
+    class AskUserTool
     Tool <|-- WebSearchTool
     Tool <|-- HttpGetTool
     Tool <|-- CalculatorTool
@@ -358,6 +373,8 @@ classDiagram
     Tool <|-- CreatePdfTool
     Tool <|-- CreateChartTool
     Tool <|-- CreateSlidesTool
+    Tool <|-- AskUserTool
+    note for AskUserTool "HITL: pauses task to awaiting_user,\ndispatches question via originating\nchannel, resumes on user reply."
 
     class Sandbox {
         <<abstract>>
@@ -571,10 +588,10 @@ Quick reference: every block in `WolfPaw_00.pdf` and its corresponding class(es)
 | Plan Pre-Evaluator | `PlanPreEvaluator`, `PreEvalVerdict` | v2 |
 | Agent Loop / Execution Plan *(renamed)* | `Executor`, `ExecutionPlan`, `ExecutionContext` | v1 |
 | Tool Creator Agent | `ToolCreatorAgent` | v2 |
-| Toolbox | `ToolRegistry`, `Tool` + subclasses | v1 |
-| Skills | `SkillsMemory`, `Skill` | v2 (table v1) |
+| Toolbox | `ToolRegistry`, `Tool` + subclasses (incl. `AskUserTool` for HITL) | v1 |
+| Skills | `SkillsMemory`, `Skill` | v1 retrieval + seeded set; v2 auto-emission |
 | Procedural memory *(recipe-box)* | `ProceduralMemory` | v1 |
-| Conversational Memory | `ConversationalMemory` | v1 |
+| Conversational Memory | `ConversationalMemory`, `ThreadSummary` (tiered: verbatim / L1 / L2 + vector recall) | v1 |
 | Plan Post-Evaluator / Error Handler | `PostEvaluator`, `PostEvalResult` | v1 |
 | Sleep Cycle | `SleepCycle` | v2 |
 | Response | rendered via `Channel.send()` | v1 |

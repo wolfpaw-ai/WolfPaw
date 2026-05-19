@@ -82,9 +82,10 @@ wolfpaw/
   alake_memory_manager.py            # reference (course material)
   alake_toolbox.py                   # reference (course material)
   migrations/
-    001_init.sql
+    001_init.sql                     # incl. message_embeddings, thread_summaries
     002_billing.sql
     003_channels.sql
+    004_seed_skills.sql              # v1 starter skill set (user_id = NULL rows)
   src/wolfpaw/
     config.py                        # env, model IDs, feature flags
     api.py                           # FastAPI app
@@ -108,9 +109,10 @@ wolfpaw/
       pre_evaluator.py               # v2 — plan pre-check (incl. "is it better than past plans?")
     memory/
       db.py                          # asyncpg pool
-      conversational.py
+      conversational.py              # fetch_recent / fetch_summaries / search_relevant; tiered compaction
       procedural.py                  # recipe-box: description + ingredients + steps + score
-      skills.py                      # v2 — skills emitted by post-evaluator
+      skills.py                      # v1 retrieval + seeded starter set; v2 auto-emission by post-evaluator
+      seed_skills.py                 # loads the v1 starter set on first boot
     toolbox/
       registry.py
       tools/
@@ -121,6 +123,7 @@ wolfpaw/
         write_doc.py                 # writes through Storage; collision → awaiting_user
         sql_query.py
         create_table.py
+        ask_user.py                  # HITL: pauses task, dispatches question via originating channel
     storage/
       base.py                        # Storage ABC
       s3.py                          # hosted
@@ -148,7 +151,8 @@ wolfpaw/
       langsmith_client.py            # LangSmith trace forwarding (gated on LANGSMITH_ENABLED)
     workers/
       arq_app.py                     # arq worker entrypoint
-      jobs/                          # scheduled tasks, notifications
+      jobs/                          # scheduled tasks, notifications, compact_thread
+        compact_thread.py            # rolls verbatim msgs → level-1 → level-2 summaries
   infra/
     terraform/                       # EC2, RDS, ElastiCache, SES, etc.
     dashboards/
@@ -177,7 +181,9 @@ wolfpaw/
 
 - `threads(id, user_id, channel enum, created_at, soul_version, user_profile_version)`
 - `messages(id, thread_id, role, content, metadata jsonb, created_at)`
-- `plans(id, user_id, thread_id, task_id nullable, query, query_embedding vector(1024), steps jsonb, final_answer, success bool, score int, error text, trace_id, created_at)` — IVFFlat index on `query_embedding`. The "recipe-box" entries: every row carries a `description` (what the user wanted), `ingredients` (tools used + inputs), and `steps` (the executed plan), all derivable from `query` + `steps`. Stored here regardless of success; retrieval filters by `score`.
+- `message_embeddings(message_id FK, embedding vector(1024))` — Voyage `voyage-3` embedding per message, written on append. IVFFlat index; lookups scoped per thread via `WHERE thread_id = ?` (cross-thread is a v2 opt-in).
+- `thread_summaries(id, thread_id, level int, summary_md, range_start_message_id FK, range_end_message_id FK, created_at)` — append-only tiered compression of older messages (see [Conversational memory](#conversational-memory)). `level = 1` = summary of verbatim messages; `level = 2` = summary of level-1 summaries.
+- `plans(id, user_id, thread_id, task_id nullable, query, query_embedding vector(1024), steps jsonb, final_answer, success bool, score int, error text, trace_id, created_at)` — IVFFlat index on `query_embedding`. The "recipe-box" entries: every row carries a `description` (what the user wanted), `ingredients` (tools used + inputs), and `steps` (the executed plan), all derivable from `query` + `steps`. Stored here regardless of success; retrieval filters by `score`. Each entry in `steps` carries an optional `parallel_group: int | null` — steps sharing a group ID in the same plan run concurrently in the executor; absence means sequential.
 - `skills(id, user_id, name, description, ingredients jsonb, steps jsonb, source_plan_id FK, score, created_at)` — **v2.** Auto-emitted by the Post-Evaluator when a plan scores highly and looks reusable. A skill is a generalized procedure ("how to draft a vendor-comparison spreadsheet") that the planner can pull instead of re-deriving from raw plans.
 - `tools(name, description, signature jsonb, embedding vector(1024))`
 - `user_data` schema — sandboxed namespace where `create_table` / `sql_query` / `write_doc`-via-DB operate. Per-user schema (`user_data_42.*`) for clean isolation.
@@ -238,6 +244,13 @@ wolfpaw/
 Artifacts land in the user's workspace folder and are recorded as `workspace_files` rows with `source = 'agent_output'` and `task_id` set to the originating task.
 
 `write_doc` and `create_table` give Wolfpaw durable structured storage. Per-user schema/workspace keeps tenants isolated.
+
+### Human-in-the-loop
+| Tool | Purpose | Backed by |
+|------|---------|-----------|
+| `ask_user` | Pause the current task, ask the user a question via the channel the task originated from, resume on reply | task lifecycle + originating channel adapter |
+
+`ask_user` is how Wolfpaw "asks before destructive actions" — without it the soul file's tread-lightly promise is aspirational. The agent calls `ask_user(question, options?, urgency?)` mid-plan; the executor transitions the parent task to `awaiting_user`, writes a `task_events` row of type `user_question`, and dispatches the question via the channel from `tasks.channel_for_completion`. The user's reply (captured by the channel adapter) lands in `task_events` as `user_answer` and resumes the paused step with the answer as the tool's return value. Reuses the existing `awaiting_user` machinery — no new state, no new notification path. Build placement is step 15 (needs task lifecycle).
 
 ## Code execution sandbox
 
@@ -490,6 +503,44 @@ Every agent prompt is conditioned on **two** persona blocks:
 
 The User File is editable by the user at any time (web UI text editor + structured preferences form) and may be appended-to by Wolfpaw with the user's permission ("I'll remember that you prefer kilometers"). The Triage Agent reads it on every turn to set tone and routing; downstream agents inherit it through the system prompt.
 
+## Conversational memory
+
+Three tiers, all **per-thread** in v1 (cross-thread retrieval is a v2 user-toggle).
+
+- **Verbatim recent window.** The most recent ~20 messages of a thread are loaded verbatim into every agent prompt.
+- **Tiered summaries.** Older messages are compacted into rolling level-1 summaries (windows of ~20 messages); when level-1 summaries accumulate past a threshold, they fold into level-2 summary-of-summaries. Two levels in v1; deeper levels deferred.
+- **Vector recall.** Every message is embedded with Voyage `voyage-3` on append into `message_embeddings`. The **Planner** issues a per-thread top-k lookup (k≈5) and includes the hits alongside the verbatim window + summaries. Retrieval lives at the Planner deliberately — running it at Triage (Haiku, every turn) would inflate the cheapest path; the Planner only runs on non-trivial requests.
+
+**Who sees what:**
+- Triage Agent + Quick Agent: verbatim window + summaries (no vector lookup).
+- Planning Agent: verbatim window + summaries + vector recall hits.
+
+**Compaction worker.** An `arq` job (`workers/jobs/compact_thread.py`) summarizes the oldest unsummarized window when a thread crosses N messages, and emits a level-2 summary when level-1 count crosses M. Also runs on explicit thread-close events.
+
+**`ConversationalMemory` interface:**
+- `fetch_recent(thread_id, n)` — verbatim tail.
+- `fetch_summaries(thread_id)` — all level-1 + level-2 summaries for the thread.
+- `search_relevant(thread_id, query_embedding, k)` — per-thread vector recall.
+- `append(message)` — writes the message and enqueues an embedding job.
+
+## Seed skills
+
+A small starter set of generalized skills ships in v1 — three to five hand-written exemplars that:
+
+- Give the Planner something to retrieve from on day one (the `SkillsMemory.search_by_task` path is v1; **auto-emission** by the Post-Evaluator remains v2).
+- Establish the shape future auto-emitted skills should match.
+- Double as marketing-ready proof of what Wolfpaw does out of the box.
+
+Initial set (subject to refinement during build):
+
+- **Vendor-comparison spreadsheet** — research N vendors on user-supplied criteria, normalize attributes, emit `.xlsx` with columns + recommendation.
+- **Research one-pager** — read a paper/report (URL or upload), produce a single-page `.pdf` with key findings, methodology, and limitations.
+- **Newsletter digest** — ingest forwarded newsletters over a date range, group by theme, produce a Markdown digest.
+- **Receipt → ledger row** — extract date, vendor, amount, tax from a receipt image/PDF, append to a sandboxed SQL table the user maintains.
+- **Inventory snapshot** — read a user-supplied list of items, look up current data per item, emit `.xlsx` snapshot with deltas vs prior snapshot.
+
+Seeded skills land via a Python seeder (or `migrations/004_seed_skills.sql`) on first boot. Seeded rows have `user_id = NULL`; the Planner's retrieval matches `WHERE user_id = ? OR user_id IS NULL`.
+
 ## Observability
 
 End-to-end traceability is a v1 requirement. Three layers, each scoped to a different question:
@@ -539,7 +590,7 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
 
 - Tool Creator agent (auto-creates new tools beyond `create_table`)
 - **Plan Pre-Evaluator.** Runs between planner and executor. Three checks: (1) will the plan achieve the objective? (2) can it be simplified? (3) **is it an improvement over what we found in procedural memory from past attempts?** On pass → executor; on fail → back to planner with the diagnosis as additional context. Deferred because v1 can ship without it — the planner consults procedural memory directly — but it tightens the loop once we have enough plan history to compare against.
-- **Skills store + community marketplace** ("Pawhub"?). Skills are emitted by the Post-Evaluator: when a plan scores highly and looks reusable, it generalizes the recipe (description + ingredients + steps) into a named `skill` the planner can later pull instead of re-deriving from raw plans. The `skills` table is migrated in v1 so we don't need a schema change later; the emit logic and the planner-side retrieval ship in v2, the share/import marketplace flow in v3.
+- **Skills auto-emission + community marketplace** ("Pawhub"?). The `skills` table, the Planner's **retrieval** path, and a **seeded** starter set ship in **v1** (see [Seed skills](#seed-skills)). What stays in v2 is the Post-Evaluator's auto-emission of new skills from high-scoring reusable plans. The share/import marketplace flow remains v3.
 - Sleep Cycle cron (memory organization, summarization, plan re-scoring, skill consolidation across users in the marketplace era)
 - Entity / Summary / Knowledge-Base memory types
 - OAuth integrations (v2):
@@ -575,7 +626,7 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
 ## Build order
 
 1. **Foundation.** `pyproject.toml`, FastAPI skeleton, `config.py`, `tracing.py`, health endpoint.
-2. **Database.** `001_init.sql` (users, user_profiles, threads, messages, plans, skills, tools, user_data schema, tasks, task_events, workspace_files, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
+2. **Database.** `001_init.sql` (users, user_profiles, threads, messages, message_embeddings, thread_summaries, plans, skills, tools, user_data schema, tasks, task_events, workspace_files, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
 3. **Auth.** Magic link via SES. `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"`.
 4. **Metering + observability harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`, `metering/prompt_versions.py`, `metering/langsmith_client.py`. Token-recording `call_model()` wrapper writes a `token_usage` row (with `prompt_version_id`), forwards a trace to LangSmith (gated on `LANGSMITH_ENABLED`), and emits a structured log line with `trace_id`. Enforcer no-op stub. The `prompt_versions` table is seeded as each agent comes online in steps 10+.
 5. **Channel skeleton + slash commands.** `Channel` ABC, web channel with SSE, command dispatcher with `/help`.
@@ -583,12 +634,13 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
 7. **Workspace + information & data tools.** `Storage` ABC + S3 adapter (local-FS adapter for self-host); `workspace_files` table; pre-signed upload/download endpoints with server-side prefix scoping; minimal frontend list view. Then the tools: `web_search`, `http_get`, `calculator`, `sql_query`, `create_table`, `read_doc`, `write_doc` (the doc tools read/write through `Storage`, never raw paths).
 8. **Code execution sandbox.** `Sandbox` interface + E2B adapter (Docker adapter for self-host). `run_python`, `install_package`, `sandbox_read_file`, `sandbox_write_file`. Executor pre-stages workspace files into the sandbox FS on tool invocation and uploads outputs back to S3 on completion (sandbox never talks to S3 directly). `sandboxes` table tracks lifecycle. Compute metering wired through `compute_usage`.
 9. **Artifact production tools.** `create_spreadsheet`, `create_pdf`, `create_chart`, `create_slides` — all run inside the sandbox. Outputs land in the user's workspace via the pre-staging path from step 8 and are registered in `workspace_files` with `source = 'agent_output'`. Overwrite-with-confirmation flow wired: collisions pause the task with `awaiting_user`.
-10. **Quick Agent.** Haiku + non-sandbox tools. First step where `/usage` shows real numbers.
-11. **Triage.** Routes between Quick, Plan, and Task creation.
-12. **Planner.** Procedural-memory retrieval is the planner's first step (the diagram's "Check Procedural memory to see if a similar challenge has been attempted before"). If a high-scoring past plan matches the query embedding, the planner adapts it; otherwise it generates fresh. Decides if request needs a Task (long-running) or just a single plan.
-13. **Executor.** Functional / reasoning / evaluation step types. SSE event stream. Handles sandbox-tool calls. Renders the planner's plan into the running **Execution Plan** with per-step status.
+10. **Quick Agent + basic conversational memory.** Haiku + non-sandbox tools. `ConversationalMemory.fetch_recent` lands here; messages are appended on every turn. First step where `/usage` shows real numbers.
+11. **Triage.** Routes between Quick, Plan, and Task creation. Reads `fetch_recent` + `fetch_summaries` (summaries empty until step 12.5).
+12. **Planner + memory retrieval.** Procedural-memory retrieval is the planner's first step (the diagram's "Check Procedural memory to see if a similar challenge has been attempted before"). If a high-scoring past plan matches the query embedding, the planner adapts it; otherwise it generates fresh. Also pulls relevant **skills** via `SkillsMemory.search_by_task` against the seeded starter set, and per-thread vector-recall hits from `ConversationalMemory.search_relevant`. Decides if request needs a Task (long-running) or just a single plan.
+12.5. **Tiered conversational memory.** `message_embeddings` writes on append; `thread_summaries` table + `workers/jobs/compact_thread.py` (level-1 windows + level-2 summary-of-summaries). Wires `fetch_summaries` / `search_relevant` into the agents from step 11–12. Seed skills loaded here (or in step 12) so the Planner's skill retrieval has content from day one.
+13. **Executor.** Functional / reasoning / evaluation step types, with `parallel_group` honored — steps in the same group dispatch concurrently within the plan (distinct from sub-agent delegation, which is inter-plan; see step 16). SSE event stream. Handles sandbox-tool calls. Renders the planner's plan into the running **Execution Plan** with per-step status.
 14. **Post-Evaluator.** Scoring + plan persistence into procedural memory (recipe-box rows). Emits `task_events` for the score and any error diagnosis.
-15. **Tasks: persistent layer.** Task lifecycle (pending → running → blocked → … → completed), `arq` worker that picks up runnable tasks, `task_events` log, channel notifications on `awaiting_user` / `completed`. `/tasks`, `/task <id>`, `/cancel <id>` commands.
+15. **Tasks: persistent layer + `ask_user`.** Task lifecycle (pending → running → blocked → … → completed), `arq` worker that picks up runnable tasks, `task_events` log, channel notifications on `awaiting_user` / `completed`. `/tasks`, `/task <id>`, `/cancel <id>` commands. The `ask_user` tool ships here, riding on `awaiting_user` to pause + dispatch a question via the originating channel and resume on reply (see [Human-in-the-loop](#human-in-the-loop)).
 16. **Sub-agent delegation.** Planner can mark parallel branches; executor spawns sub-tasks via `parent_task_id`. Budget allocation, depth/concurrency limits, synthesis step.
 17. **Soul + User File integration.** `soul.md` and per-user `user_profiles` row into every system prompt; `soul_version` and `user_profile_version` on threads. Web UI for the user to view/edit their profile; Markdown body + structured preferences form. Triage Agent uses it for tone and routing.
 18. **Telegram channel.** `@WolfpawBot`, webhook, `channel_links`, deep-link onboarding. All slash commands work here. `002_channels.sql`.

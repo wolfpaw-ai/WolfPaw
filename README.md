@@ -181,6 +181,7 @@ classDiagram
         <<abstract>>
         +UUID id
         +StepStatus status
+        +int parallel_group
         +run(ExecutionContext) StepResult
     }
 
@@ -301,8 +302,11 @@ classDiagram
 
     class ConversationalMemory {
         +fetch_recent(n) List~Message~
+        +fetch_summaries() List~ThreadSummary~
+        +search_relevant(query_embedding, k) List~Message~
         +append(Message)
     }
+    note for ConversationalMemory "Per-thread tiered (v1):\nverbatim window + L1/L2 summaries\n+ vector recall at Planner."
 
     class ProceduralMemory {
         +search_similar(query_embedding, k) List~Plan~
@@ -314,7 +318,7 @@ classDiagram
         +store(Skill)
         +search_by_task(query_embedding) List~Skill~
     }
-    note for SkillsMemory "v2 — emitted by PostEvaluator"
+    note for SkillsMemory "v1: retrieval + seeded starter set.\nv2: auto-emission by PostEvaluator."
 
     class Skill {
         +str name
@@ -348,6 +352,7 @@ classDiagram
     class CreatePdfTool
     class CreateChartTool
     class CreateSlidesTool
+    class AskUserTool
     Tool <|-- WebSearchTool
     Tool <|-- HttpGetTool
     Tool <|-- CalculatorTool
@@ -360,6 +365,7 @@ classDiagram
     Tool <|-- CreatePdfTool
     Tool <|-- CreateChartTool
     Tool <|-- CreateSlidesTool
+    Tool <|-- AskUserTool
 
     class Sandbox {
         <<abstract>>
@@ -589,11 +595,13 @@ The grouping matches the architecture views: every diagram block has a home (`ag
 
 ## Status
 
-Pre-launch. Spec and architecture locked in; implementation hasn't started in this directory yet. The v1 build order (25 numbered steps from foundation through Slack) is in [`implementation_plan.md`](implementation_plan.md). Highlights:
+Pre-launch. Spec and architecture locked in; implementation hasn't started in this directory yet. The v1 build order (numbered steps from foundation through Slack) is in [`implementation_plan.md`](implementation_plan.md). Highlights:
 
 - Metering and observability go in **before** any model call — every token + every compute-second is recorded from the first agent step.
 - The code-execution sandbox lands before any agent uses it (steps 8–9), so from the first model call onward every task already has the worker capabilities it needs.
-- Tasks (step 15) and sub-agent delegation (step 16) sit between the agent loop and the channels — once they exist, Wolfpaw can take on multi-day work.
+- Conversational memory is tiered from v1 — verbatim recent window, level-1/level-2 rolling summaries, and per-thread vector recall at the Planner. Tiered compaction worker lands at step 12.5.
+- Skills retrieval ships in v1 against a hand-written **seeded starter set**; auto-emission by the Post-Evaluator stays v2.
+- Tasks (step 15) and sub-agent delegation (step 16) sit between the agent loop and the channels — once they exist, Wolfpaw can take on multi-day work. The `ask_user` HITL tool rides on the same `awaiting_user` machinery.
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 
