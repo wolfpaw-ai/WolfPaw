@@ -1,2 +1,21 @@
 memory_manager_notes.py
 toolbox_notes.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.local
+
+# Editor
+.DS_Store
