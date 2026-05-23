@@ -21,6 +21,9 @@ dependencies = [
     "httpx>=0.27",
     "readability-lxml>=0.8",
     "lxml>=5.0",
+    "openpyxl>=3.1",
+    "matplotlib>=3.8",
+    "python-pptx>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +36,7 @@ langsmith = ["langsmith>=0.1"]
 s3 = ["boto3>=1.34"]
 docker = ["docker>=7.0"]
 e2b = ["e2b-code-interpreter>=1.0"]
+pdf = ["weasyprint>=62"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wolfpaw"]

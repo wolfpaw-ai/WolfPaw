@@ -35,7 +35,14 @@ from wolfpaw.tracing import get_logger
 
 log = get_logger()
 
-_REPL_SERVER = str(Path(__file__).resolve().parent / "_repl_server.py")
+# We launch the REPL via `python -m wolfpaw.sandbox._repl_server` rather
+# than `python <path>/_repl_server.py`. The script-path form sets
+# sys.path[0] to the script's directory; since this package contains a
+# `subprocess.py`, that would shadow stdlib `subprocess` inside the child
+# and break anything that imports asyncio (e.g. matplotlib pulls it in).
+# `-m` sets sys.path[0] to "" (cwd) instead — the sandbox workdir has no
+# .py files, so stdlib wins.
+_REPL_MODULE = "wolfpaw.sandbox._repl_server"
 
 
 def _set_limits(cpu_seconds: int, memory_mb: int):
@@ -117,7 +124,7 @@ class SubprocessSandbox(Sandbox):
             user_id=str(self.user_id),
         )
         self._proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-u", _REPL_SERVER,
+            sys.executable, "-u", "-m", _REPL_MODULE,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

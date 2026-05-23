@@ -11,6 +11,10 @@ from wolfpaw.toolbox import registry  # noqa: F401  re-export
 # matter — the registry deduplicates by `name`.
 from wolfpaw.toolbox.tools import (  # noqa: F401
     calculator,
+    create_chart,
+    create_pdf,
+    create_slides,
+    create_spreadsheet,
     create_table,
     http_get,
     install_package,

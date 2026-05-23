@@ -18,6 +18,9 @@ def test_v1_tool_set_registered():
         # step 8 (sandbox)
         "run_python", "install_package",
         "sandbox_read_file", "sandbox_write_file",
+        # step 9 (artifact production)
+        "create_spreadsheet", "create_chart",
+        "create_slides", "create_pdf",
     }
 
 
