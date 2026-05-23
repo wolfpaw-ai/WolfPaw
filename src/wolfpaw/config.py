@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     http_get_timeout_seconds: float = 15.0
     http_get_max_bytes: int = 2 * 1024 * 1024  # 2 MB
 
+    # Embeddings (step 12)
+    embedding_backend: str = "voyage"     # "voyage" | "stub" (tests/dev)
+    voyage_api_key: str = ""
+    voyage_model: str = "voyage-3"
+    voyage_dimensions: int = 1024
+
     # Sandbox (step 8). Provider selection + per-execution limits.
     sandbox_backend: str = "subprocess"        # "subprocess" | "docker" | "e2b"
     sandbox_idle_timeout_seconds: int = 15 * 60

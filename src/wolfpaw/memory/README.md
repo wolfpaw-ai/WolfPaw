@@ -1,11 +1,13 @@
 # memory/
 
-Postgres access + the agent-facing memory subsystems. Step 10 added the verbatim recent window over `messages`; the rest (summaries, procedural, skills) lands in steps 12–12.5.
+Postgres access + the agent-facing memory subsystems. Step 10 added the verbatim recent window over `messages`; step 12 added procedural + skills retrieval via pgvector. Tiered summaries + per-thread vector recall land in step 12.5.
 
 ## Files
 
 - **`db.py`** — process-wide asyncpg pool. `get_pool()` lazily creates it from `WOLFPAW_DATABASE_URL`; `acquire()` is the standard `async with acquire() as conn` context manager every DAO uses. Registers pgvector types on each connection so callers can pass/receive `numpy`-shaped vectors. Also provides `migrations_dir()` + `apply_sql_file(conn, path)` for tests and dev bootstrap.
 - **`conversational.py`** — `threads` + `messages` access for the agent loop. `Message` dataclass + `MessageRole` / `ChannelName` literal types. `get_or_create_thread(conn, *, user_id, channel, thread_id=None)` validates ownership before reuse and silently mints a fresh thread if the supplied id belongs to another user (don't leak existence). `append(conn, *, thread_id, role, content, metadata=None)` writes one row. `fetch_recent(conn, *, thread_id, n=20)` returns the most recent messages in chronological order (oldest first). Persistence policy: agents store visible user turns + final assistant text only; intermediate tool calls/results live in-process.
+- **`procedural.py`** — the "recipe-box" over `plans`. `StoredPlan` dataclass. `search_similar(conn, *, user_id, query_embedding, k=5, min_score=None)` does cosine pgvector lookup; rows without embeddings are skipped. `store(...)` inserts a generated plan (success/score=None; Post-Evaluator updates later). `update_outcome(...)` is the Post-Evaluator's hook (step 14) for closing the loop. Scoped per `user_id`.
+- **`skills.py`** — generalized reusable procedures over `skills`. `Skill` dataclass; `search_by_task(conn, *, user_id, query_embedding, k=5)` returns user-owned + seeded (`user_id IS NULL`) matches ordered by cosine distance. `STARTER_SKILLS` is the v1 hand-written exemplar set (vendor comparison, research one-pager, newsletter digest, receipt-to-ledger, inventory snapshot). `seed_starter_skills(conn, embedder)` is idempotent — call once at boot (or via a one-off task) to insert + embed the seed set; subsequent calls are no-ops.
 
 ## How it fits together
 
@@ -25,10 +27,10 @@ Tests that need a real DB drop and re-apply migrations into a scratch schema, th
 
 ## Extending
 
-- **Tiered summaries** (step 12.5) land here as `fetch_summaries(conn, *, thread_id)` and a writer driven by `workers/jobs/compact_thread.py`. The `thread_summaries` table is already provisioned in migration `001_init.sql`.
-- **Per-thread vector recall** (step 12.5) lands as `search_relevant(conn, *, thread_id, query_embedding, k)` against `message_embeddings`. The Planner uses this; the Quick + Triage agents stay verbatim-only.
-- **Procedural memory** (step 12) lands as `procedural.py`: query-embedding lookup into `plans` for the planner's "have we solved this before?" path.
-- **Skills memory** (step 12) lands as `skills.py`: retrieval against the seeded starter set in v1; auto-emission is v2.
+- **Tiered summaries** (step 12.5) land here as `fetch_summaries(conn, *, thread_id)` and a writer driven by `workers/jobs/compact_thread.py`. The `thread_summaries` table is already provisioned in `001_init.sql`.
+- **Per-thread vector recall** (step 12.5) lands as `search_relevant(conn, *, thread_id, query_embedding, k)` against `message_embeddings`. The Planner already passes the query embedding through; this just adds the call. The Quick + Triage agents stay verbatim-only.
+- **Skills auto-emission** (v2): the Post-Evaluator emits new rows into `skills` keyed on the originating plan when a plan scores highly and looks reusable.
+- **New seeded skill**: append a dict to `STARTER_SKILLS` in `skills.py` with a `name` (unique), `description` (this is what gets embedded), `ingredients` (which tools it uses), and a `steps` skeleton. `seed_starter_skills` is name-keyed so it'll add the new one without re-inserting the existing seeds.
 
 ## Importing-module gotcha
 

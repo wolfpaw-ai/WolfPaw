@@ -49,16 +49,9 @@ async def test_quick_verdict_dispatches_to_quick_unchanged():
     assert text == "2+2 is 4"
 
 
-async def test_plan_verdict_falls_back_to_quick_with_preamble():
-    router = Router(
-        triage=FakeTriage(
-            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
-        ),
-        quick=FakeQuick(reply="(answer)"),
-    )
-    text = await router.handle(ctx=_ctx(), thread_id=uuid4(), content="hi")
-    assert text.startswith("(Triage suggested I plan this out")
-    assert text.endswith("(answer)")
+# Note: the "plan" verdict now invokes the Planner and renders a plan
+# preview (rather than falling back to Quick). That path is covered by
+# test_agent_router_plan.py — see the FakePlanner there.
 
 
 async def test_task_verdict_falls_back_to_quick_with_preamble():
