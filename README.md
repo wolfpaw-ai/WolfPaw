@@ -23,6 +23,66 @@ One codebase, two distributions. The hosted product exists so non-developers can
 
 ---
 
+## Usage
+
+Wolfpaw is channel-native: you reach it where you already work.
+
+### Channels
+
+- **Web chat** — sign in at `wolfpaw.ai` (or your self-host URL), type in the chat box. Replies stream live. *(Backend endpoint built; React UI lands step 19.)*
+- **Telegram** *(v1, step 18)* — DM `@WolfpawBot` after linking your account from web. One shared bot for hosted; OSS users provision their own via BotFather.
+- **Email** *(v1.5, step 23)* — forward anything to `alice@wolfpaw.ai`; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
+- **Slack** *(v2, step 25)* — workspace install, slash command + DM.
+
+### Slash commands
+
+Intercepted before the model in every channel so they don't burn tokens.
+
+| Command | Behavior |
+|---|---|
+| `/help` | List available commands |
+| `/usage`, `/usage today`, `/usage month`, `/usage all` | Token + sandbox-compute spend. `month` adds a by-agent breakdown. |
+| `/tasks`, `/task <id>`, `/cancel <id>` | Task list + control *(step 15)* |
+| `/reset` | Start a new conversation thread *(step 11)* |
+
+### Workspace
+
+Upload files for Wolfpaw to work with; pick up deliverables it produces. Same workspace whether you arrived via web, Telegram, or email — per-user prefix in S3 for hosted, local FS for self-host. v1 is a flat namespace; folders and Drive / Dropbox sync are v2.
+
+### Tasks
+
+Anything beyond a single chat turn becomes a **Task** — a persistent unit of work that can run for hours or days, pause when blocked, and ping you on your preferred channel when it needs input or has results ready. You see status, spend, and artifacts in the web app; cancel at any time. *(Step 15.)*
+
+### Cost control
+
+Every model call and every sandbox-second is metered. Hard pause at allowance — no silent overage. Opt-in overage with a per-user cap. Notifications at 50% / 80% / 100% of allowance. `/usage` is the always-on receipt.
+
+### Trying it locally today (steps 1–8 shipped)
+
+```bash
+uv sync --extra dev
+.venv/bin/uvicorn wolfpaw.api:app --reload
+```
+
+```bash
+# Mint a magic link (the `console` email backend prints the URL to logs)
+curl -X POST localhost:8000/auth/magic-link \
+  -H 'content-type: application/json' \
+  -d '{"email": "you@example.com"}'
+
+# Follow the printed URL → sets the wp_session cookie
+
+# Try a slash command via the SSE chat endpoint
+curl -N -X POST localhost:8000/channels/web/chat \
+  -H 'content-type: application/json' \
+  -b 'wp_session=<value from /auth/verify>' \
+  -d '{"content": "/usage"}'
+```
+
+Non-slash messages currently return a placeholder — the Quick Agent (step 10) is what makes free-form chat actually do something.
+
+---
+
 ## How Wolfpaw differs from its neighbors
 
 | System | Optimized for | Wolfpaw's contrast |
@@ -472,7 +532,7 @@ classDiagram
 
 ---
 
-## Proposed repo layout
+## Current repo layout
 
 ```
 wolfpaw/
@@ -480,7 +540,7 @@ wolfpaw/
   README.md                          # this file
   LICENSE                            # TBD
   spec.md                            # product spec + neighbor comparison
-  implementation_plan.md             # schema, infra, build order
+  implementation_plan.md             # schema, infra, build order (✅ marks shipped steps)
   soul.md                            # agent persona
   WolfPaw_00.pdf                     # architecture diagram (canonical)
   docs/
@@ -490,118 +550,43 @@ wolfpaw/
       observability.md
   migrations/
     001_init.sql                     # users, threads, plans, tasks, sandboxes, token_usage, …
-    002_channels.sql                 # channel_links, email_aliases, verified_owner_emails
-    003_billing.sql                  # subscriptions, tier_limits, cost_notifications
+    002_auth.sql                     # magic_link_tokens
+    003_sandbox.sql                  # nullable task_id on sandboxes + compute_usage
   src/wolfpaw/
-    config.py                        # env, model IDs, feature flags
-    api.py                           # FastAPI app
-    deps.py                          # FastAPI dependency wiring
-    tracing.py                       # trace_id, structured JSON logger
-    schemas.py                       # Plan, Step, TriageResult, ExecutionContext, …
-    soul.py                          # loads soul.md
-    user_profile.py                  # loads/saves per-user User File
-    auth/
-      magic_link.py                  # passwordless email auth
-      oauth_google.py                # Google OAuth
-      api_keys.py                    # per-user API keys
-      middleware.py                  # request → user resolution
-    agents/
-      triage.py
-      quick.py
-      planner.py
-      executor.py
-      post_evaluator.py
-      pre_evaluator.py               # v2
-      tool_creator.py                # v2
-    memory/
-      db.py                          # asyncpg pool
-      conversational.py
-      procedural.py                  # recipe-box
-      skills.py                      # v2
-    toolbox/
-      registry.py
-      tools/
-        web_search.py                # Tavily
-        http_get.py
-        calculator.py
-        sql_query.py
-        create_table.py
-        read_doc.py
-        write_doc.py
-        run_python.py                # sandbox
-        install_package.py           # sandbox
-        create_spreadsheet.py        # sandbox: openpyxl
-        create_pdf.py                # sandbox: weasyprint
-        create_chart.py              # sandbox: matplotlib
-        create_slides.py             # sandbox: python-pptx
-    sandbox/
-      base.py                        # Sandbox ABC
-      e2b.py                         # hosted
-      docker.py                      # self-host
-      proxy.py                       # credential vault proxy
-    storage/
-      base.py                        # Storage ABC
-      s3.py
-      local.py
-      drive.py                       # v2
-      dropbox.py                     # v2
-    channels/
-      base.py                        # Channel ABC
-      commands.py                    # slash-command dispatcher
-      web.py                         # /chat SSE endpoint
-      telegram.py                    # webhook + bot client
-      email.py                       # v1.5
-      slack.py                       # v2
-    tasks/
-      lifecycle.py                   # status transitions
-      events.py                      # task_events writer
-      artifacts.py
-    billing/
-      stripe_client.py
-      webhook.py
-      tiers.py
-      cost_notifications.py
-    metering/
-      pricing.py
-      recorder.py
-      enforcer.py
-      summarizer.py
-      prompt_versions.py
-      langsmith_client.py
-      usage_report.py                # backs /usage
-    workers/
-      arq_app.py                     # arq worker entrypoint
-      jobs/                          # scheduled tasks, notifications, sleep cycle (v2)
-  web/                               # React + Vite frontend
-    src/
-    public/
-    package.json
-    vite.config.ts
-  infra/
-    terraform/                       # EC2, RDS, ElastiCache, SES, Caddy, IAM
-    dashboards/
-      wolfpaw.json                   # CloudWatch dashboard
-      insights/                      # saved Logs Insights queries
-    deploy/
-      systemd/                       # unit files
-      caddy/                         # Caddyfile
+    api.py                           # FastAPI app — mounts auth, web channel, workspace
+    config.py                        # env, model IDs, feature flags, backend selection
+    tracing.py                       # trace_id contextvar + structured JSON logger
+    auth/                            # magic-link auth, sessions, user bootstrap  [README]
+    channels/                        # Channel ABC, web SSE channel, /help, /usage  [README]
+    memory/                          # asyncpg pool (conversational/procedural land step 11+)  [README]
+    metering/                        # cost recording, prompt versions, ModelClient, /usage  [README]
+    sandbox/                         # Sandbox ABC, Subprocess/Docker/E2B providers, manager  [README]
+    storage/                         # Storage ABC, LocalStorage, S3Storage, signing  [README]
+    toolbox/                         # tool registry + 11 tools (info, docs, SQL, sandbox)  [README]
+    workspace/                       # workspace_files DAO + REST API  [README]
   tests/
-    test_*.py
+    test_*.py                        # 122 unit + 33 DB-gated tests as of step 8
 ```
 
-The grouping matches the architecture views: every diagram block has a home (`agents/`, `memory/`, `toolbox/`, `sandbox/`, `channels/`), and the cross-cutting concerns (metering, tracing, billing) are sibling packages rather than mixed into the agents.
+Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
+
+**Not built yet:** `agents/` (lands step 10+), `billing/` (step 24), `tasks/` (step 15), `workers/` (step 12.5 + 15), `web/` React frontend (step 19), `infra/` Terraform (step 21). The implementation plan tracks order and scope.
 
 ---
 
 ## Status
 
-Pre-launch. Spec and architecture locked in; implementation hasn't started in this directory yet. The v1 build order (numbered steps from foundation through Slack) is in [`implementation_plan.md`](implementation_plan.md). Highlights:
+Steps 1–8 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
 
-- Metering and observability go in **before** any model call — every token + every compute-second is recorded from the first agent step.
-- The code-execution sandbox lands before any agent uses it (steps 8–9), so from the first model call onward every task already has the worker capabilities it needs.
-- Conversational memory is tiered from v1 — verbatim recent window, level-1/level-2 rolling summaries, and per-thread vector recall at the Planner. Tiered compaction worker lands at step 12.5.
-- Skills retrieval ships in v1 against a hand-written **seeded starter set**; auto-emission by the Post-Evaluator stays v2.
-- Tasks (step 15) and sub-agent delegation (step 16) sit between the agent loop and the channels — once they exist, Wolfpaw can take on multi-day work. The `ask_user` HITL tool rides on the same `awaiting_user` machinery.
+- **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
+- **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
+- **`/usage`** (step 6) — first-class command, prices each call at its own `created_at` via LATERAL join, 30s cached.
+- **Workspace + info/data tools** (step 7) — `Storage` ABC, LocalStorage + S3 adapters, workspace REST API, and the first seven tools: `calculator`, `http_get`, `web_search`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
+- **Sandbox** (step 8) — `Sandbox` ABC, Subprocess (dev/test default, real REPL), Docker, and E2B providers, `SandboxManager`, compute metering, and four sandbox tools: `run_python`, `install_package`, `sandbox_read_file`, `sandbox_write_file`.
+
+**Tests:** `pytest` runs 122 unit tests in <1s; 33 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+
+**Next up:** step 9 (artifact tools: `create_spreadsheet`/`create_pdf`/`create_chart`/`create_slides`, all inside the sandbox), then the agents from step 10.
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 
@@ -611,13 +596,14 @@ The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation;
 
 | File | What it covers |
 |---|---|
-| [`README.md`](README.md) | This file — pitch, comparison, architecture overview |
+| [`README.md`](README.md) | This file — pitch, comparison, architecture overview, status |
 | [`spec.md`](spec.md) | Product spec; long feature-by-feature comparison with OpenClaw and Cowork; scope decisions |
 | [`implementation_plan.md`](implementation_plan.md) | Locked-in decisions, Postgres schema, tools, sandbox, tasks, metering, build order |
 | [`soul.md`](soul.md) | Agent persona — loaded into every agent prompt |
 | [`WolfPaw_00.pdf`](WolfPaw_00.pdf) | Canonical architecture diagram |
 | [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md) | Anticipated class structure across five views, plus diagram-box-to-class crosswalk |
 | [`docs/decisions/`](docs/decisions/) | Architecture decision records (framework choice, observability) |
+| `src/wolfpaw/<subpackage>/README.md` | Per-domain orientation for maintainers — one in each of `auth/`, `channels/`, `memory/`, `metering/`, `sandbox/`, `storage/`, `toolbox/`, `workspace/`. Start here when extending that domain. |
 
 ---
 
