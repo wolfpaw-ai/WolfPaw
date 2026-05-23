@@ -556,13 +556,14 @@ wolfpaw/
     api.py                           # FastAPI app — mounts auth, web channel, workspace
     config.py                        # env, model IDs, feature flags, backend selection
     tracing.py                       # trace_id contextvar + structured JSON logger
+    agents/                          # Quick Agent (step 10); Triage/Planner/Executor land 11+  [README]
     auth/                            # magic-link auth, sessions, user bootstrap  [README]
     channels/                        # Channel ABC, web SSE channel, /help, /usage  [README]
-    memory/                          # asyncpg pool (conversational/procedural land step 11+)  [README]
+    memory/                          # asyncpg pool + conversational memory (verbatim window)  [README]
     metering/                        # cost recording, prompt versions, ModelClient, /usage  [README]
     sandbox/                         # Sandbox ABC, Subprocess/Docker/E2B providers, manager  [README]
     storage/                         # Storage ABC, LocalStorage, S3Storage, signing  [README]
-    toolbox/                         # tool registry + 11 tools (info, docs, SQL, sandbox)  [README]
+    toolbox/                         # tool registry + 15 tools (info, docs, SQL, sandbox, artifacts)  [README]
     workspace/                       # workspace_files DAO + REST API  [README]
   tests/
     test_*.py                        # 122 unit + 33 DB-gated tests as of step 8
@@ -570,23 +571,25 @@ wolfpaw/
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
 
-**Not built yet:** `agents/` (lands step 10+), `billing/` (step 24), `tasks/` (step 15), `workers/` (step 12.5 + 15), `web/` React frontend (step 19), `infra/` Terraform (step 21). The implementation plan tracks order and scope.
+**Not built yet:** `billing/` (step 24), `tasks/` (step 15), `workers/` (step 12.5 + 15), `web/` React frontend (step 19), `infra/` Terraform (step 21). The implementation plan tracks order and scope.
 
 ---
 
 ## Status
 
-Steps 1–8 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
+Steps 1–10 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
 
 - **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
 - **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
 - **`/usage`** (step 6) — first-class command, prices each call at its own `created_at` via LATERAL join, 30s cached.
-- **Workspace + info/data tools** (step 7) — `Storage` ABC, LocalStorage + S3 adapters, workspace REST API, and the first seven tools: `calculator`, `http_get`, `web_search`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
-- **Sandbox** (step 8) — `Sandbox` ABC, Subprocess (dev/test default, real REPL), Docker, and E2B providers, `SandboxManager`, compute metering, and four sandbox tools: `run_python`, `install_package`, `sandbox_read_file`, `sandbox_write_file`.
+- **Workspace + info/data tools** (step 7) — `Storage` ABC, LocalStorage + S3 adapters, workspace REST API, and seven tools: `calculator`, `http_get`, `web_search`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
+- **Sandbox** (step 8) — `Sandbox` ABC, Subprocess (dev/test default, real REPL), Docker, and E2B providers, `SandboxManager`, compute metering, and four sandbox tools.
+- **Artifact tools** (step 9) — `create_spreadsheet`/`create_chart`/`create_slides`/`create_pdf`, all running inside the sandbox via a shared `_artifact.py` helper; outputs land in `workspace_files` with `source='agent_output'`.
+- **Quick Agent + conversational memory** (step 10) — Haiku-driven tool loop over the 7 non-sandbox tools, hard-capped at 10 iterations. `memory/conversational.py` ships the verbatim recent window (threads + messages). The web channel routes non-slash messages through the agent and streams `thread` / `tool` / `delta` / `done` SSE events. **First step where `/usage` shows real numbers.**
 
-**Tests:** `pytest` runs 122 unit tests in <1s; 33 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+**Tests:** `pytest` runs 146 unit tests in <1s; 40 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** step 9 (artifact tools: `create_spreadsheet`/`create_pdf`/`create_chart`/`create_slides`, all inside the sandbox), then the agents from step 10.
+**Next up:** step 11 (Triage Agent — routes between Quick / Plan / Task), then Planner + procedural memory (12), tiered conversational compaction (12.5), Executor (13).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 
