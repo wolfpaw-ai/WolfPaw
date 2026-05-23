@@ -12,8 +12,12 @@ from wolfpaw.toolbox.registry import Registry, Tool, get_registry
 def test_v1_tool_set_registered():
     names = get_registry().names()
     assert set(names) == {
+        # step 7 (info & data + docs)
         "calculator", "create_table", "http_get", "read_doc",
         "sql_query", "web_search", "write_doc",
+        # step 8 (sandbox)
+        "run_python", "install_package",
+        "sandbox_read_file", "sandbox_write_file",
     }
 
 

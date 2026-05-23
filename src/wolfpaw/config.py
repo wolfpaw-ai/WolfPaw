@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     http_get_timeout_seconds: float = 15.0
     http_get_max_bytes: int = 2 * 1024 * 1024  # 2 MB
 
+    # Sandbox (step 8). Provider selection + per-execution limits.
+    sandbox_backend: str = "subprocess"        # "subprocess" | "docker" | "e2b"
+    sandbox_idle_timeout_seconds: int = 15 * 60
+    sandbox_default_cpu_seconds: int = 60
+    sandbox_max_cpu_seconds: int = 5 * 60
+    sandbox_default_memory_mb: int = 1024
+    sandbox_max_memory_mb: int = 4096
+    sandbox_compute_per_second_micros: int = 100   # 0.01¢/s placeholder
+    docker_image: str = "python:3.12-slim"
+    e2b_api_key: str = ""
+    e2b_template: str = "base"
+
 
 @lru_cache
 def get_settings() -> Settings:
