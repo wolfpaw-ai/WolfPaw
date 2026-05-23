@@ -13,6 +13,7 @@ from wolfpaw.auth.routes import router as auth_router
 from wolfpaw.channels.web import router as web_channel_router
 from wolfpaw.config import get_settings
 from wolfpaw.memory.db import close_pool
+from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — registers /usage
 from wolfpaw.tracing import (
     configure_logging,
     get_logger,

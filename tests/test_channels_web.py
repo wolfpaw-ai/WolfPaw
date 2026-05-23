@@ -88,6 +88,14 @@ def test_chat_plain_message_returns_stub_delta():
     assert "Agent pipeline" in payload
 
 
+def test_help_lists_usage_command():
+    """Confirms `metering.usage_report` was imported at app boot so /usage
+    registered itself with the dispatcher."""
+    client = _client()
+    r = client.post("/channels/web/chat", json={"content": "/help"})
+    assert "/usage" in r.text
+
+
 def test_chat_preserves_trace_id_header():
     client = _client()
     r = client.post(
