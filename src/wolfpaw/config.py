@@ -47,6 +47,19 @@ class Settings(BaseSettings):
     # Model client
     anthropic_api_key: str = ""
 
+    # Storage / workspace (step 7)
+    storage_backend: str = "local"            # "local" | "s3"
+    local_storage_root: str = ".wolfpaw_workspace"
+    s3_bucket: str = ""                       # set when storage_backend == "s3"
+    s3_region: str = "us-east-1"
+    workspace_signed_url_ttl_seconds: int = 300
+    workspace_upload_max_bytes: int = 50 * 1024 * 1024  # 50 MB
+
+    # Tools (step 7)
+    tavily_api_key: str = ""
+    http_get_timeout_seconds: float = 15.0
+    http_get_max_bytes: int = 2 * 1024 * 1024  # 2 MB
+
 
 @lru_cache
 def get_settings() -> Settings:
