@@ -79,7 +79,7 @@ curl -N -X POST localhost:8000/channels/web/chat \
   -d '{"content": "/usage"}'
 ```
 
-Non-slash messages currently return a placeholder — the Quick Agent (step 10) is what makes free-form chat actually do something.
+Non-slash messages go through the Router (step 11): Triage classifies → Quick (today) or Plan / Task (steps 12 / 15). The SSE stream emits `thread`, `triage`, `tool`, `delta`, `done` events.
 
 ---
 
@@ -556,7 +556,7 @@ wolfpaw/
     api.py                           # FastAPI app — mounts auth, web channel, workspace
     config.py                        # env, model IDs, feature flags, backend selection
     tracing.py                       # trace_id contextvar + structured JSON logger
-    agents/                          # Quick Agent (step 10); Triage/Planner/Executor land 11+  [README]
+    agents/                          # Quick Agent + Triage + Router (steps 10–11)  [README]
     auth/                            # magic-link auth, sessions, user bootstrap  [README]
     channels/                        # Channel ABC, web SSE channel, /help, /usage  [README]
     memory/                          # asyncpg pool + conversational memory (verbatim window)  [README]
@@ -577,7 +577,7 @@ Each subfolder has its own README — start there when extending that domain. Th
 
 ## Status
 
-Steps 1–10 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
+Steps 1–11 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
 
 - **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
 - **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
@@ -585,11 +585,12 @@ Steps 1–10 of the v1 build order are shipped (see [`implementation_plan.md`](i
 - **Workspace + info/data tools** (step 7) — `Storage` ABC, LocalStorage + S3 adapters, workspace REST API, and seven tools: `calculator`, `http_get`, `web_search`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
 - **Sandbox** (step 8) — `Sandbox` ABC, Subprocess (dev/test default, real REPL), Docker, and E2B providers, `SandboxManager`, compute metering, and four sandbox tools.
 - **Artifact tools** (step 9) — `create_spreadsheet`/`create_chart`/`create_slides`/`create_pdf`, all running inside the sandbox via a shared `_artifact.py` helper; outputs land in `workspace_files` with `source='agent_output'`.
-- **Quick Agent + conversational memory** (step 10) — Haiku-driven tool loop over the 7 non-sandbox tools, hard-capped at 10 iterations. `memory/conversational.py` ships the verbatim recent window (threads + messages). The web channel routes non-slash messages through the agent and streams `thread` / `tool` / `delta` / `done` SSE events. **First step where `/usage` shows real numbers.**
+- **Quick Agent + conversational memory** (step 10) — Haiku-driven tool loop over the 7 non-sandbox tools, hard-capped at 10 iterations. `memory/conversational.py` ships the verbatim recent window (threads + messages). **First step where `/usage` shows real numbers.**
+- **Triage Agent + Router** (step 11) — Haiku-driven classifier with forced `classify` tool_use returns a structured `TriageVerdict(route, complexity, reasoning)`. `Router` composes Triage → downstream dispatch; the web channel now talks to the Router instead of Quick directly. "plan" and "task" verdicts fall through to Quick with an honest preamble until the Planner (12) and Tasks (15) ship. SSE events: `thread` / `triage` / `tool` / `delta` / `done`.
 
-**Tests:** `pytest` runs 146 unit tests in <1s; 40 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+**Tests:** `pytest` runs 156 unit tests in <1s; 40 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** step 11 (Triage Agent — routes between Quick / Plan / Task), then Planner + procedural memory (12), tiered conversational compaction (12.5), Executor (13).
+**Next up:** Planner + procedural memory (step 12), tiered conversational compaction (12.5), Executor (13), Post-Evaluator (14).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 

@@ -82,23 +82,22 @@ def test_chat_unknown_command_does_not_fall_through():
     assert "Unknown command" in payload
 
 
-def _stub_agent_and_thread(monkeypatch, *, canned_reply: str, tool_events=()):
-    """Patch the web channel's agent + thread resolution so plain-message
+def _stub_router_and_thread(
+    monkeypatch, *, canned_reply: str, events_to_emit=(),
+):
+    """Patch the web channel's router + thread resolution so plain-message
     tests run without Postgres or Anthropic. Returns the (fake) thread_id
     the endpoint will emit."""
     thread_id = uuid4()
 
-    class FakeAgent:
+    class FakeRouter:
         async def handle(self, *, ctx, thread_id, content, emit=None):
-            for ev, data in tool_events:
+            for ev, data in events_to_emit:
                 if emit:
                     await emit(ev, data)
             return canned_reply
 
-    async def fake_thread(_conn, *, user_id, channel, thread_id=None):
-        return thread_id or globals().get("_inject_thread_id", thread_id)
-
-    monkeypatch.setattr("wolfpaw.channels.web.get_quick_agent", lambda: FakeAgent())
+    monkeypatch.setattr("wolfpaw.channels.web.get_router", lambda: FakeRouter())
     monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
     monkeypatch.setattr(
@@ -112,11 +111,14 @@ async def _async_return(value):
     return value
 
 
-def test_chat_plain_message_runs_quick_agent(monkeypatch):
-    thread_id = _stub_agent_and_thread(
+def test_chat_plain_message_runs_through_router(monkeypatch):
+    thread_id = _stub_router_and_thread(
         monkeypatch,
         canned_reply="2 + 2 is 4.",
-        tool_events=[("tool", "calculator(expression='2+2')")],
+        events_to_emit=[
+            ("triage", "quick — simple lookup"),
+            ("tool", "calculator(expression='2+2')"),
+        ],
     )
     client = _client()
     r = client.post(
@@ -124,38 +126,42 @@ def test_chat_plain_message_runs_quick_agent(monkeypatch):
     )
     events = _parse_events(r.text)
     kinds = [e for e, _ in events]
-    # New stream shape: thread → tool → delta → done.
+    # New stream shape: thread → triage → tool → delta → done.
     assert kinds[0] == "thread"
+    assert "triage" in kinds
     assert "tool" in kinds
     assert "delta" in kinds
     assert kinds[-1] == "done"
     thread_payload = next(d for e, d in events if e == "thread")
     assert thread_payload == str(thread_id)
-    tool_payload = next(d for e, d in events if e == "tool")
-    assert "calculator" in tool_payload
+    triage_payload = next(d for e, d in events if e == "triage")
+    assert "quick" in triage_payload
     delta_payload = next(d for e, d in events if e == "delta")
     assert delta_payload == "2 + 2 is 4."
 
 
 def test_chat_plain_message_no_tools_still_streams_delta(monkeypatch):
-    _stub_agent_and_thread(monkeypatch, canned_reply="hello back")
+    _stub_router_and_thread(
+        monkeypatch, canned_reply="hello back",
+        events_to_emit=[("triage", "quick — greeting")],
+    )
     client = _client()
     r = client.post(
         "/channels/web/chat", json={"content": "hi"},
     )
     events = _parse_events(r.text)
     kinds = [e for e, _ in events]
-    assert kinds == ["thread", "delta", "done"]
+    assert kinds == ["thread", "triage", "delta", "done"]
     assert next(d for e, d in events if e == "delta") == "hello back"
 
 
 def test_chat_agent_exception_surfaces_as_error_event(monkeypatch):
-    class BoomAgent:
+    class BoomRouter:
         async def handle(self, **_kwargs):
             raise RuntimeError("boom")
 
     thread_id = uuid4()
-    monkeypatch.setattr("wolfpaw.channels.web.get_quick_agent", lambda: BoomAgent())
+    monkeypatch.setattr("wolfpaw.channels.web.get_router", lambda: BoomRouter())
     monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
     monkeypatch.setattr(

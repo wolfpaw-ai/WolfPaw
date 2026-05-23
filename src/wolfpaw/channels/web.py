@@ -2,11 +2,11 @@
 
 Authenticated POST → server-sent events. Slash commands route through the
 shared dispatcher and stream back a `command` event. Plain messages are
-handed to the Quick Agent (step 10); the agent runs its tool loop and
-returns final text, which streams back as a `delta` event.
+handed to the Router (step 11), which runs Triage to classify, then
+dispatches to Quick (step 10) — or to Plan / Task once those land.
 
 Stream shape:
-    event: thread  | command | tool | delta | done | error
+    event: thread | command | triage | tool | delta | done | error
     data: <text>             # one `data:` line per newline in the text
 
 `WebChannel.send()` is intentionally unimplemented — proactive web push
@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
-from wolfpaw.agents.quick import QuickAgent, get_quick_agent
+from wolfpaw.agents.router import Router, get_router
 from wolfpaw.auth.deps import require_user_id
 from wolfpaw.channels import Channel, InboundMessage
 from wolfpaw.channels.commands import get_dispatcher
@@ -74,22 +74,22 @@ def _sse_event(event: str, data: str) -> bytes:
     return f"event: {event}\n{payload}\n\n".encode("utf-8")
 
 
-async def _run_agent_into_queue(
+async def _run_router_into_queue(
     *,
-    agent: QuickAgent,
+    router: Router,
     user_id: UUID,
     thread_id: UUID,
     content: str,
     queue: asyncio.Queue,
 ) -> None:
-    """Run the agent, push its final text + any tool events through the
-    queue, and signal end-of-stream with a None sentinel."""
+    """Run the router, push its final text + any tool/triage events
+    through the queue, and signal end-of-stream with a None sentinel."""
     try:
         async def emit(event: str, data: str) -> None:
             await queue.put((event, data))
 
         ctx = ToolContext(user_id=user_id)
-        text = await agent.handle(
+        text = await router.handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=emit,
         )
         await queue.put(("delta", text))
@@ -139,13 +139,13 @@ async def chat(
             )
         yield _sse_event("thread", str(thread_id))
 
-        # 3. Run the agent in a background task so tool-event emissions
-        # interleave with the agent's progress.
+        # 3. Run the router in a background task so triage + tool event
+        # emissions interleave with the agent's progress.
         queue: asyncio.Queue = asyncio.Queue()
-        agent = get_quick_agent()
+        router = get_router()
         task = asyncio.create_task(
-            _run_agent_into_queue(
-                agent=agent,
+            _run_router_into_queue(
+                router=router,
                 user_id=user_id,
                 thread_id=thread_id,
                 content=inbound.content,
