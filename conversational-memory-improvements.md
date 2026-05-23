@@ -1,0 +1,20 @@
+- Conversational Memory improvemenets
+    - session chat history (in plan)
+    - long-term chat history (not in plan)
+        - store the most recent messages verbatim
+        - previous messages summarized
+        - oldest messages summary of summaries
+        - will need a length check and a compaction method
+    - Triage agent should fetch the most pertinent conversational memories
+    - Storage and retrieval:
+        - store all chats verbatim in vector search
+        - if the user query can use older chats, we can find them.
+- The Planner makes a check to procedural memory to see if anything similar has been done in the past
+    - should the planner check procedural memory for each step that needs to be done to see if those have been done in the past?
+    - seems like planning steps need to also have:
+        - child steps when one step requires more than one process
+        - some kind of flag for which steps can be done concurrently so wolfpaw can spawm several agents at once for parallel workflows
+- Should `step` class include a `parentStep` property or a `childStep` array?
+- when procedural memories are stored, is there a step to reduce them to core value and distill the steps to what is most essential and general?
+- do we have Human in the Loop? We should be able to ask human for more instructions/clarity/safety checks through the same channel they initiated the action.
+- We may want to seed Skills with a few so that the agent knows what they are supposed to look like, what they are for.
