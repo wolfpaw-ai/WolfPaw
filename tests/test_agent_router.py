@@ -54,16 +54,9 @@ async def test_quick_verdict_dispatches_to_quick_unchanged():
 # test_agent_router_plan.py — see the FakePlanner there.
 
 
-async def test_task_verdict_falls_back_to_quick_with_preamble():
-    router = Router(
-        triage=FakeTriage(
-            TriageVerdict(route="task", complexity="ambitious", reasoning="r"),
-        ),
-        quick=FakeQuick(reply="(answer)"),
-    )
-    text = await router.handle(ctx=_ctx(), thread_id=uuid4(), content="hi")
-    assert text.startswith("(Triage suggested I track this")
-    assert text.endswith("(answer)")
+# Note: the "task" verdict now invokes the TaskService (Planner →
+# Executor → Post-Eval wrapped in a Task lifecycle). That path is
+# covered by test_agent_router_task.py — see the FakeTaskService there.
 
 
 async def test_emits_triage_event_before_dispatch():

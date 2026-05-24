@@ -10,6 +10,7 @@ from wolfpaw.toolbox import registry  # noqa: F401  re-export
 # Trigger tool-module imports for side-effect registration. Order doesn't
 # matter — the registry deduplicates by `name`.
 from wolfpaw.toolbox.tools import (  # noqa: F401
+    ask_user,
     calculator,
     create_chart,
     create_pdf,

@@ -10,7 +10,7 @@ Agent implementations + the Router that composes them. Step 10 shipped the Quick
 - **`planner.py`** — `PlannerAgent`: Sonnet 4.6 (Opus 4.7 for ambitious-complexity verdicts) with a *forced* `generate_plan` tool_use. Embeds the query via Voyage, retrieves similar past plans + matching seeded skills, inlines them into the system prompt, then asks Sonnet for a structured `Plan` (`schemas.Plan` with a list of `Step`s + `is_task` flag). Persists every generated plan into procedural memory (success/score=None until the Executor and Post-Evaluator run). Singleton accessor `get_planner_agent()`.
 - **`executor.py`** — `ExecutorAgent`: runs a `Plan`. Walks steps in execution order, batches contiguous parallel-group steps via `asyncio.gather`. Functional steps dispatch through the tool registry; reasoning + evaluation steps make Sonnet calls with the plan + prior step results in context. On step failure: marks remaining steps `SKIPPED`, returns an error summary as the final answer. Tears down the task's sandbox in `finally`. Persists `final_answer` + `success` + `error` to procedural memory (Post-Evaluator follows up with `score`). Synthesis is skipped when the last completed step is reasoning (the planner already produced the final text). Singleton accessor `get_executor_agent()`.
 - **`post_evaluator.py`** — `PostEvaluatorAgent`: Haiku 4.5 with a *forced* `record_score` tool_use returning `PostEvalVerdict(score, summary, what_went_well, what_went_wrong, improvements)` on a 0-100 scale. Score is clamped server-side. Runs synchronously in the Router after the Executor; failures are swallowed so scoring never blocks the user response. Singleton accessor `get_post_evaluator_agent()`.
-- **`router.py`** — `Router`: orchestrates Triage → downstream dispatch for every channel. Calls `TriageAgent.classify`, emits a `triage` event, then dispatches to Quick or Planner+Executor+Post-Evaluator or Task (currently falls through to Quick with a preamble until step 15). The plan path emits a `plan` event with a step summary, propagates the executor's `step.start` / `step.end` / `step.error` events, then emits a `score` event with the verdict before returning the final answer.
+- **`router.py`** — `Router`: orchestrates Triage → downstream dispatch for every channel. Calls `TriageAgent.classify`, emits a `triage` event, then dispatches to Quick (one-shot) or Planner+Executor+Post-Evaluator (plan path) or `TaskService.create_and_run` (task path, ships in step 15 — wraps the same agents in a persistent Task row so `ask_user` works and ctx.task_id flows everywhere). The plan/task path emits a `plan` event with a step summary, propagates the executor's `step.start` / `step.end` / `step.error` events, then emits a `score` event with the verdict before returning the final answer; the task path also emits a `task` event with the new task id.
 
 ## Flow
 
@@ -31,7 +31,12 @@ channel /chat → Router.handle(content) →
                       → task_events.append_event("plan_scored", verdict)
                   → persist user + final_answer to messages
                   → return final_answer
-        - task  → (step 15) TaskService.create(...); today: Quick + preamble
+        - task  → TaskService.create_and_run(...)
+                  → emit("task", task_id)
+                  → planner + executor + post-eval all run inside a Task row
+                    so ctx.task_id flows through (ask_user requires it,
+                    sandbox keys on it, token_usage records it)
+                  → returns the executor's final_answer
 ```
 
 The Router is the only thing channels ever call. Adding a new channel (Telegram in step 18) means wiring it through `Router.handle(...)` exactly the same way the web channel does.

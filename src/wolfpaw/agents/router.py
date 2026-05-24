@@ -5,11 +5,15 @@ message, then dispatches to the appropriate handler:
     - "quick" → QuickAgent.handle (final text response)
     - "plan"  → PlannerAgent.plan → ExecutorAgent.execute
                   → PostEvaluatorAgent.evaluate → final text + score persisted
-    - "task"  → falls through to Quick with a preamble until Tasks (step 15)
+    - "task"  → TaskService.create_and_run (Task row + same pipeline,
+                with ctx.task_id flowing through so `ask_user` works)
 
 SSE events for the plan path, in order:
     triage → plan → (step.start/step.end/step.error per step) →
     score → delta → done
+
+SSE events for the task path add `task` (emitted right after the task
+row is created, payload = task_id) so clients can /task <id> for status.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ from __future__ import annotations
 import json
 from typing import Awaitable, Callable
 from uuid import UUID
+
+from typing import TYPE_CHECKING
 
 from wolfpaw.agents.executor import ExecutorAgent, get_executor_agent
 from wolfpaw.agents.planner import PlannerAgent, get_planner_agent
@@ -38,14 +44,17 @@ from wolfpaw.schemas import ExecutionPlan, Plan, PostEvalVerdict
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
+# `tasks.service` imports back into `agents.*`, so a top-level import would
+# create a cycle. Use a TYPE_CHECKING import for the type hint and a lazy
+# import inside the property accessor.
+if TYPE_CHECKING:
+    from wolfpaw.tasks.service import TaskService
+
 log = get_logger()
 
 EmitFn = Callable[[str, str], Awaitable[None] | None]
 
-_TASK_FALLBACK_PREAMBLE = (
-    "(Triage suggested I track this as a long-running Task, but Tasks"
-    " aren't online yet — running through the Quick path instead.)\n\n"
-)
+_TASK_TITLE_MAX = 80
 
 
 class Router:
@@ -57,12 +66,14 @@ class Router:
         planner: PlannerAgent | None = None,
         executor: ExecutorAgent | None = None,
         post_evaluator: PostEvaluatorAgent | None = None,
+        task_service: "TaskService | None" = None,
     ) -> None:
         self._triage = triage
         self._quick = quick
         self._planner = planner
         self._executor = executor
         self._post_evaluator = post_evaluator
+        self._task_service = task_service
 
     @property
     def triage(self) -> TriageAgent:
@@ -83,6 +94,14 @@ class Router:
     @property
     def post_evaluator(self) -> PostEvaluatorAgent:
         return self._post_evaluator or get_post_evaluator_agent()
+
+    @property
+    def task_service(self) -> "TaskService":
+        if self._task_service is not None:
+            return self._task_service
+        from wolfpaw.tasks.service import get_task_service
+
+        return get_task_service()
 
     async def handle(
         self,
@@ -115,10 +134,10 @@ class Router:
             )
 
         if verdict.route == "task":
-            answer = await self.quick.handle(
-                ctx=ctx, thread_id=thread_id, content=content, emit=emit,
+            return await self._handle_task(
+                ctx=ctx, thread_id=thread_id, content=content,
+                complexity_hint=verdict.complexity, emit=emit,
             )
-            return _TASK_FALLBACK_PREAMBLE + answer
 
         # Defensive: an unknown route would already have been normalized in
         # TriageAgent.classify, but if it ever escapes, treat as quick.
@@ -126,6 +145,38 @@ class Router:
         return await self.quick.handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=emit,
         )
+
+    async def _handle_task(
+        self,
+        *,
+        ctx: ToolContext,
+        thread_id: UUID,
+        content: str,
+        complexity_hint: str,
+        emit: EmitFn | None,
+    ) -> str:
+        outcome = await self.task_service.create_and_run(
+            user_id=ctx.user_id,
+            thread_id=thread_id,
+            content=content,
+            title=_title_from_content(content),
+            description=content,
+            channel_for_completion="web",
+            complexity_hint=complexity_hint,
+            emit=emit,
+        )
+        try:
+            async with acquire() as conn:
+                await conv.append(
+                    conn, thread_id=thread_id, role="user", content=content,
+                )
+                await conv.append(
+                    conn, thread_id=thread_id, role="assistant",
+                    content=outcome.final_answer,
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("router.task_persist_failed", exc_info=True)
+        return outcome.final_answer
 
     async def _handle_plan(
         self,
@@ -208,6 +259,14 @@ class Router:
                 )
         except Exception:  # noqa: BLE001
             log.warning("router.score_persist_failed", exc_info=True)
+
+
+def _title_from_content(content: str) -> str:
+    """First line of the user's message, capped at _TASK_TITLE_MAX chars."""
+    first_line = content.strip().split("\n", 1)[0].strip() or "Task"
+    if len(first_line) > _TASK_TITLE_MAX:
+        first_line = first_line[: _TASK_TITLE_MAX - 1].rstrip() + "…"
+    return first_line
 
 
 def _summarize_plan_for_event(plan: Plan) -> str:

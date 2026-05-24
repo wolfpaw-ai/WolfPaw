@@ -6,7 +6,7 @@ User-facing surfaces (web, eventually Telegram / email / Slack) all implement th
 
 - **`__init__.py`** — `Channel` ABC + `InboundMessage` dataclass. Every channel implements `receive(payload) → InboundMessage`, `send(user_id, content)`, `supports_streaming()`. The ABC is the contract; concrete channels live as siblings.
 - **`commands.py`** — `CommandDispatcher` + `@register("name", "description")` decorator. Slash messages (`/help`, `/usage`, …) are intercepted here so they never burn model tokens; non-slash messages return `None` and fall through to the agent pipeline. `/help` is the only built-in registered here; other commands register themselves from their owning module (e.g. `metering/usage_report.py` registers `/usage`).
-- **`web.py`** — `WebChannel` + `POST /channels/web/chat` SSE endpoint. The endpoint dispatches through `commands` first; if no command matches, it streams a placeholder `delta` (the Quick Agent lands in step 10). SSE events are framed as `event: command | delta | done | error`.
+- **`web.py`** — `WebChannel` + `POST /channels/web/chat` SSE endpoint + `POST /channels/web/answer` (resolves `ask_user` pending questions). Chat dispatches through `commands` first; non-command messages flow to the Router which composes Triage → (Quick | Plan | Task). SSE events: `thread`, `command`, `triage`, `plan`, `tool`, `task`, `ask_user`, `step.start` / `step.end` / `step.error`, `score`, `delta`, `done`, `error`.
 
 ## How it fits together
 

@@ -24,6 +24,12 @@ Step 8 (sandbox):
 - **`install_package`** — `pip install` into the sandbox. Package spec is regex-validated against shell injection.
 - **`sandbox_read_file`** / **`sandbox_write_file`** — UTF-8 text I/O against paths inside the sandbox.
 
+Step 9 (artifact production, all run inside the sandbox):
+- **`create_spreadsheet`** / **`create_chart`** / **`create_slides`** / **`create_pdf`** — see [the agents README](../agents/README.md) for how the planner adapts seeded skills that compose these.
+
+Step 15 (human-in-the-loop):
+- **`ask_user`** — pause the current Task, push a question to the user via their channel, return their answer once they reply. Requires `ctx.task_id` (the state machine needs somewhere to sit). Times out cleanly into `blocked` status. Persistence + reply plumbing live in `wolfpaw/tasks/` — this tool is the executor-side surface.
+
 ## How it fits together
 
 The Quick Agent (step 10) and Executor (step 13) look up tools via `get_registry().get(name)` and invoke `await tool.run(ctx, **inputs)`. The sandbox tools flow through `wolfpaw.sandbox.get_manager()` so one sandbox per `(user_id, task_id)` is reused across calls. Workspace tools talk to `wolfpaw.storage.get_storage()` and the `workspace_files` DAO; SQL tools talk to Postgres via `memory.db.acquire`.

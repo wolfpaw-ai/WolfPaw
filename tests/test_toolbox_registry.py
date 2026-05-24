@@ -21,6 +21,8 @@ def test_v1_tool_set_registered():
         # step 9 (artifact production)
         "create_spreadsheet", "create_chart",
         "create_slides", "create_pdf",
+        # step 15 (HITL)
+        "ask_user",
     }
 
 

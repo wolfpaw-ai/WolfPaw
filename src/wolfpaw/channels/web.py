@@ -1,13 +1,14 @@
-"""Web channel: a single `/channels/web/chat` SSE endpoint.
-
-Authenticated POST → server-sent events. Slash commands route through the
-shared dispatcher and stream back a `command` event. Plain messages are
-handed to the Router (step 11), which runs Triage to classify, then
-dispatches to Quick (step 10) — or to Plan / Task once those land.
+"""Web channel: `/channels/web/chat` SSE endpoint + `/channels/web/answer`
+for resolving `ask_user` pauses.
 
 Stream shape:
-    event: thread | command | triage | tool | delta | done | error
+    event: thread | command | triage | plan | tool | task | ask_user
+         | step.start | step.end | step.error | score | delta | done | error
     data: <text>             # one `data:` line per newline in the text
+
+`/channels/web/answer` (POST): the user supplies an answer to a pending
+ask_user question. Resolves the in-process registry's future so the tool
+returns the answer to the executor and the task resumes.
 
 `WebChannel.send()` is intentionally unimplemented — proactive web push
 needs websockets and isn't on the v1 roadmap.
@@ -19,7 +20,7 @@ import asyncio
 from typing import Any, AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
@@ -29,6 +30,11 @@ from wolfpaw.channels import Channel, InboundMessage
 from wolfpaw.channels.commands import get_dispatcher
 from wolfpaw.memory import conversational as conv
 from wolfpaw.memory.db import acquire
+from wolfpaw.tasks.ask_user_registry import (
+    AlreadyAnswered,
+    UnknownQuestion,
+    get_registry as get_ask_user_registry,
+)
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -39,6 +45,11 @@ router = APIRouter(prefix="/channels/web", tags=["channels"])
 class ChatRequest(BaseModel):
     content: str
     thread_id: UUID | None = None
+
+
+class AnswerRequest(BaseModel):
+    question_id: UUID
+    answer: str
 
 
 class WebChannel(Channel):
@@ -165,3 +176,24 @@ async def chat(
         yield _sse_event("done", "")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.post("/answer", status_code=204)
+async def answer(
+    payload: AnswerRequest,
+    user_id: UUID = Depends(require_user_id),
+) -> None:
+    """Resolve a pending `ask_user` question. The web client POSTs here
+    when the user types their answer to a question that was emitted as
+    an `ask_user` SSE event during a task."""
+    registry = get_ask_user_registry()
+    try:
+        await registry.submit_answer(
+            question_id=payload.question_id,
+            user_id=user_id,
+            answer=payload.answer,
+        )
+    except UnknownQuestion:
+        raise HTTPException(404, "no such pending question")
+    except AlreadyAnswered:
+        raise HTTPException(409, "question already answered")

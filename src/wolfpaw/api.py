@@ -15,6 +15,7 @@ from wolfpaw.config import get_settings
 from wolfpaw.memory.db import close_pool
 from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — registers /usage
 from wolfpaw import toolbox as _toolbox  # noqa: F401 — registers v1 tool set
+from wolfpaw.tasks import commands as _task_commands  # noqa: F401 — registers /tasks etc
 from wolfpaw.workspace.routes import router as workspace_router
 from wolfpaw.tracing import (
     configure_logging,
