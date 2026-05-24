@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
     soul_path: str = ""
 
+    # Telegram (step 18). Hosted uses one shared `@WolfpawBot`; OSS users
+    # provision their own bot via @BotFather and set these env vars.
+    telegram_bot_token: str = ""
+    telegram_bot_username: str = "WolfpawBot"     # for deep-link URLs
+    telegram_webhook_secret: str = ""             # X-Telegram-Bot-Api-Secret-Token
+    telegram_link_token_ttl_minutes: int = 15
+
     # Sandbox (step 8). Provider selection + per-execution limits.
     sandbox_backend: str = "subprocess"        # "subprocess" | "docker" | "e2b"
     sandbox_idle_timeout_seconds: int = 15 * 60

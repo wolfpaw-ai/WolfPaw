@@ -30,7 +30,7 @@ Wolfpaw is channel-native: you reach it where you already work.
 ### Channels
 
 - **Web chat** — sign in at `wolfpaw.ai` (or your self-host URL), type in the chat box. Replies stream live. *(Backend endpoint built; React UI lands step 19.)*
-- **Telegram** *(v1, step 18)* — DM `@WolfpawBot` after linking your account from web. One shared bot for hosted; OSS users provision their own via BotFather.
+- **Telegram** — DM `@WolfpawBot` after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile` or the channel-settings UI). One shared bot for hosted; OSS users provision their own via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
 - **Email** *(v1.5, step 23)* — forward anything to `alice@wolfpaw.ai`; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
 - **Slack** *(v2, step 25)* — workspace install, slash command + DM.
 
@@ -559,9 +559,9 @@ wolfpaw/
     tracing.py                       # trace_id contextvar + structured JSON logger
     agents/                          # Quick + Triage + Planner + Executor (incl. subagent steps) + Post-Evaluator + Router (steps 10–17)  [README]
     auth/                            # magic-link auth, sessions, user bootstrap  [README]
-    channels/                        # Channel ABC, web SSE channel, /help, /usage  [README]
+    channels/                        # Channel ABC, web SSE, Telegram webhook + onboarding, slash dispatcher  [README]
     embeddings/                      # EmbeddingClient ABC, Voyage + Stub providers  [README]
-    memory/                          # asyncpg pool, conversational, procedural, skills, task_events  [README]
+    memory/                          # asyncpg pool, conversational, procedural, skills, task_events, channel_links  [README]
     metering/                        # cost recording, prompt versions, ModelClient, /usage  [README]
     persona/                         # Soul loader, UserProfile DAO, system-prompt builder, /me/profile  [README]
     sandbox/                         # Sandbox ABC, Subprocess/Docker/E2B providers, manager  [README]
@@ -570,7 +570,7 @@ wolfpaw/
     toolbox/                         # tool registry + 16 tools (info, docs, SQL, sandbox, artifacts, ask_user)  [README]
     workspace/                       # workspace_files DAO + REST API  [README]
   tests/
-    test_*.py                        # 232 unit + 82 DB-gated tests as of step 17
+    test_*.py                        # 243 unit + 92 DB-gated tests as of step 18
 ```
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
@@ -581,7 +581,7 @@ Each subfolder has its own README — start there when extending that domain. Th
 
 ## Status
 
-Steps 1–17 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
+Steps 1–18 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
 
 - **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
 - **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
@@ -597,10 +597,11 @@ Steps 1–17 of the v1 build order are shipped (see [`implementation_plan.md`](i
 - **Tasks + `ask_user`** (step 15) — `memory/tasks.py` DAO with the full state machine and cross-user-scoped reads/cancels. `tasks/` package: `TaskService.create_and_run` wraps Planner+Executor+Post-Eval in a Task row with per-step status transitions and `task_events` emissions. `ask_user` tool pauses a task on `asyncio.Future`, resumes when the user POSTs to `/channels/web/answer`. Slash commands `/tasks`, `/task <id>`, `/cancel <id>` (all user-scoped). Router's task verdict now calls `TaskService`; SSE adds `task` event. **arq async worker deferred** (sync execution covers the substrate).
 - **Sub-agent delegation** (step 16) — new `subagent` step kind. The Planner can mark plan branches as delegated, the Executor spawns a child Task via `TaskService.create_and_run` (with `parent_task_id` + `budget_cents`), and captures the child's `final_answer` as the step output. Depth capped at 3 ancestors via `memory.tasks.get_depth`. Multiple subagent steps in the same `parallel_group` run concurrently via the existing `asyncio.gather` path; a trailing reasoning step in the parent plan synthesizes their outputs.
 - **Soul + User File integration** (step 17) — new `persona/` subpackage: `soul.py` loads + hashes `soul.md`, `user_profile.py` DAO with partial-write `update(...)` that bumps `version`, `builder.py` assembles `Soul + User File + agent_role` into every agent's system prompt. All 5 agents now build their system prompts at call time via `persona.builder.build_for_agent`; `prompt_versions` hashes only the per-agent role (Soul + Profile vary per-user). New `GET / PATCH /me/profile` endpoints (React UI lands step 19). Thread creation now stamps `soul_version` + `user_profile_version` so procedural-memory retrieval can later scope by persona snapshot.
+- **Telegram channel** (step 18) — migration `006_telegram.sql` adds `channel_links` + `channel_link_tokens`. New `TelegramChannel` adapter, `HttpTelegramClient` (httpx → Bot API `sendMessage`) + injectable `FakeTelegramClient` for tests, and two HTTP routes: `POST /channels/telegram/webhook` (validates `X-Telegram-Bot-Api-Secret-Token`, handles `/start link_<token>` onboarding inline, dispatches slash commands inline, fires the Router as a background `asyncio.create_task` for free-form messages) and `POST /channels/telegram/link-token` (authenticated Wolfpaw user → deep-link URL `https://t.me/<bot>?start=link_<token>`). Single-use TTL'd link tokens via `channels/telegram_tokens.py`. Per-user thread continuity: each Telegram inbound extends the user's most recent telegram thread.
 
-**Tests:** `pytest` runs 232 unit tests in ~1s; 82 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+**Tests:** `pytest` runs 243 unit tests in ~1s; 92 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** Tiered conversational compaction (12.5), Telegram channel (18), React web app (19).
+**Next up:** Tiered conversational compaction (12.5), React web app (19).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 
