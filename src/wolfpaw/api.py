@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from wolfpaw import __version__
 from wolfpaw.auth.routes import router as auth_router
+from wolfpaw.channels.slack import router as slack_channel_router
 from wolfpaw.channels.telegram import router as telegram_channel_router
 from wolfpaw.channels.web import router as web_channel_router
 from wolfpaw.config import get_settings
@@ -78,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(web_channel_router)
     app.include_router(telegram_channel_router)
+    app.include_router(slack_channel_router)
     app.include_router(workspace_router)
     app.include_router(persona_router)
     app.include_router(tasks_router)

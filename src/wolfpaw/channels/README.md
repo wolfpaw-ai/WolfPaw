@@ -10,7 +10,10 @@ User-facing surfaces (web, Telegram, eventually email / Slack) all implement the
 - **`telegram.py`** — `TelegramChannel` + two routes. `POST /channels/telegram/webhook` (validated against `X-Telegram-Bot-Api-Secret-Token`) parses Telegram updates, handles `/start link_<token>` onboarding inline, dispatches slash commands inline, and fires the Router as a background `asyncio.create_task` for free-form messages — webhook returns 200 fast and the response is pushed back via `sendMessage` formatted as MarkdownV2 (so the agent's `**bold**` and code spans render). `POST /channels/telegram/link-token` (authenticated Wolfpaw user) mints a single-use deep-link URL: `https://t.me/<bot_username>?start=link_<token>`. `/reset` from Telegram creates a fresh thread server-side (Telegram has no client thread state).
 - **`telegram_client.py`** — `HttpTelegramClient` (httpx wrapper over the Bot API's `sendMessage`, optional `parse_mode`) + `FakeTelegramClient` for tests. `get_telegram_client()` is the singleton; `set_telegram_client(fake)` is the test-injection hook.
 - **`telegram_markdown.py`** — `to_markdown_v2(text)` converts the agent's CommonMark-ish output (`**bold**`, ` `code` `, ` ```block``` `, `[text](url)`, `_italic_`) into Telegram MarkdownV2 with proper escaping for every reserved character. Unknown / unmatched markup falls back to character-level escaping so the Bot API never rejects the message.
-- **`telegram_tokens.py`** — `issue(...)` mints a token (URL-safe plaintext + SHA-256 hash) into `channel_link_tokens`; `consume(...)` validates + marks used atomically in a transaction and returns the bound user_id. Same shape as `magic_link_tokens`.
+- **`telegram_tokens.py`** — `issue(...)` mints a token (URL-safe plaintext + SHA-256 hash) into `channel_link_tokens`; `consume(...)` validates + marks used atomically in a transaction and returns the bound user_id. Same shape as `magic_link_tokens`. **Reused by Slack** — the OAuth `state` parameter is one of these tokens, bound to the Wolfpaw user who clicked "Connect Slack".
+- **`slack.py`** — `SlackChannel` + four routes. `GET /channels/slack/install-url` (authed) mints a state token + returns the Slack OAuth URL. `GET /channels/slack/oauth/callback` consumes the state token, exchanges the code via `oauth.v2.access`, persists the workspace + a `channel_links` row (external_id = `<team_id>:<slack_user_id>` so the same person in two workspaces is two distinct identities). `POST /channels/slack/events` handles the Events API: URL-verification handshake + DM dispatch (filters out bot-authored messages + non-IM channels). `POST /channels/slack/commands` handles the `/wolfpaw` slash command — dispatches `/help`-style sub-commands inline, fires the Router for free-form text with an "Working on it…" ack (Slack has a 3s response window) and pushes the real reply via `chat.postMessage`. All inbound POSTs verify the HMAC signature before parsing.
+- **`slack_signing.py`** — `verify(...)` checks the `X-Slack-Signature` HMAC against the raw request body keyed by the signing secret, plus rejects timestamps outside ±5min. Raises `BadSignature` on any failure (don't leak which check failed). Must hash the raw bytes, not re-serialized JSON.
+- **`slack_client.py`** — `HttpSlackClient` (httpx wrapper over `oauth.v2.access` + `chat.postMessage`) + `FakeSlackClient` for tests + `set_slack_client(...)` injection hook. `SlackApiError` wraps non-ok responses so callers don't have to check `["ok"]` everywhere.
 
 ## How it fits together
 
@@ -26,8 +29,24 @@ us             →  consume token → channel_links.create(user_id, telegram, tg
 us             →  sendMessage "You're linked." back to the chat
 ```
 
+Slack install flow (OAuth):
+```
+web client     →  GET  /channels/slack/install-url                (authed)
+                ←  {url: "https://slack.com/oauth/v2/authorize?...&state=<token>"}
+user           →  clicks URL → Slack approval screen → "Allow"
+Slack          →  GET  /channels/slack/oauth/callback?code=...&state=<token>
+us             →  consume state token → wolfpaw user_id
+us             →  POST slack.com/api/oauth.v2.access  with code → bot_token + team + slack_user_id
+us             →  slack_workspaces.upsert(team_id, bot_token, ...)
+us             →  channel_links.create(user_id, slack, external_id=`<team_id>:<slack_user_id>`)
+us             →  render "Wolfpaw is now installed in <workspace>." HTML page
+```
+
+The Slack app itself is created by the operator from [`docs/slack-app-manifest.yaml`](../../../docs/slack-app-manifest.yaml) — one app per deployment (production / staging / dev), each with its own client id + signing secret. Each workspace's install gets its own bot token, stored in `slack_workspaces`.
+
 ## Extending
 
-- **New channel** (email, Slack): subclass `Channel`, parse the provider payload into `InboundMessage`, mount a webhook/route, run inbound through `dispatcher.dispatch` for slash commands and `Router.handle` for free-form messages. For push channels (Telegram, Slack) keep the webhook fast and offload the agent work to a background task or queue.
+- **New channel** (email next): subclass `Channel`, parse the provider payload into `InboundMessage`, mount a webhook/route, run inbound through `dispatcher.dispatch` for slash commands and `Router.handle` for free-form messages. For push channels (Telegram, Slack) keep the webhook fast and offload the agent work to a background task or queue.
 - **New slash command:** `@register("name", "description")` on an `async (msg, args) -> CommandResult` handler in whatever module owns the data. Make sure the module gets imported at app boot so the side-effect registration runs (see `api.py`).
 - **arq async processing** for the webhook background tasks lands together with the arq worker deferred from step 15.
+- **Slack: channel mentions + threads.** v1 routes DMs only. `app_mention` events are already in scope at install time; wiring them up means handling `event.type == "app_mention"` in `_handle_message_event` and choosing a reply channel (the originating channel rather than the user's IM). Slack threads (`thread_ts`) would map cleanly onto Wolfpaw's `thread_id` for in-channel continuity.

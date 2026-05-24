@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""             # X-Telegram-Bot-Api-Secret-Token
     telegram_link_token_ttl_minutes: int = 15
 
+    # Slack (step 21). One Slack app per deployment; each workspace
+    # installs the app via the OAuth flow which stores a per-workspace
+    # bot token in `slack_workspaces`. All three of these come from the
+    # Slack app's "Basic Information" + "OAuth & Permissions" pages.
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""                # for HMAC verify on events + commands
+    slack_install_token_ttl_minutes: int = 15     # OAuth state token TTL
+
     # Sandbox (step 8). Provider selection + per-execution limits.
     sandbox_backend: str = "subprocess"        # "subprocess" | "docker" | "e2b"
     sandbox_idle_timeout_seconds: int = 15 * 60

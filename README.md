@@ -31,7 +31,7 @@ Wolfpaw is channel-native: you reach it where you already work.
 - **Web chat** — sign in at your deployment's URL, type in the chat box. Replies stream live. The React app under `web/` ships chat + task list + workspace files + usage dashboard + profile editor + Telegram link minting.
 - **Telegram** — DM your bot after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile` or the channel-settings UI). Operators provision the bot via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
 - **Email** *(v1.5)* — forward to a per-user alias on your deployment's domain; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
-- **Slack** *(v2, step 21)* — workspace install, slash command + DM.
+- **Slack** *(step 21)* — workspace install via OAuth (create your app from [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml), then "Connect Slack" from the web app's profile page). `/wolfpaw <text>` slash command and DMs to the bot both go through the agent pipeline.
 
 ### Slash commands
 
@@ -560,6 +560,7 @@ wolfpaw/
   .env.example                       # env template (step 20)
   docs/
     self-host.md                     # self-host reference (step 20)
+    slack-app-manifest.yaml          # Slack app manifest (step 21)
     uml_class_diagram.md             # anticipated class structure (Mermaid)
     decisions/                       # architecture decision records
       framework-choice.md
@@ -570,6 +571,10 @@ wolfpaw/
     001_init.sql                     # users, threads, plans, tasks, sandboxes, token_usage, …
     002_auth.sql                     # magic_link_tokens
     003_sandbox.sql                  # nullable task_id on sandboxes + compute_usage
+    004_seed_skills.sql              # seeded starter skills marker
+    005_post_evaluator.sql           # nullable task_id on task_events
+    006_telegram.sql                 # channel_links + channel_link_tokens
+    007_slack.sql                    # slack_workspaces
   src/wolfpaw/
     api.py                           # FastAPI app — mounts auth, web channel, workspace
     config.py                        # env, model IDs, feature flags, backend selection
@@ -577,7 +582,7 @@ wolfpaw/
     tracing.py                       # trace_id contextvar + structured JSON logger
     agents/                          # Quick + Triage + Planner + Executor (incl. subagent steps) + Post-Evaluator + Router (steps 10–17)  [README]
     auth/                            # magic-link auth, sessions, user bootstrap  [README]
-    channels/                        # Channel ABC, web SSE, Telegram webhook + onboarding, slash dispatcher  [README]
+    channels/                        # Channel ABC, web SSE, Telegram webhook + onboarding, Slack OAuth + events + commands, slash dispatcher  [README]
     embeddings/                      # EmbeddingClient ABC, Voyage + Stub providers  [README]
     memory/                          # asyncpg pool, conversational, procedural, skills, task_events, channel_links  [README]
     metering/                        # cost recording, prompt versions, ModelClient, /usage  [README]
@@ -588,7 +593,7 @@ wolfpaw/
     toolbox/                         # tool registry + 16 tools (info, docs, SQL, sandbox, artifacts, ask_user)  [README]
     workspace/                       # workspace_files DAO + REST API  [README]
   tests/
-    test_*.py                        # 268 unit + 103 DB-gated tests as of step 20
+    test_*.py                        # 294 unit + 108 DB-gated tests as of step 21
 web/                                  # React + Vite SPA (step 19) — Dockerfile + nginx config for self-host  [README]
 ```
 
@@ -618,10 +623,12 @@ Steps 1–19 of the v1 build order are shipped (see [`implementation_plan.md`](i
 - **Soul + User File integration** (step 17) — new `persona/` subpackage: `soul.py` loads + hashes `soul.md`, `user_profile.py` DAO with partial-write `update(...)` that bumps `version`, `builder.py` assembles `Soul + User File + agent_role` into every agent's system prompt. All 5 agents now build their system prompts at call time via `persona.builder.build_for_agent`; `prompt_versions` hashes only the per-agent role (Soul + Profile vary per-user). New `GET / PATCH /me/profile` endpoints (React UI lands step 19). Thread creation now stamps `soul_version` + `user_profile_version` so procedural-memory retrieval can later scope by persona snapshot.
 - **Telegram channel** (step 18) — migration `006_telegram.sql` adds `channel_links` + `channel_link_tokens`. New `TelegramChannel` adapter, `HttpTelegramClient` (httpx → Bot API `sendMessage`) + injectable `FakeTelegramClient` for tests, and two HTTP routes: `POST /channels/telegram/webhook` (validates `X-Telegram-Bot-Api-Secret-Token`, handles `/start link_<token>` onboarding inline, dispatches slash commands inline, fires the Router as a background `asyncio.create_task` for free-form messages) and `POST /channels/telegram/link-token` (authenticated Wolfpaw user → deep-link URL `https://t.me/<bot>?start=link_<token>`). Single-use TTL'd link tokens via `channels/telegram_tokens.py`.
 - **React web app** (step 19) — new `web/` directory: Vite + React + TypeScript + React Router, dev server proxies API paths so the session cookie stays single-origin. Auth context + magic-link sign-in + verify. ChatPage with a POST-based SSE parser that renders every event type (`thread` / `triage` / `plan` / `tool` / `step.start|end|error` / `score` / `task` / `ask_user` / `delta`) plus an inline reply form for `ask_user` pauses. Tasks list + detail (with cancel). Files browser. Profile editor (User File + Telegram link minting). Usage dashboard with scope tabs. Backend additions: `src/wolfpaw/tasks/routes.py` (`GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel`) and `src/wolfpaw/metering/routes.py` (`GET /usage?scope=...`) — JSON companions to the slash commands.
+- **OSS packaging** (step 20) — top-level `Dockerfile` + `web/Dockerfile` + `docker-compose.yml` + `install.sh` + `.env.example` + `docs/self-host.md`. Four-service stack: `db` (pgvector/pg16 with healthcheck) → `migrate` (one-shot, idempotent `python -m scripts.migrate` tracks applied files in `schema_migrations`) → `app` (FastAPI on :8000, depends on migrate completed successfully) → `web` (nginx serving the Vite build, proxying API paths with SSE-friendly `proxy_buffering off`, published on host `:3000`). New `scripts/migrate.py` runner + `WOLFPAW_MIGRATIONS_DIR` env override so the migrations resolver works in both the source tree (dev) and the container.
+- **Slack channel** (step 21) — migration `007_slack.sql` adds `slack_workspaces` (per-workspace bot token + soft-delete `revoked_at`); reuses `channel_links` + `channel_link_tokens` from step 18. New `channels/slack.py` mounts four routes: `GET /channels/slack/install-url` (mints state token + returns OAuth URL), `GET /channels/slack/oauth/callback` (exchanges code + persists workspace, renders HTML success/error page), `POST /channels/slack/events` (URL-verification handshake + DM dispatch), `POST /channels/slack/commands` (`/wolfpaw <text>` — dispatches built-in commands inline, fires Router for free-form text with "Working on it…" ack). HMAC signature verification on every inbound POST via `channels/slack_signing.py` (raw body + ±5min replay window). `channels/slack_client.py` ships `HttpSlackClient` + `FakeSlackClient`. Channel identity is composite `<team_id>:<slack_user_id>` so the same person in two workspaces is two distinct identities. `docs/slack-app-manifest.yaml` is the operator-facing manifest to paste into api.slack.com/apps.
 
-**Tests:** `pytest` runs 247 unit tests in ~1s; 100 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+**Tests:** `pytest` runs 294 unit tests in ~1s; 108 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** Tiered conversational compaction (12.5), Slack channel (step 21).
+**Next up:** Tiered conversational compaction (12.5). The full v1 build order is shipped; future channels (email forwarding, etc.) are roadmap items rather than blocking work.
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 

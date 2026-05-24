@@ -1,0 +1,61 @@
+# Wolfpaw Slack app manifest.
+#
+# Create your Slack app from this manifest:
+#   1. Go to https://api.slack.com/apps → "Create New App" → "From an app manifest"
+#   2. Pick the workspace you want to develop in (you can distribute it to
+#      others later from Settings → "Manage Distribution")
+#   3. Paste this YAML, replacing every <YOUR-DOMAIN> placeholder with the
+#      public HTTPS URL your Wolfpaw deployment is reachable at. Slack
+#      requires HTTPS — put a TLS-terminating reverse proxy (Caddy, nginx)
+#      in front of the docker-compose stack.
+#   4. After the app is created, copy these into your `.env`:
+#         WOLFPAW_SLACK_CLIENT_ID         ← Basic Information → App Credentials → Client ID
+#         WOLFPAW_SLACK_CLIENT_SECRET     ← Basic Information → App Credentials → Client Secret
+#         WOLFPAW_SLACK_SIGNING_SECRET    ← Basic Information → App Credentials → Signing Secret
+#   5. From the web app's profile page, click "Connect Slack" to start
+#      the OAuth install flow.
+#
+# This manifest claims the minimum permissions Wolfpaw actually uses
+# today. Re-issue the manifest (Settings → Manage app manifest) when
+# you want to add scopes — Slack will prompt installed workspaces to
+# re-authorize the new permissions.
+
+display_information:
+  name: Wolfpaw
+  description: A careful, capable AI worker that meets you in Slack.
+  background_color: "#1a1a1a"
+
+features:
+  bot_user:
+    display_name: Wolfpaw
+    always_online: true
+
+  slash_commands:
+    - command: /wolfpaw
+      url: https://<YOUR-DOMAIN>/channels/slack/commands
+      description: Talk to Wolfpaw, or run a slash command (try `/wolfpaw /help`).
+      usage_hint: "<your message or /help, /usage, /tasks, /reset>"
+      should_escape: false
+
+oauth_config:
+  redirect_urls:
+    - https://<YOUR-DOMAIN>/channels/slack/oauth/callback
+  scopes:
+    bot:
+      - app_mentions:read    # @-mentions in channels (v1.5)
+      - chat:write           # replies via chat.postMessage
+      - commands             # slash commands
+      - im:history           # read past DMs (for thread continuity)
+      - im:read              # see new DMs
+      - im:write             # open a DM channel with the user
+
+settings:
+  event_subscriptions:
+    request_url: https://<YOUR-DOMAIN>/channels/slack/events
+    bot_events:
+      - app_mention          # someone @-mentioned the bot in a channel
+      - message.im           # someone DM'd the bot
+
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
