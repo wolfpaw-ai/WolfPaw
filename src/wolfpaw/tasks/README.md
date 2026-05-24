@@ -7,7 +7,7 @@ arq-driven async worker is a follow-up.
 ## Files
 
 - **`__init__.py`** — intentionally empty. Eager re-exports from `service` would create an import cycle (agents → toolbox → `ask_user` tool → tasks init → service → agents). Consumers use full module paths.
-- **`service.py`** — `TaskService.create_and_run(...)`: orchestrates the full Planner → Executor → Post-Evaluator chain inside a Task row, emitting state-transition events at each step. `TaskOutcome` dataclass carries the final task, plan, execution, verdict, and answer. Singleton `get_task_service()`.
+- **`service.py`** — `TaskService.create_and_run(...)`: orchestrates the full Planner → Executor → Post-Evaluator chain inside a Task row, emitting state-transition events at each step. Accepts `parent_task_id` + `budget_cents` for subagent tasks (step 16). `TaskOutcome` dataclass carries the final task, plan, execution, verdict, and answer. Singleton `get_task_service()`.
 - **`ask_user_registry.py`** — `AskUserRegistry`: process-local dict of `PendingQuestion`s keyed on `question_id`. `register(...)` creates an asyncio.Future the `ask_user` tool awaits; `submit_answer(...)` resolves it. Cross-user `submit_answer` attempts surface as `UnknownQuestion` rather than leaking the question's existence. `cancel(...)` raises in the awaiter — used when a task is cancelled mid-question.
 - **`commands.py`** — registers `/tasks`, `/task <id>`, `/cancel <id>` with the channel dispatcher at module import. All three are user-scoped: you can't list, inspect, or cancel another user's tasks.
 
@@ -59,4 +59,4 @@ In-process registry caveats:
 - **Real async via arq** (deferred): add `workers/arq_app.py` that picks runnable tasks (status='pending' or 'awaiting_user' resumes) and calls `TaskService.run(task_id)`. The TaskService can be split into `create()` + `run()` so the Router can create the row + return immediately while the worker picks up the run.
 - **Recurring tasks**: `tasks.schedule_pattern` is already a column; a cron-style scheduler in `workers/` enqueues runs.
 - **WorkspaceCollision → ask_user**: catch `WorkspaceCollision` in the executor, call ask_user with "Overwrite?", on yes pass `overwrite=True` and retry the step. Small follow-up.
-- **Subagent tasks** (step 16): `tasks.parent_task_id` is already a column. Router or executor spawns sub-tasks; their costs roll up to the parent via the partial-write `update_outcome` pattern.
+- **Per-task `spent_cents` rollup** (deferred): `/usage` already aggregates per-user; a per-task rollup would let `/task <id>` show "spent X of Y budget" once a real consumer needs it.

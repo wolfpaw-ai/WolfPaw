@@ -225,6 +225,26 @@ async def test_fetch_for_task_returns_chronological():
     ]
 
 
+async def test_get_depth_walks_parent_chain():
+    """Subagent depth enforcement (step 16) relies on this."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    conn = await _conn()
+    try:
+        root = await tasks_dao.create(conn, user_id=uid, title="root")
+        child = await tasks_dao.create(
+            conn, user_id=uid, title="child", parent_task_id=root.id,
+        )
+        grand = await tasks_dao.create(
+            conn, user_id=uid, title="grandchild", parent_task_id=child.id,
+        )
+        assert await tasks_dao.get_depth(conn, task_id=root.id) == 0
+        assert await tasks_dao.get_depth(conn, task_id=child.id) == 1
+        assert await tasks_dao.get_depth(conn, task_id=grand.id) == 2
+    finally:
+        await conn.close()
+
+
 async def test_attach_plan_updates_current_plan_id():
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     uid = await _seed_user(dsn)

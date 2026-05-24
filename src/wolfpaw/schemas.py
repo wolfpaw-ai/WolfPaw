@@ -13,7 +13,8 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
-StepKind = Literal["functional", "reasoning", "evaluation"]
+StepKind = Literal["functional", "reasoning", "evaluation", "subagent"]
+_VALID_STEP_KINDS = {"functional", "reasoning", "evaluation", "subagent"}
 
 
 class StepStatus(str, Enum):
@@ -34,6 +35,10 @@ class Step:
       `description` + the accumulated step results.
     - `evaluation` steps are model-graded checks (also Sonnet) that decide
       whether to continue, retry, or branch.
+    - `subagent` steps delegate to a child Task that runs its own full
+      Planner→Executor→Post-Eval pipeline (step 16). `inputs` carries
+      `{query: str, title?: str, budget_cents?: int, complexity_hint?: str}`.
+      Child failure surfaces as a step failure. Depth is capped at 3.
 
     `parallel_group` ties steps that may run concurrently within the same
     plan — the Executor (step 13) dispatches all steps sharing a group id
@@ -62,7 +67,7 @@ class Step:
         kind = data.get("kind", "functional")
         return cls(
             id=str(data.get("id", "")),
-            kind=kind if kind in ("functional", "reasoning", "evaluation") else "functional",
+            kind=kind if kind in _VALID_STEP_KINDS else "functional",
             description=str(data.get("description", "")),
             tool=data.get("tool"),
             inputs=dict(data.get("inputs") or {}),

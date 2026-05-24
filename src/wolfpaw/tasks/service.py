@@ -90,9 +90,16 @@ class TaskService:
         channel_for_completion: str | None = None,
         complexity_hint: str = "moderate",
         emit: EmitFn | None = None,
+        parent_task_id: UUID | None = None,
+        budget_cents: int | None = None,
     ) -> TaskOutcome:
         """Create a Task, plan + execute + score, transition through
-        states. Runs synchronously in the calling process."""
+        states. Runs synchronously in the calling process.
+
+        `parent_task_id` set → this is a sub-task spawned by a parent's
+        subagent step (step 16). Budget is informational for now;
+        spent_cents rollup against `budget_cents` is a future enforcement
+        hook."""
         # 1. Create the task row in `pending`.
         async with acquire() as conn:
             task = await tasks_dao.create(
@@ -101,12 +108,18 @@ class TaskService:
                 title=title,
                 description=description,
                 channel_for_completion=channel_for_completion,  # type: ignore[arg-type]
+                parent_task_id=parent_task_id,
+                budget_cents=budget_cents,
             )
             await task_events.append_event(
                 conn,
                 task_id=task.id,
                 event_type="status.pending",
-                content={"title": task.title},
+                content={
+                    "title": task.title,
+                    **({"parent_task_id": str(parent_task_id)}
+                       if parent_task_id else {}),
+                },
             )
         await _maybe_emit(emit, "task", str(task.id))
         ctx = ToolContext(user_id=user_id, task_id=task.id)
@@ -115,10 +128,11 @@ class TaskService:
         await self._transition(task.id, "status.running", lambda c:
                                tasks_dao.mark_started(c, task_id=task.id))
 
-        # 3. Plan.
+        # 3. Plan. Subagents have no thread context — the Planner skips
+        # fetch_recent when thread_id is None (added in step 16).
         try:
             plan, _plan_ctx = await self.planner.plan(
-                ctx=ctx, thread_id=thread_id or task.id,
+                ctx=ctx, thread_id=thread_id,
                 content=content, complexity_hint=complexity_hint,
             )
             if plan.id is not None:

@@ -34,7 +34,7 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from wolfpaw.config import get_settings
-from wolfpaw.memory import procedural
+from wolfpaw.memory import procedural, tasks as tasks_dao
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
@@ -48,6 +48,12 @@ from wolfpaw.schemas import (
 )
 from wolfpaw.toolbox.registry import Registry, ToolContext, get_registry
 from wolfpaw.tracing import get_logger
+
+# Max ancestor depth for `subagent` steps (step 16). The Executor checks
+# `tasks_dao.get_depth` before spawning a child; spawning is rejected when
+# the parent's depth is already at MAX_SUBAGENT_DEPTH (child would be 1
+# deeper). Keeps recursive plans bounded.
+MAX_SUBAGENT_DEPTH = 3
 
 log = get_logger()
 
@@ -246,6 +252,8 @@ class ExecutorAgent:
                 output = await self._run_reasoning(ctx, step, plan, snapshot)
             elif step.kind == "evaluation":
                 output = await self._run_evaluation(ctx, step, plan, snapshot)
+            elif step.kind == "subagent":
+                output = await self._run_subagent(ctx, step)
             else:
                 raise ValueError(f"unknown step kind: {step.kind!r}")
         except Exception as e:  # noqa: BLE001 — any failure becomes a step failure
@@ -303,6 +311,80 @@ class ExecutorAgent:
         # v1: same shape as reasoning. v2 adds a forced verdict tool_use
         # that drives continue/retry/branch logic.
         return await self._run_reasoning(ctx, step, plan, prior)
+
+    async def _run_subagent(
+        self, ctx: ToolContext, step: Step,
+    ) -> dict[str, Any]:
+        """Spawn a child Task that runs its own Planner→Executor→Post-Eval
+        on `step.inputs.query`. Captures the child's final_answer as the
+        step's output so subsequent reasoning steps can synthesize across
+        multiple subagent outputs.
+
+        Depth check: `MAX_SUBAGENT_DEPTH` ancestors. A subagent at the
+        max depth itself can't spawn further subagents.
+
+        Requires `ctx.task_id` — subagent steps only make sense inside a
+        Task hierarchy. The plan-path Router would have created a task
+        for any plan with `subagent` steps in it.
+        """
+        if ctx.task_id is None:
+            raise ValueError(
+                "subagent steps require a parent task — Triage should"
+                " have routed this through the task path"
+            )
+
+        inputs = step.inputs or {}
+        query = inputs.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(
+                f"subagent step {step.id!r} missing required `inputs.query`"
+            )
+        title = inputs.get("title") or step.description[:80] or step.id
+        budget = inputs.get("budget_cents")
+        child_complexity = inputs.get("complexity_hint") or "moderate"
+
+        async with acquire() as conn:
+            depth = await tasks_dao.get_depth(conn, task_id=ctx.task_id)
+        if depth >= MAX_SUBAGENT_DEPTH:
+            raise ValueError(
+                f"subagent depth cap reached (parent depth={depth},"
+                f" max={MAX_SUBAGENT_DEPTH}) — flatten the plan"
+            )
+
+        # Lazy import: `tasks.service` imports back into the agents
+        # package, so a top-level import here would create a cycle.
+        from wolfpaw.tasks.service import get_task_service
+
+        service = get_task_service()
+        outcome = await service.create_and_run(
+            user_id=ctx.user_id,
+            thread_id=None,                 # subagent gets fresh context
+            content=query,
+            title=title,
+            description=(
+                f"Subagent spawned by parent task {ctx.task_id} for"
+                f" step {step.id!r}: {step.description}"
+            ),
+            parent_task_id=ctx.task_id,
+            budget_cents=budget,
+            complexity_hint=child_complexity,
+            # Don't propagate emit — multiple parallel subagents would
+            # interleave step events into the parent's SSE stream and
+            # make the timeline confusing. The parent's step.start /
+            # step.end events show that the subagent ran.
+            emit=None,
+        )
+
+        if outcome.task.status != "completed":
+            raise ValueError(
+                f"subagent task {outcome.task.id} ended in"
+                f" {outcome.task.status}: {outcome.final_answer}"
+            )
+        return {
+            "subagent_task_id": str(outcome.task.id),
+            "answer": outcome.final_answer,
+            "score": (outcome.verdict.score if outcome.verdict else None),
+        }
 
     # --- synthesis ---------------------------------------------------------
 

@@ -263,3 +263,29 @@ async def attach_plan(
         " WHERE id = $1",
         task_id, plan_id,
     )
+
+
+_MAX_DEPTH_WALK = 16  # safety cap; production depth is bounded at 3 by step 16
+
+
+async def get_depth(
+    conn: asyncpg.Connection, *, task_id: UUID,
+) -> int:
+    """Count ancestors via `parent_task_id`. Root tasks have depth 0.
+
+    Used by the Executor's subagent step to enforce the depth limit
+    (3 levels) without an explicit `depth` column on `tasks`. The walk
+    is capped at `_MAX_DEPTH_WALK` so a corrupt parent chain can't loop
+    forever — anything beyond returns the cap value."""
+    depth = 0
+    current = task_id
+    for _ in range(_MAX_DEPTH_WALK):
+        parent = await conn.fetchval(
+            "SELECT parent_task_id FROM tasks WHERE id = $1",
+            current,
+        )
+        if parent is None:
+            return depth
+        depth += 1
+        current = parent
+    return depth

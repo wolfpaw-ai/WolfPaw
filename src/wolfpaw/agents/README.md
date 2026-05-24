@@ -1,6 +1,6 @@
 # agents/
 
-Agent implementations + the Router that composes them. Step 10 shipped the Quick Agent; step 11 added the Triage Agent and the Router; step 12 added the Planning Agent; step 13 added the Executor; step 14 added the Post-Evaluator. That closes the loop on plan-path quality: Planner → Executor → Post-Evaluator → score back to procedural memory.
+Agent implementations + the Router that composes them. Step 10 shipped the Quick Agent; step 11 added the Triage Agent and the Router; step 12 added the Planning Agent; step 13 added the Executor; step 14 added the Post-Evaluator; step 16 added the `subagent` step kind to the Executor (parent tasks spawn child tasks for parallel investigations). That closes the loop on plan-path quality: Planner → Executor (functional / reasoning / evaluation / subagent) → Post-Evaluator → score back to procedural memory.
 
 ## Files
 
@@ -8,7 +8,7 @@ Agent implementations + the Router that composes them. Step 10 shipped the Quick
 - **`quick.py`** — `QuickAgent`: Haiku 4.5 + the 7 non-sandbox tools. The actual "do work" agent for one-shot answers. Singleton accessor `get_quick_agent()`; test hook `reset_quick_agent()`.
 - **`triage.py`** — `TriageAgent`: Haiku 4.5 with a *forced* `classify` tool_use that returns `TriageVerdict(route, complexity, reasoning)`. Read-only — never writes to `messages`. Singleton accessor `get_triage_agent()`.
 - **`planner.py`** — `PlannerAgent`: Sonnet 4.6 (Opus 4.7 for ambitious-complexity verdicts) with a *forced* `generate_plan` tool_use. Embeds the query via Voyage, retrieves similar past plans + matching seeded skills, inlines them into the system prompt, then asks Sonnet for a structured `Plan` (`schemas.Plan` with a list of `Step`s + `is_task` flag). Persists every generated plan into procedural memory (success/score=None until the Executor and Post-Evaluator run). Singleton accessor `get_planner_agent()`.
-- **`executor.py`** — `ExecutorAgent`: runs a `Plan`. Walks steps in execution order, batches contiguous parallel-group steps via `asyncio.gather`. Functional steps dispatch through the tool registry; reasoning + evaluation steps make Sonnet calls with the plan + prior step results in context. On step failure: marks remaining steps `SKIPPED`, returns an error summary as the final answer. Tears down the task's sandbox in `finally`. Persists `final_answer` + `success` + `error` to procedural memory (Post-Evaluator follows up with `score`). Synthesis is skipped when the last completed step is reasoning (the planner already produced the final text). Singleton accessor `get_executor_agent()`.
+- **`executor.py`** — `ExecutorAgent`: runs a `Plan`. Walks steps in execution order, batches contiguous parallel-group steps via `asyncio.gather`. Four step kinds: functional dispatches through the tool registry; reasoning + evaluation make Sonnet calls with the plan + prior step results in context; **subagent** spawns a child Task via `TaskService.create_and_run` (step 16 — depth capped at 3, parent_task_id propagated, budget passed through). On step failure: marks remaining steps `SKIPPED`, returns an error summary as the final answer. Tears down the task's sandbox in `finally`. Persists `final_answer` + `success` + `error` to procedural memory (Post-Evaluator follows up with `score`). Synthesis is skipped when the last completed step is reasoning (the planner already produced the final text). Singleton accessor `get_executor_agent()`.
 - **`post_evaluator.py`** — `PostEvaluatorAgent`: Haiku 4.5 with a *forced* `record_score` tool_use returning `PostEvalVerdict(score, summary, what_went_well, what_went_wrong, improvements)` on a 0-100 scale. Score is clamped server-side. Runs synchronously in the Router after the Executor; failures are swallowed so scoring never blocks the user response. Singleton accessor `get_post_evaluator_agent()`.
 - **`router.py`** — `Router`: orchestrates Triage → downstream dispatch for every channel. Calls `TriageAgent.classify`, emits a `triage` event, then dispatches to Quick (one-shot) or Planner+Executor+Post-Evaluator (plan path) or `TaskService.create_and_run` (task path, ships in step 15 — wraps the same agents in a persistent Task row so `ask_user` works and ctx.task_id flows everywhere). The plan/task path emits a `plan` event with a step summary, propagates the executor's `step.start` / `step.end` / `step.error` events, then emits a `score` event with the verdict before returning the final answer; the task path also emits a `task` event with the new task id.
 
@@ -110,6 +110,29 @@ execute(ctx, plan, emit=None) → ExecutionPlan →
 Failure semantics: a single failed step fails the whole plan (no retry in v1). The Router renders the executor's `final_answer` regardless of `success` — on failure it's the markdown summary "I ran into a problem on step X…". The Post-Evaluator (step 14) scores the outcome via `procedural.update_outcome(score=...)`.
 
 Sandbox lifecycle: always closed in `finally`. SandboxManager pops by `(user_id, task_id)` key, so closing a sandbox that was never spun up is a safe no-op. Functional steps that hit sandbox tools (`run_python`, `create_pdf`, etc.) implicitly create the sandbox on first call; this method tears it down on exit so the next plan starts fresh.
+
+### subagent steps (step 16)
+
+A `subagent` step delegates to a child Task that runs its own full Planner→Executor→Post-Eval pipeline.
+
+```
+_run_subagent(ctx, step) →
+    1. Require ctx.task_id (subagents only make sense inside a Task)
+    2. Check depth: tasks_dao.get_depth(ctx.task_id) < MAX_SUBAGENT_DEPTH (3)
+    3. Lazy-import TaskService (agents↔tasks circular)
+    4. service.create_and_run(
+         content=step.inputs["query"],
+         title=step.inputs.get("title") or step.description[:80],
+         budget_cents=step.inputs.get("budget_cents"),
+         parent_task_id=ctx.task_id,
+         thread_id=None,           # subagent gets fresh context
+         emit=None,                # don't interleave child events into parent SSE
+       )
+    5. Reject if child status != "completed" (child failure → parent step failure)
+    6. Return {subagent_task_id, answer, score}
+```
+
+Concurrency: multiple `subagent` steps in the same `parallel_group` execute via `asyncio.gather` just like functional/reasoning steps. A trailing reasoning step in the parent plan synthesizes the subagent outputs (each appears in prior_results as `{subagent_task_id, answer, score}`).
 
 ## How the Post-Evaluator works
 

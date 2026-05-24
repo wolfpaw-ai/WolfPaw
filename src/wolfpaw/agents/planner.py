@@ -82,7 +82,10 @@ _GENERATE_PLAN_TOOL = {
                         "id": {"type": "string"},
                         "kind": {
                             "type": "string",
-                            "enum": ["functional", "reasoning", "evaluation"],
+                            "enum": [
+                                "functional", "reasoning",
+                                "evaluation", "subagent",
+                            ],
                         },
                         "description": {"type": "string"},
                         "tool": {"type": "string"},
@@ -116,8 +119,21 @@ Step kinds:
   - "functional" — invoke a specific tool with structured inputs (set `tool` + `inputs`).
   - "reasoning"  — a model call you'll handle inline (no tool); describe what to think through.
   - "evaluation" — a model-graded check; describe what to validate.
+  - "subagent"   — delegate a chunk of work to a child task that runs its own full
+                   Planner→Executor→Post-Evaluator pipeline. Use this when:
+                     * the work splits into independent investigations that benefit
+                       from their own context window (e.g. "research these 5 vendors"
+                       → 5 subagent steps in `parallel_group: 1`)
+                     * the parent's job is to coordinate + synthesize, not execute
+                   `inputs` carries `{query, title?, budget_cents?, complexity_hint?}`.
+                   `query` is what the child agent is asked to do (be specific —
+                   the child has no parent context).
+                   Depth is capped at 3 levels. Don't nest subagents unless really
+                   needed; prefer flattening.
+                   End the parent plan with a reasoning step that synthesizes the
+                   subagent outputs into a coherent answer.
 
-Use `parallel_group: <int>` on steps that may run concurrently (e.g. fetching N URLs at once). Omit `parallel_group` for sequential steps. Keep parallelism conservative — only when steps are genuinely independent.
+Use `parallel_group: <int>` on steps that may run concurrently (e.g. fetching N URLs at once, or N subagent investigations). Omit `parallel_group` for sequential steps. Keep parallelism conservative — only when steps are genuinely independent.
 
 Set `is_task=true` ONLY if the work is long-running (hours/days), needs scheduling, or requires external waits. Most "research X and write Y" requests are single-session — leave `is_task=false`.
 
@@ -180,10 +196,13 @@ class PlannerAgent:
         self,
         *,
         ctx: ToolContext,
-        thread_id: UUID,
+        thread_id: UUID | None,
         content: str,
         complexity_hint: str = "moderate",
     ) -> tuple[Plan, PlanContext]:
+        """Generate a Plan. `thread_id=None` means no conversational history
+        to load — used by subagent tasks (step 16) which run with a fresh
+        context derived only from the subagent step's `inputs.query`."""
         await self._ensure_prompt_version()
 
         # 1. Embed query — cost recorded as a token_usage row.
@@ -205,7 +224,10 @@ class PlannerAgent:
 
         # 2-3. Retrieval.
         async with acquire() as conn:
-            past = await conv.fetch_recent(conn, thread_id=thread_id, n=20)
+            past = (
+                await conv.fetch_recent(conn, thread_id=thread_id, n=20)
+                if thread_id is not None else []
+            )
             past_plans = (
                 await procedural.search_similar(
                     conn, user_id=ctx.user_id,
