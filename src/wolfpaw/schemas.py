@@ -1,16 +1,27 @@
 """Shared cross-package dataclasses.
 
-The Plan / Step shapes the Planner emits and the Executor consumes live
-here so neither package has to import the other.
+The Plan / Step shapes the Planner emits live here. The Executor
+produces StepResults + an ExecutionPlan from a Plan — those shapes also
+live here so the Router and any future consumer can render them without
+importing the agents package.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
 StepKind = Literal["functional", "reasoning", "evaluation"]
+
+
+class StepStatus(str, Enum):
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -76,3 +87,31 @@ class Plan:
 
     def to_steps_jsonb(self) -> list[dict[str, Any]]:
         return [s.to_dict() for s in self.steps]
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """Outcome of running one Step. `output` is the tool result dict for
+    functional steps, the model's text for reasoning/evaluation steps,
+    and None for skipped/not-started steps."""
+
+    step_id: str
+    kind: StepKind
+    status: StepStatus
+    output: Any = None
+    error: str | None = None
+    elapsed_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """What the Executor returns. `results` are in execution order
+    (multiple parallel-group steps still slot into the list at their
+    sequential position). `final_answer` is the synthesized user-facing
+    response (or an error summary on failure)."""
+
+    plan: Plan
+    results: list[StepResult]
+    final_answer: str
+    success: bool
+    error: str | None = None

@@ -79,7 +79,7 @@ curl -N -X POST localhost:8000/channels/web/chat \
   -d '{"content": "/usage"}'
 ```
 
-Non-slash messages go through the Router: Triage classifies → Quick (one-shot answer), Planner (step 12; generates + previews a structured plan — the Executor in step 13 will run it), or Task (step 15, still falling through to Quick today). The SSE stream emits `thread`, `triage`, optional `plan` + `tool` events, then `delta` and `done`.
+Non-slash messages go through the Router: Triage classifies → Quick (one-shot answer), Planner + Executor (generates + runs a structured plan), or Task (step 15, still falling through to Quick today). The SSE stream emits `thread`, `triage`, optional `plan` + `tool` + `step.start` / `step.end` / `step.error` events as the plan executes, then `delta` (final answer) and `done`.
 
 ---
 
@@ -557,7 +557,7 @@ wolfpaw/
     config.py                        # env, model IDs, feature flags, backend selection
     schemas.py                       # cross-package dataclasses (Plan, Step)
     tracing.py                       # trace_id contextvar + structured JSON logger
-    agents/                          # Quick + Triage + Planner + Router (steps 10–12)  [README]
+    agents/                          # Quick + Triage + Planner + Executor + Router (steps 10–13)  [README]
     auth/                            # magic-link auth, sessions, user bootstrap  [README]
     channels/                        # Channel ABC, web SSE channel, /help, /usage  [README]
     embeddings/                      # EmbeddingClient ABC, Voyage + Stub providers  [README]
@@ -568,7 +568,7 @@ wolfpaw/
     toolbox/                         # tool registry + 15 tools (info, docs, SQL, sandbox, artifacts)  [README]
     workspace/                       # workspace_files DAO + REST API  [README]
   tests/
-    test_*.py                        # 174 unit + 49 DB-gated tests as of step 12
+    test_*.py                        # 187 unit + 50 DB-gated tests as of step 13
 ```
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
@@ -579,7 +579,7 @@ Each subfolder has its own README — start there when extending that domain. Th
 
 ## Status
 
-Steps 1–12 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
+Steps 1–13 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
 
 - **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
 - **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
@@ -589,11 +589,12 @@ Steps 1–12 of the v1 build order are shipped (see [`implementation_plan.md`](i
 - **Artifact tools** (step 9) — `create_spreadsheet`/`create_chart`/`create_slides`/`create_pdf`, all running inside the sandbox via a shared `_artifact.py` helper; outputs land in `workspace_files` with `source='agent_output'`.
 - **Quick Agent + conversational memory** (step 10) — Haiku-driven tool loop over the 7 non-sandbox tools, hard-capped at 10 iterations. `memory/conversational.py` ships the verbatim recent window (threads + messages). **First step where `/usage` shows real numbers.**
 - **Triage Agent + Router** (step 11) — Haiku-driven classifier with forced `classify` tool_use returns a structured `TriageVerdict(route, complexity, reasoning)`. `Router` composes Triage → downstream dispatch; the web channel now talks to the Router instead of Quick directly. SSE events: `thread` / `triage` / `plan` / `tool` / `delta` / `done`.
-- **Planner + procedural + skills retrieval** (step 12) — Sonnet 4.6 (Opus 4.7 for ambitious verdicts) with a forced `generate_plan` tool_use returning a structured `Plan` (`schemas.py`). New `embeddings/` subsystem with `Voyage` + `Stub` providers; new `memory/procedural.py` (search_similar + store + update_outcome) and `memory/skills.py` (search_by_task + idempotent `seed_starter_skills` for 5 hand-written exemplars). Router's `plan` verdict now invokes the Planner and renders a markdown plan preview; the Executor (step 13) will replace the preview with real results.
+- **Planner + procedural + skills retrieval** (step 12) — Sonnet 4.6 (Opus 4.7 for ambitious verdicts) with a forced `generate_plan` tool_use returning a structured `Plan` (`schemas.py`). New `embeddings/` subsystem with `Voyage` + `Stub` providers; new `memory/procedural.py` and `memory/skills.py` with the seeded starter skill set.
+- **Executor** (step 13) — runs a `Plan`. Walks steps in order, batches contiguous parallel-group steps via `asyncio.gather`. Functional steps invoke registered tools; reasoning + evaluation steps run as Sonnet calls with prior step results inlined. Step failures skip the rest. Sandbox is torn down in `finally`. Outcome (final_answer / success / error) persists back to procedural memory; the Post-Evaluator (step 14) will follow up with `score`. Synthesis is skipped when the last completed step is reasoning (the planner already produced the final text). SSE adds `step.start` / `step.end` / `step.error` events.
 
-**Tests:** `pytest` runs 174 unit tests in <1s; 49 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+**Tests:** `pytest` runs 187 unit tests in <1s; 50 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** Tiered conversational compaction (12.5), Executor (13), Post-Evaluator (14).
+**Next up:** Tiered conversational compaction (12.5), Post-Evaluator (14), Tasks lifecycle (15).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 

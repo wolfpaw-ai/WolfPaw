@@ -127,17 +127,38 @@ async def update_outcome(
     conn: asyncpg.Connection,
     *,
     plan_id: UUID,
-    final_answer: str | None,
-    success: bool,
-    score: int,
+    final_answer: str | None = None,
+    success: bool | None = None,
+    score: int | None = None,
     error: str | None = None,
 ) -> None:
-    """Post-Evaluator (step 14) calls this after execution scoring."""
+    """Two callers update outcomes on a plan row:
+
+    - The Executor (step 13) writes `final_answer` + `success` + `error`
+      as soon as the plan finishes. `score` stays NULL.
+    - The Post-Evaluator (step 14) follows up with `score` once it grades
+      the outcome.
+
+    Only non-None fields get written, so calling this twice (executor
+    then evaluator) doesn't clobber the other's columns.
+    """
+    sets: list[str] = []
+    params: list[Any] = [plan_id]
+    if final_answer is not None:
+        sets.append(f"final_answer = ${len(params) + 1}")
+        params.append(final_answer)
+    if success is not None:
+        sets.append(f"success = ${len(params) + 1}")
+        params.append(success)
+    if score is not None:
+        sets.append(f"score = ${len(params) + 1}")
+        params.append(score)
+    if error is not None:
+        sets.append(f"error = ${len(params) + 1}")
+        params.append(error)
+    if not sets:
+        return
     await conn.execute(
-        """
-        UPDATE plans
-           SET final_answer = $2, success = $3, score = $4, error = $5
-         WHERE id = $1
-        """,
-        plan_id, final_answer, success, score, error,
+        f"UPDATE plans SET {', '.join(sets)} WHERE id = $1",
+        *params,
     )

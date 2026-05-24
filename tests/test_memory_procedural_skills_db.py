@@ -185,6 +185,39 @@ async def test_procedural_update_outcome():
     assert row["score"] == 88
 
 
+async def test_procedural_update_outcome_partial_writes_dont_clobber():
+    """Executor (step 13) writes final_answer + success without a score;
+    Post-Evaluator (step 14) follows up with score. Neither should
+    overwrite the other's untouched columns."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    embedder = StubEmbedder(dimensions=1024)
+    vec = (await embedder.embed_one("query")).vectors[0]
+
+    conn = await _conn()
+    try:
+        plan_id = await procedural.store(
+            conn, user_id=uid, thread_id=None, task_id=None,
+            query="q", query_embedding=vec, steps=[],
+        )
+        # Executor's write (no score).
+        await procedural.update_outcome(
+            conn, plan_id=plan_id,
+            final_answer="answer", success=True,
+        )
+        # Post-Evaluator's later write (score only).
+        await procedural.update_outcome(conn, plan_id=plan_id, score=77)
+        row = await conn.fetchrow(
+            "SELECT final_answer, success, score FROM plans WHERE id = $1",
+            plan_id,
+        )
+    finally:
+        await conn.close()
+    assert row["final_answer"] == "answer"
+    assert row["success"] is True
+    assert row["score"] == 77
+
+
 # --- skills ----------------------------------------------------------------
 
 
