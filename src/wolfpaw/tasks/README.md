@@ -10,6 +10,7 @@ arq-driven async worker is a follow-up.
 - **`service.py`** — `TaskService.create_and_run(...)`: orchestrates the full Planner → Executor → Post-Evaluator chain inside a Task row, emitting state-transition events at each step. Accepts `parent_task_id` + `budget_cents` for subagent tasks (step 16). `TaskOutcome` dataclass carries the final task, plan, execution, verdict, and answer. Singleton `get_task_service()`.
 - **`ask_user_registry.py`** — `AskUserRegistry`: process-local dict of `PendingQuestion`s keyed on `question_id`. `register(...)` creates an asyncio.Future the `ask_user` tool awaits; `submit_answer(...)` resolves it. Cross-user `submit_answer` attempts surface as `UnknownQuestion` rather than leaking the question's existence. `cancel(...)` raises in the awaiter — used when a task is cancelled mid-question.
 - **`commands.py`** — registers `/tasks`, `/task <id>`, `/cancel <id>` with the channel dispatcher at module import. All three are user-scoped: you can't list, inspect, or cancel another user's tasks.
+- **`routes.py`** — JSON HTTP API consumed by the React app (step 19): `GET /tasks`, `GET /tasks/{id}` (with events), `POST /tasks/{id}/cancel`. Same user-scoping as the slash commands. 404 on cross-user reads, 409 on cancel of an already-terminal task.
 
 ## Flow — task verdict end to end
 

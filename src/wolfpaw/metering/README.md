@@ -12,6 +12,7 @@ Per-call cost recording for every model call, the cap enforcer, the prompt-versi
 - **`langsmith_client.py`** — context manager that wraps each model call in a LangSmith trace. Gated on `WOLFPAW_LANGSMITH_ENABLED`; a no-op when disabled.
 - **`model_client.py`** — `ModelClient.call(...)` is the central wrapper every agent goes through. Sequence: enforcer check → LangSmith trace context → `anthropic.messages.create` → pricing lookup → recorder write → return `ModelCallResult`. The Anthropic client is injectable so tests pass a fake.
 - **`usage_report.py`** — backs the `/usage` slash command. `build_usage_report(user_id, scope)` queries `token_usage × model_prices` via a LATERAL join (priced per-row at its own `created_at`), plus `compute_usage`, returns a `UsageReport` dataclass, and caches per `(user_id, scope)` for 30s. `render_text(report)` is the default formatter; channels can override. Registers `/usage`.
+- **`routes.py`** — JSON `GET /usage?scope=default|today|month|all` consumed by the React app (step 19). Wraps `build_usage_report` + the `UsageReport` dataclass and emits the same data the slash command renders as text.
 
 ## How it fits together
 

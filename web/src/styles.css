@@ -1,0 +1,142 @@
+/* Minimal styling — readable, no design framework. Step 19 ships the
+   functional layer; visual polish + theming come later. */
+
+:root {
+  --fg: #1a1a1a;
+  --fg-muted: #555;
+  --bg: #fafafa;
+  --bg-card: #ffffff;
+  --border: #e0e0e0;
+  --accent: #2b6cb0;
+  --error: #c53030;
+  --success: #2f855a;
+  --warn: #b7791f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+pre { white-space: pre-wrap; word-wrap: break-word; margin: 0; }
+
+button {
+  cursor: pointer; padding: 0.4rem 0.9rem; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-card); color: var(--fg);
+}
+button:hover { border-color: var(--accent); }
+button:disabled { cursor: default; opacity: 0.5; }
+button.danger { border-color: var(--error); color: var(--error); }
+button.link-button {
+  border: none; background: none; padding: 0; color: var(--accent);
+  text-decoration: underline;
+}
+
+input, textarea, select {
+  width: 100%; padding: 0.4rem 0.6rem; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-card); color: var(--fg);
+  font-family: inherit;
+}
+textarea { resize: vertical; }
+
+label { display: block; margin: 0.8rem 0; }
+label > * { margin-top: 0.2rem; }
+
+.error { color: var(--error); margin: 0.6rem 0; }
+.hint { color: var(--fg-muted); font-size: 0.95em; }
+
+/* ---- Auth pages ---- */
+.centered { padding: 4rem 1rem; }
+.narrow { max-width: 28rem; margin: 0 auto; }
+
+/* ---- App shell ---- */
+.app-shell { min-height: 100vh; display: flex; flex-direction: column; }
+.app-body { flex: 1; }
+
+.primary-nav {
+  display: flex; align-items: center; gap: 1.5rem;
+  padding: 0.8rem 1.2rem;
+  background: var(--bg-card); border-bottom: 1px solid var(--border);
+}
+.nav-brand a { font-weight: 600; color: var(--fg); }
+.nav-links { display: flex; gap: 1rem; list-style: none; margin: 0; padding: 0; }
+.nav-links a { color: var(--fg-muted); padding: 0.2rem 0; }
+.nav-links a:hover { color: var(--fg); }
+.nav-links a.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+.nav-user { margin-left: auto; display: flex; align-items: center; gap: 1rem; color: var(--fg-muted); }
+
+.page { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1.2rem; }
+.page h1 { margin-top: 0; }
+
+/* ---- Chat ---- */
+.chat { display: flex; flex-direction: column; height: calc(100vh - 56px); }
+.chat-scroller { flex: 1; overflow-y: auto; padding: 1rem; }
+.chat-empty { color: var(--fg-muted); text-align: center; padding: 2rem; }
+.turn {
+  max-width: 48rem; margin: 0 auto 1rem auto;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.8rem 1rem;
+}
+.turn-user { background: #eef4fc; }
+.turn-role { font-size: 0.85em; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+.turn-text { font-size: 14px; }
+.turn-events { font-size: 0.85em; color: var(--fg-muted); margin: 0.3rem 0 0.5rem 0; }
+.turn-events code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 3px; }
+.turn-events ul { margin: 0.3rem 0; padding-left: 1.4rem; }
+
+.chat-ask-user {
+  max-width: 48rem; margin: 0 auto; padding: 0.8rem 1rem;
+  background: #fffbea; border-top: 2px solid var(--warn);
+}
+.chat-ask-user input { margin: 0.3rem 0; }
+.chat-ask-user button { margin-top: 0.3rem; }
+
+.chat-input {
+  display: flex; gap: 0.6rem; padding: 0.8rem 1rem;
+  border-top: 1px solid var(--border); background: var(--bg-card);
+}
+.chat-input textarea { flex: 1; }
+.chat-input button { align-self: stretch; }
+
+/* ---- Tables ---- */
+table.data { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+table.data th, table.data td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
+table.data th { font-size: 0.85em; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+table.data tr.totals td { font-weight: 600; border-top: 2px solid var(--border); border-bottom: none; }
+
+/* ---- Status pills ---- */
+.status { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.85em; }
+.status-pending { background: #f0f0f0; color: var(--fg-muted); }
+.status-running { background: #e0eaff; color: var(--accent); }
+.status-awaiting_user { background: #fff3d6; color: var(--warn); }
+.status-blocked { background: #ffe2e2; color: var(--error); }
+.status-completed { background: #e0f5e9; color: var(--success); }
+.status-failed { background: #ffe2e2; color: var(--error); }
+.status-cancelled { background: #f0f0f0; color: var(--fg-muted); }
+
+/* ---- Task detail ---- */
+dl.metadata { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 1rem 0; }
+dl.metadata dt { color: var(--fg-muted); font-size: 0.9em; }
+dl.metadata dd { margin: 0; }
+ol.events { padding-left: 1.4rem; }
+ol.events li { margin-bottom: 0.8rem; }
+ol.events code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 3px; }
+ol.events .event-time { color: var(--fg-muted); font-size: 0.85em; margin-left: 0.6rem; }
+ol.events pre { background: #f0f0f0; padding: 0.4rem 0.6rem; border-radius: 4px; margin-top: 0.3rem; }
+
+/* ---- Usage tabs ---- */
+.tabs { display: flex; gap: 0.3rem; margin: 1rem 0; }
+.tabs button.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.usage-period { margin-bottom: 2rem; }
+ul.by-agent { list-style: none; padding: 0; }
+ul.by-agent li { padding: 0.2rem 0; }

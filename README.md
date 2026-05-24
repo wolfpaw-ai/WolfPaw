@@ -29,7 +29,7 @@ Wolfpaw is channel-native: you reach it where you already work.
 
 ### Channels
 
-- **Web chat** — sign in at `wolfpaw.ai` (or your self-host URL), type in the chat box. Replies stream live. *(Backend endpoint built; React UI lands step 19.)*
+- **Web chat** — sign in at `wolfpaw.ai` (or your self-host URL), type in the chat box. Replies stream live. The React app under `web/` ships chat + task list + workspace files + usage dashboard + profile editor + Telegram link minting.
 - **Telegram** — DM `@WolfpawBot` after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile` or the channel-settings UI). One shared bot for hosted; OSS users provision their own via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
 - **Email** *(v1.5, step 23)* — forward anything to `alice@wolfpaw.ai`; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
 - **Slack** *(v2, step 25)* — workspace install, slash command + DM.
@@ -57,29 +57,31 @@ Anything beyond a single chat turn becomes a **Task** — a persistent unit of w
 
 Every model call and every sandbox-second is metered. Hard pause at allowance — no silent overage. Opt-in overage with a per-user cap. Notifications at 50% / 80% / 100% of allowance. `/usage` is the always-on receipt.
 
-### Trying it locally today (steps 1–8 shipped)
+### Trying it locally today
+
+Two processes — backend on :8000, React app on :5173:
 
 ```bash
+# terminal 1 — backend
 uv sync --extra dev
 .venv/bin/uvicorn wolfpaw.api:app --reload
+
+# terminal 2 — frontend
+cd web && npm install && npm run dev
 ```
 
+Visit http://localhost:5173 → sign-in page. Enter your email; the backend's console email backend prints the verify URL to its stdout. Copy the token from the printed URL and visit `http://localhost:5173/signin/verify?token=<token>` — that sets the `wp_session` cookie and bounces you into `/chat`.
+
+Prefer curl? Same magic link, then:
+
 ```bash
-# Mint a magic link (the `console` email backend prints the URL to logs)
-curl -X POST localhost:8000/auth/magic-link \
-  -H 'content-type: application/json' \
-  -d '{"email": "you@example.com"}'
-
-# Follow the printed URL → sets the wp_session cookie
-
-# Try a slash command via the SSE chat endpoint
 curl -N -X POST localhost:8000/channels/web/chat \
   -H 'content-type: application/json' \
   -b 'wp_session=<value from /auth/verify>' \
   -d '{"content": "/usage"}'
 ```
 
-Non-slash messages go through the Router: Triage classifies → Quick (one-shot answer), Planner + Executor + Post-Evaluator (generates a plan, runs it, scores the outcome for procedural memory), or Task (step 15, still falling through to Quick today). The SSE stream emits `thread`, `triage`, optional `plan` + `tool` + `step.start` / `step.end` / `step.error` + `score` events as the plan executes, then `delta` (final answer) and `done`.
+Non-slash messages go through the Router: Triage classifies → Quick (one-shot answer), Planner + Executor + Post-Evaluator (generates a plan, runs it, scores it), or Task (creates a persistent Task row, runs synchronously, transitions through states). The SSE stream emits `thread`, `triage`, optional `plan` + `tool` + `step.start` / `step.end` / `step.error` + `score` + `task` + `ask_user` events as work progresses, then `delta` (final answer) and `done`.
 
 ---
 
@@ -570,18 +572,19 @@ wolfpaw/
     toolbox/                         # tool registry + 16 tools (info, docs, SQL, sandbox, artifacts, ask_user)  [README]
     workspace/                       # workspace_files DAO + REST API  [README]
   tests/
-    test_*.py                        # 243 unit + 92 DB-gated tests as of step 18
+    test_*.py                        # 247 unit + 100 DB-gated tests as of step 19
+web/                                  # React + Vite SPA (step 19)  [README]
 ```
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
 
-**Not built yet:** `billing/` (step 24), `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction), `web/` React frontend (step 19), `infra/` Terraform (step 21). The implementation plan tracks order and scope.
+**Not built yet:** `billing/` (step 24), `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction), `infra/` Terraform (step 21). The implementation plan tracks order and scope.
 
 ---
 
 ## Status
 
-Steps 1–18 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
+Steps 1–19 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
 
 - **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
 - **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
@@ -597,11 +600,12 @@ Steps 1–18 of the v1 build order are shipped (see [`implementation_plan.md`](i
 - **Tasks + `ask_user`** (step 15) — `memory/tasks.py` DAO with the full state machine and cross-user-scoped reads/cancels. `tasks/` package: `TaskService.create_and_run` wraps Planner+Executor+Post-Eval in a Task row with per-step status transitions and `task_events` emissions. `ask_user` tool pauses a task on `asyncio.Future`, resumes when the user POSTs to `/channels/web/answer`. Slash commands `/tasks`, `/task <id>`, `/cancel <id>` (all user-scoped). Router's task verdict now calls `TaskService`; SSE adds `task` event. **arq async worker deferred** (sync execution covers the substrate).
 - **Sub-agent delegation** (step 16) — new `subagent` step kind. The Planner can mark plan branches as delegated, the Executor spawns a child Task via `TaskService.create_and_run` (with `parent_task_id` + `budget_cents`), and captures the child's `final_answer` as the step output. Depth capped at 3 ancestors via `memory.tasks.get_depth`. Multiple subagent steps in the same `parallel_group` run concurrently via the existing `asyncio.gather` path; a trailing reasoning step in the parent plan synthesizes their outputs.
 - **Soul + User File integration** (step 17) — new `persona/` subpackage: `soul.py` loads + hashes `soul.md`, `user_profile.py` DAO with partial-write `update(...)` that bumps `version`, `builder.py` assembles `Soul + User File + agent_role` into every agent's system prompt. All 5 agents now build their system prompts at call time via `persona.builder.build_for_agent`; `prompt_versions` hashes only the per-agent role (Soul + Profile vary per-user). New `GET / PATCH /me/profile` endpoints (React UI lands step 19). Thread creation now stamps `soul_version` + `user_profile_version` so procedural-memory retrieval can later scope by persona snapshot.
-- **Telegram channel** (step 18) — migration `006_telegram.sql` adds `channel_links` + `channel_link_tokens`. New `TelegramChannel` adapter, `HttpTelegramClient` (httpx → Bot API `sendMessage`) + injectable `FakeTelegramClient` for tests, and two HTTP routes: `POST /channels/telegram/webhook` (validates `X-Telegram-Bot-Api-Secret-Token`, handles `/start link_<token>` onboarding inline, dispatches slash commands inline, fires the Router as a background `asyncio.create_task` for free-form messages) and `POST /channels/telegram/link-token` (authenticated Wolfpaw user → deep-link URL `https://t.me/<bot>?start=link_<token>`). Single-use TTL'd link tokens via `channels/telegram_tokens.py`. Per-user thread continuity: each Telegram inbound extends the user's most recent telegram thread.
+- **Telegram channel** (step 18) — migration `006_telegram.sql` adds `channel_links` + `channel_link_tokens`. New `TelegramChannel` adapter, `HttpTelegramClient` (httpx → Bot API `sendMessage`) + injectable `FakeTelegramClient` for tests, and two HTTP routes: `POST /channels/telegram/webhook` (validates `X-Telegram-Bot-Api-Secret-Token`, handles `/start link_<token>` onboarding inline, dispatches slash commands inline, fires the Router as a background `asyncio.create_task` for free-form messages) and `POST /channels/telegram/link-token` (authenticated Wolfpaw user → deep-link URL `https://t.me/<bot>?start=link_<token>`). Single-use TTL'd link tokens via `channels/telegram_tokens.py`.
+- **React web app** (step 19) — new `web/` directory: Vite + React + TypeScript + React Router, dev server proxies API paths so the session cookie stays single-origin. Auth context + magic-link sign-in + verify. ChatPage with a POST-based SSE parser that renders every event type (`thread` / `triage` / `plan` / `tool` / `step.start|end|error` / `score` / `task` / `ask_user` / `delta`) plus an inline reply form for `ask_user` pauses. Tasks list + detail (with cancel). Files browser. Profile editor (User File + Telegram link minting). Usage dashboard with scope tabs. Backend additions: `src/wolfpaw/tasks/routes.py` (`GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel`) and `src/wolfpaw/metering/routes.py` (`GET /usage?scope=...`) — JSON companions to the slash commands.
 
-**Tests:** `pytest` runs 243 unit tests in ~1s; 92 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+**Tests:** `pytest` runs 247 unit tests in ~1s; 100 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** Tiered conversational compaction (12.5), React web app (19).
+**Next up:** Tiered conversational compaction (12.5), CloudWatch dashboards (20), Terraform (21).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 
