@@ -29,6 +29,7 @@ from wolfpaw.memory import conversational as conv
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
+from wolfpaw.persona.builder import build_for_agent
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -78,7 +79,13 @@ _CLASSIFY_TOOL = {
 }
 
 
-_SYSTEM_PROMPT = """You are Wolfpaw's Triage Agent. You classify each user message into one of three routes.
+_AGENT_ROLE = """You are the **Triage Agent**. You classify each user message into one of three routes.
+
+Use what you know about the user (from the User File above) to inform tone + routing:
+- If the user's profile signals a preference for direct answers, lean toward "quick".
+- If they've indicated they want detailed deliverables or long-running work, favor "plan" or "task" when applicable.
+- Their stated timezone + structured preferences may also be relevant.
+
 
 - "quick": a one-shot answer, simple lookup, casual conversation, or anything you can answer in a single response with no real deliverable. Examples: arithmetic, definitions, "what is X", summarizing a short pasted snippet, small clarifications. This is the *default*.
 
@@ -117,7 +124,7 @@ class TriageAgent:
                     agent=self.AGENT_KIND,
                     version_label=self.VERSION_LABEL,
                     content_template={
-                        "system": _SYSTEM_PROMPT,
+                        "agent_role": _AGENT_ROLE,
                         "tool": _CLASSIFY_TOOL,
                     },
                 )
@@ -140,12 +147,15 @@ class TriageAgent:
         ]
         messages.append({"role": "user", "content": content})
 
+        system_prompt = await build_for_agent(
+            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+        )
         result = await self.model_client.call(
             user_id=ctx.user_id,
             agent=self.AGENT_KIND,
             model=settings.model_triage,
             messages=messages,
-            system=_SYSTEM_PROMPT,
+            system=system_prompt,
             prompt_version_id=self._prompt_version_id,
             task_id=ctx.task_id,
             tools=[_CLASSIFY_TOOL],

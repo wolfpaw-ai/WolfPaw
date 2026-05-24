@@ -39,6 +39,7 @@ from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
 from wolfpaw.metering.recorder import record_usage
 from wolfpaw.metering.types import TokenCounts
+from wolfpaw.persona.builder import build_for_agent
 from wolfpaw.schemas import Plan, Step
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
@@ -109,7 +110,7 @@ _GENERATE_PLAN_TOOL = {
 }
 
 
-_SYSTEM_PROMPT = """You are Wolfpaw's Planning Agent. Your job is to design a structured plan for a non-trivial user request — the Triage Agent has already decided this needs more than a one-shot answer.
+_AGENT_ROLE = """You are the **Planning Agent**. Your job is to design a structured plan for a non-trivial user request — the Triage Agent has already decided this needs more than a one-shot answer.
 
 ALWAYS consult retrieved context first:
   - **Past plans**: similar plans the user has run before. If one is a strong match and scored well, *adapt* it (cite its id). If you adapt one, lead the plan with that fact in your summary.
@@ -176,7 +177,7 @@ class PlannerAgent:
                     agent=self.AGENT_KIND,
                     version_label=self.VERSION_LABEL,
                     content_template={
-                        "system": _SYSTEM_PROMPT,
+                        "agent_role": _AGENT_ROLE,
                         "tool": _GENERATE_PLAN_TOOL,
                     },
                 )
@@ -245,9 +246,17 @@ class PlannerAgent:
 
         plan_ctx = PlanContext(past_plans=past_plans, relevant_skills=relevant_skills)
 
-        # 4. Build messages with retrieved context inlined into a system extension.
+        # 4. Build messages. The system prompt is Soul + User File + the
+        # planner's role + the retrieved context block (past plans + skills).
+        # build_for_agent assembles the first three; we append the dynamic
+        # context block after.
         context_block = _format_context_block(past_plans, relevant_skills)
-        system = _SYSTEM_PROMPT + ("\n\n" + context_block if context_block else "")
+        role_with_context = _AGENT_ROLE + (
+            "\n\n" + context_block if context_block else ""
+        )
+        system = await build_for_agent(
+            user_id=ctx.user_id, agent_role=role_with_context,
+        )
 
         messages = [{"role": m.role, "content": m.content} for m in past]
         messages.append({"role": "user", "content": content})

@@ -26,6 +26,7 @@ from wolfpaw.memory import conversational as conv
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
+from wolfpaw.persona.builder import build_for_agent
 from wolfpaw.toolbox.registry import Registry, ToolContext, ToolError, get_registry
 from wolfpaw.tracing import get_logger
 
@@ -33,10 +34,12 @@ log = get_logger()
 
 EmitFn = Callable[[str, str], Awaitable[None] | None]
 
-# Inline system prompt for v1. Step 17 swaps this for full Soul + User File
-# loading; the inline version keeps the agent functional without that wiring
-# and gives the prompt_versions row real content to hash.
-_SYSTEM_PROMPT = """You are Wolfpaw — a careful, capable AI worker. Motto: "Tread lightly."
+# Agent-role prompt (the per-agent part). Wrapped by `build_for_agent` at
+# call time with the Soul + the user's profile to form the full `system`
+# string sent to Anthropic. Stored verbatim in `prompt_versions` so the
+# version hash tracks intentional role-prompt edits — Soul / Profile
+# variation is per-user and doesn't bump this hash.
+_AGENT_ROLE = """You are the **Quick Agent**: Wolfpaw's path for one-shot answers that don't need a plan.
 
 Be brief and direct; expand when the topic warrants it. Use tools when they
 help and skip them when they don't. If you're uncertain, say so. If a tool
@@ -45,9 +48,10 @@ fails, surface the error plainly rather than dressing it up.
 Available tools handle web search, fetching pages, arithmetic, durable
 per-user SQL tables, and reading/writing markdown files in the user's
 workspace. Code execution and artifact production live in the sandbox tools
-(used by larger plans, not by you).
+(used by the Executor on larger plans, not by you).
 
-You are speaking with one person at a time. Stay in their context."""
+You are speaking with one person at a time — the one described above in the
+User File. Stay in their context."""
 
 
 class QuickAgent:
@@ -104,7 +108,7 @@ class QuickAgent:
                     conn,
                     agent=self.AGENT_KIND,
                     version_label=self.VERSION_LABEL,
-                    content_template={"system": _SYSTEM_PROMPT},
+                    content_template={"agent_role": _AGENT_ROLE},
                 )
                 self._prompt_version_id = row.id
         except Exception:  # noqa: BLE001 — degraded mode is acceptable
@@ -166,13 +170,19 @@ class QuickAgent:
         tool_specs: list[dict[str, Any]],
         emit: EmitFn | None,
     ) -> str:
+        # Build the full system prompt once per turn (Soul + Profile +
+        # agent role). Stable across the tool loop, so we don't re-fetch
+        # the profile mid-loop even though it could in principle change.
+        system_prompt = await build_for_agent(
+            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+        )
         for iteration in range(self._max_iterations):
             result = await self.model_client.call(
                 user_id=ctx.user_id,
                 agent=self.AGENT_KIND,
                 model=model,
                 messages=messages,
-                system=_SYSTEM_PROMPT,
+                system=system_prompt,
                 prompt_version_id=self._prompt_version_id,
                 task_id=ctx.task_id,
                 tools=tool_specs,

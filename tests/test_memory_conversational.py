@@ -69,6 +69,44 @@ async def test_get_or_create_thread_creates_when_missing():
     assert isinstance(tid, UUID)
 
 
+async def test_get_or_create_thread_stamps_persona_versions():
+    """Step 17 — new threads get soul_version + user_profile_version
+    stamped so procedural-memory retrieval can scope by persona snapshot."""
+    from wolfpaw.persona.soul import reset_soul, set_soul_for_test
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    # Seed a profile so the version isn't NULL.
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        await conn.execute(
+            "INSERT INTO user_profiles (user_id, version) VALUES ($1, 3)",
+            uid,
+        )
+    finally:
+        await conn.close()
+
+    set_soul_for_test("test-soul")
+    try:
+        tid = await _with_conn(
+            conv.get_or_create_thread, user_id=uid, channel="web",
+        )
+        conn = await asyncpg.connect(dsn=dsn)
+        try:
+            row = await conn.fetchrow(
+                "SELECT soul_version, user_profile_version"
+                "  FROM threads WHERE id = $1",
+                tid,
+            )
+        finally:
+            await conn.close()
+    finally:
+        reset_soul()
+    assert row["soul_version"] is not None
+    assert len(row["soul_version"]) == 12
+    assert row["user_profile_version"] == 3
+
+
 async def test_get_or_create_thread_returns_existing_when_owner_matches():
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     uid = await _seed_user(dsn)

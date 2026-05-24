@@ -38,6 +38,7 @@ from wolfpaw.memory import procedural, tasks as tasks_dao
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
+from wolfpaw.persona.builder import build_for_agent
 from wolfpaw.sandbox import get_manager as get_sandbox_manager
 from wolfpaw.schemas import (
     ExecutionPlan,
@@ -59,13 +60,13 @@ log = get_logger()
 
 EmitFn = Callable[[str, str], Awaitable[None] | None]
 
-_SYSTEM_PROMPT = """You are Wolfpaw's Executor. You work through one step of a multi-step plan at a time.
+_AGENT_ROLE = """You are the **Executor**. You work through one step of a multi-step plan at a time.
 
 For each step you'll see the user's original request, the full plan, results from prior steps, and your current step's description. Produce concrete output for the current step — brief, accurate, focused on this step's task.
 
 If your step is a synthesis step (typically the last reasoning step), write the final user-facing answer in plain markdown. Otherwise produce intermediate output that subsequent steps may use as input."""
 
-_SYNTHESIS_SYSTEM_PROMPT = """You are Wolfpaw's Executor synthesizing the final user-facing answer from a plan execution. Write in plain markdown, be direct, lead with the answer. Cite step results where the user benefits from seeing them; skip the implementation details otherwise."""
+_SYNTHESIS_AGENT_ROLE = """You are the **Executor** synthesizing the final user-facing answer from a plan execution. Write in plain markdown, be direct, lead with the answer. Cite step results where the user benefits from seeing them; skip the implementation details otherwise."""
 
 # Cap large tool outputs so a single chatty tool result doesn't blow past
 # Sonnet's context window when prior-results are inlined into every
@@ -113,8 +114,8 @@ class ExecutorAgent:
                     agent=self.AGENT_KIND,
                     version_label=self.VERSION_LABEL,
                     content_template={
-                        "system": _SYSTEM_PROMPT,
-                        "synthesis_system": _SYNTHESIS_SYSTEM_PROMPT,
+                        "agent_role": _AGENT_ROLE,
+                        "synthesis_agent_role": _SYNTHESIS_AGENT_ROLE,
                     },
                 )
                 self._prompt_version_id = row.id
@@ -294,12 +295,15 @@ class ExecutorAgent:
     ) -> str:
         settings = get_settings()
         prompt = _build_step_prompt(step, plan, prior)
+        system = await build_for_agent(
+            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+        )
         result = await self.model_client.call(
             user_id=ctx.user_id,
             agent=self.AGENT_KIND,
             model=settings.model_executor,
             messages=[{"role": "user", "content": prompt}],
-            system=_SYSTEM_PROMPT,
+            system=system,
             prompt_version_id=self._prompt_version_id,
             task_id=ctx.task_id,
         )
@@ -400,12 +404,15 @@ class ExecutorAgent:
                 break  # last completed was non-reasoning; do the extra call
         settings = get_settings()
         prompt = _build_synthesis_prompt(plan, results)
+        system = await build_for_agent(
+            user_id=ctx.user_id, agent_role=_SYNTHESIS_AGENT_ROLE,
+        )
         result = await self.model_client.call(
             user_id=ctx.user_id,
             agent=self.AGENT_KIND,
             model=settings.model_executor,
             messages=[{"role": "user", "content": prompt}],
-            system=_SYNTHESIS_SYSTEM_PROMPT,
+            system=system,
             prompt_version_id=self._prompt_version_id,
             task_id=ctx.task_id,
         )

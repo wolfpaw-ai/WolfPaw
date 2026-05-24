@@ -15,6 +15,7 @@ from wolfpaw.config import get_settings
 from wolfpaw.memory.db import close_pool
 from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — registers /usage
 from wolfpaw import toolbox as _toolbox  # noqa: F401 — registers v1 tool set
+from wolfpaw.persona.routes import router as persona_router
 from wolfpaw.tasks import commands as _task_commands  # noqa: F401 — registers /tasks etc
 from wolfpaw.workspace.routes import router as workspace_router
 from wolfpaw.tracing import (
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(web_channel_router)
     app.include_router(workspace_router)
+    app.include_router(persona_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     voyage_model: str = "voyage-3"
     voyage_dimensions: int = 1024
 
+    # Persona (step 17). Soul file path; empty → fall back to the
+    # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
+    soul_path: str = ""
+
     # Sandbox (step 8). Provider selection + per-execution limits.
     sandbox_backend: str = "subprocess"        # "subprocess" | "docker" | "e2b"
     sandbox_idle_timeout_seconds: int = 15 * 60

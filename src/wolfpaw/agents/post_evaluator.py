@@ -25,6 +25,7 @@ from wolfpaw.config import get_settings
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
+from wolfpaw.persona.builder import build_for_agent
 from wolfpaw.schemas import ExecutionPlan, Plan, PostEvalVerdict, StepStatus
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
@@ -76,7 +77,7 @@ _RECORD_SCORE_TOOL = {
 }
 
 
-_SYSTEM_PROMPT = """You are Wolfpaw's Post-Evaluator. You score how well a completed plan execution served the user's original request, on a 0-100 scale, and write a brief diagnosis.
+_AGENT_ROLE = """You are the **Post-Evaluator**. You score how well a completed plan execution served the user's original request, on a 0-100 scale, and write a brief diagnosis.
 
 Scoring guidance:
 - **100**: served the request completely + cleanly + efficiently.
@@ -120,7 +121,7 @@ class PostEvaluatorAgent:
                     agent=self.AGENT_KIND,
                     version_label=self.VERSION_LABEL,
                     content_template={
-                        "system": _SYSTEM_PROMPT,
+                        "agent_role": _AGENT_ROLE,
                         "tool": _RECORD_SCORE_TOOL,
                     },
                 )
@@ -142,12 +143,15 @@ class PostEvaluatorAgent:
         settings = get_settings()
 
         prompt = _build_eval_prompt(plan, execution)
+        system = await build_for_agent(
+            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+        )
         result = await self.model_client.call(
             user_id=ctx.user_id,
             agent=self.AGENT_KIND,
             model=settings.model_post_evaluator,
             messages=[{"role": "user", "content": prompt}],
-            system=_SYSTEM_PROMPT,
+            system=system,
             prompt_version_id=self._prompt_version_id,
             task_id=ctx.task_id,
             tools=[_RECORD_SCORE_TOOL],

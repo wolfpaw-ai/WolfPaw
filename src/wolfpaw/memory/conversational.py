@@ -43,7 +43,14 @@ async def get_or_create_thread(
     thread_id: UUID | None = None,
 ) -> UUID:
     """Return the existing thread (validated to belong to `user_id`) or
-    create a fresh one for this channel."""
+    create a fresh one for this channel.
+
+    New threads are stamped with `soul_version` (the SHA-256 prefix of the
+    currently-loaded Soul) and `user_profile_version` (the user's profile
+    row's version counter). Both are nullable in the schema, so Soul
+    unavailable or profile missing → NULL stamp, which downstream code
+    treats as "unknown persona snapshot".
+    """
     if thread_id is not None:
         row = await conn.fetchrow(
             "SELECT id FROM threads WHERE id = $1 AND user_id = $2",
@@ -54,10 +61,25 @@ async def get_or_create_thread(
         # Stale or cross-user thread_id — silently fall through and create
         # a fresh thread rather than erroring. Avoids exposing whether the
         # id exists for some other user.
+
+    # Best-effort persona version stamps. Defensive: missing soul file /
+    # missing profile row don't block thread creation.
+    soul_version: str | None = None
+    try:
+        from wolfpaw.persona.soul import get_soul
+
+        soul_version = get_soul().version
+    except Exception:  # noqa: BLE001
+        pass
+    profile_version = await conn.fetchval(
+        "SELECT version FROM user_profiles WHERE user_id = $1", user_id,
+    )
+
     new_id = await conn.fetchval(
-        "INSERT INTO threads (user_id, channel) VALUES ($1, $2::channel)"
-        " RETURNING id",
-        user_id, channel,
+        "INSERT INTO threads"
+        " (user_id, channel, soul_version, user_profile_version)"
+        " VALUES ($1, $2::channel, $3, $4) RETURNING id",
+        user_id, channel, soul_version, profile_version,
     )
     return new_id
 
