@@ -10,8 +10,8 @@ Every agent's system prompt is built from these two inputs at call time. Soul + 
 
 - **`soul.py`** — loads `soul.md` from disk and hashes it (12-char SHA-256 prefix = `version`). `get_soul()` is the cached singleton; `reset_soul()` + `set_soul_for_test(content)` are dev/test hooks. Path resolution: `settings.soul_path` if set, else `<repo_root>/soul.md` via `default_soul_path()`.
 - **`user_profile.py`** — `UserProfile` dataclass + DAO. `get(conn, user_id)` returns the row or None; `update(conn, user_id, **fields)` is partial-write and bumps `version` on every change so downstream stamping stays meaningful. `DEFAULT_PROFILE` is the fallback used when a user has no row yet.
-- **`builder.py`** — pure `build_system_prompt(soul, user_profile, agent_role)` (no I/O — useful for tests) and the runtime helper `build_for_agent(user_id, agent_role)` that loads Soul + Profile and assembles. Defensive: if either lookup fails (file missing, DB down, etc.) the agent gets the bare role prompt so the call still goes through in degraded mode.
-- **`routes.py`** — `GET /me/profile` + `PATCH /me/profile` (partial body — any subset of `persona_md` / `preferences` / `timezone`). PATCH bumps version. Web UI for editing ships in step 19; clients can hit the endpoints directly today.
+- **`builder.py`** — pure `build_system_prompt(soul, user_profile, agent_role)` (no I/O — useful for tests) and the runtime helper `build_for_agent(user_id, agent_role)` that loads Soul + Profile and assembles. Defensive: if either lookup fails (file missing, DB down, etc.) the agent gets the bare role prompt so the call still goes through in degraded mode. Profile lookups are cached per-user with a 30-second TTL via `_load_profile_cached`; `invalidate_profile(user_id)` drops the entry synchronously (PATCH wires this in), and the TTL self-heals other workers within `_PROFILE_TTL_SECONDS`. `clear_profile_cache()` is the test hook.
+- **`routes.py`** — `GET /me/profile` + `PATCH /me/profile` (partial body — any subset of `persona_md` / `preferences` / `timezone`). PATCH bumps version and calls `invalidate_profile(user_id)` so the next agent call sees the updated row immediately.
 
 ## How it fits together
 
@@ -19,7 +19,7 @@ Every agent's system prompt is built from these two inputs at call time. Soul + 
 Every agent call:
   build_for_agent(user_id, agent_role)
     1. get_soul()                                    # cached singleton
-    2. acquire() → user_profile.get(conn, user_id)   # one SELECT per call
+    2. _load_profile_cached(user_id)                 # 30s TTL, in-process
     3. build_system_prompt(soul, profile, agent_role)
        → "# Wolfpaw — Soul File\n\n<...>\n\n---\n\n"
          "# The user you're working with\n\n<persona_md>\n\n"
@@ -40,7 +40,6 @@ Thread creation (`memory.conversational.get_or_create_thread`): looks up the cur
 
 ## Extending
 
-- **Caching profiles** for hot paths: a small TTL'd dict keyed on user_id, invalidated on PATCH. Not done in v1 — one SELECT per agent call is cheap enough.
 - **Soul history**: today only the current Soul is loadable. A future "what soul was active on date X" would need either git-tracked versions on disk or a Soul history table.
 - **Procedural-memory scoping by persona**: `plans` could grow `soul_version` + `user_profile_version` columns so retrieval can filter to plans that ran under the same persona snapshot. The thread-stamped versions already exist; this just adds plan-side stamping in step 12's planner.
 - **Wolfpaw-edits-the-profile flow**: future tool `update_user_profile` (with `ask_user` confirmation) so the agent can append things it learns about the user (with consent).

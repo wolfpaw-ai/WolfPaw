@@ -119,20 +119,35 @@ A `subagent` step delegates to a child Task that runs its own full Planner→Exe
 _run_subagent(ctx, step) →
     1. Require ctx.task_id (subagents only make sense inside a Task)
     2. Check depth: tasks_dao.get_depth(ctx.task_id) < MAX_SUBAGENT_DEPTH (3)
-    3. Lazy-import TaskService (agents↔tasks circular)
-    4. service.create_and_run(
-         content=step.inputs["query"],
-         title=step.inputs.get("title") or step.description[:80],
-         budget_cents=step.inputs.get("budget_cents"),
-         parent_task_id=ctx.task_id,
-         thread_id=None,           # subagent gets fresh context
-         emit=None,                # don't interleave child events into parent SSE
-       )
-    5. Reject if child status != "completed" (child failure → parent step failure)
-    6. Return {subagent_task_id, answer, score}
+    3. Resolve root: root_task_id = tasks_dao.get_root(ctx.task_id)
+    4. Lazy-import TaskService (agents↔tasks circular)
+    5. async with _acquire_subagent_slot(root_task_id):  # cap=5 per root
+           service.create_and_run(
+             content=step.inputs["query"],
+             title=step.inputs.get("title") or step.description[:80],
+             budget_cents=step.inputs.get("budget_cents"),
+             parent_task_id=ctx.task_id,
+             thread_id=None,           # subagent gets fresh context
+             emit=None,                # don't interleave child events into parent SSE
+           )
+    6. Reject if child status != "completed" (child failure → parent step failure)
+    7. Return {subagent_task_id, answer, score}
 ```
 
 Concurrency: multiple `subagent` steps in the same `parallel_group` execute via `asyncio.gather` just like functional/reasoning steps. A trailing reasoning step in the parent plan synthesizes the subagent outputs (each appears in prior_results as `{subagent_task_id, answer, score}`).
+
+Per-root concurrency cap (`MAX_CONCURRENT_SUBAGENTS_PER_ROOT = 5`): all descendants of the same root task share one `asyncio.Semaphore`, so a wide fanout plan can't saturate the model provider or sandbox pool. Cousin subagents in unrelated branches under the same root contend for the same slots; different users' root tasks are independent. The semaphore registry is refcounted — the entry drops out of the dict once its last in-flight subagent releases.
+
+### WorkspaceCollision → ask_user (step 13+15 deferred follow-up)
+
+`write_doc` raises `WorkspaceCollision` when a file with the same name already exists and `overwrite=False`. Without the executor hook below, this would surface as an opaque step failure ("workspace file already exists at v2").
+
+The Executor catches `WorkspaceCollision` in `_run_functional` and:
+1. If `ctx.task_id` is set (we're inside a Task), calls the `ask_user` tool with "Overwrite report.md (v1)? (yes / no)" and `options=["yes", "no"]`.
+2. On a yes-ish answer (`yes`, `y`, `overwrite`, `ok`, `confirm`), retries the same tool with `overwrite=True` and the original inputs — the prior row stays in history, the new row is `version + 1`.
+3. On any other answer (or no Task context), the collision propagates as the original step failure so the user sees an actionable error.
+
+This is the only collision handler today; future destructive actions (mass delete, large purchase, send-message) should follow the same shape: catch the domain exception in the executor and route it through `ask_user`.
 
 ## How the Post-Evaluator works
 

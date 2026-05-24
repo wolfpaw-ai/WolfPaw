@@ -28,6 +28,7 @@ class TelegramClient(ABC):
     @abstractmethod
     async def send_message(
         self, *, chat_id: str | int, text: str,
+        parse_mode: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -48,15 +49,18 @@ class HttpTelegramClient(TelegramClient):
 
     async def send_message(
         self, *, chat_id: str | int, text: str,
+        parse_mode: str | None = None,
     ) -> dict[str, Any]:
         # Telegram caps text at 4096 chars per message; truncate rather
         # than splitting — v1's a single message per agent turn.
         if len(text) > 4096:
             text = text[:4090] + "…"
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(
-                f"{self._base}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
+                f"{self._base}/sendMessage", json=payload,
             )
             resp.raise_for_status()
             return resp.json()
@@ -76,8 +80,11 @@ class FakeTelegramClient(TelegramClient):
 
     async def send_message(
         self, *, chat_id: str | int, text: str,
+        parse_mode: str | None = None,
     ) -> dict[str, Any]:
-        record = {"chat_id": chat_id, "text": text}
+        record: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            record["parse_mode"] = parse_mode
         self.sent.append(record)
         log.info("telegram.fake.send", **record)
         return {"ok": True, "result": {"message_id": len(self.sent)}}

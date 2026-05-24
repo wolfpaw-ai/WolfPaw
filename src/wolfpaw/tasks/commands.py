@@ -101,6 +101,7 @@ async def _cancel_command(message: InboundMessage, args: str) -> CommandResult:
                     conn, task_id=task_id, event_type="status.cancelled",
                     content={"by": "user"},
                 )
+                await tasks_dao.rollup_spent_cents(conn, task_id=task_id)
     except Exception as e:  # noqa: BLE001
         log.warning("tasks.commands.cancel_failed", exc_info=True)
         return CommandResult(text=f"Couldn't cancel: {e}")

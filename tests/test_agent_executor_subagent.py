@@ -122,6 +122,12 @@ def exec_env(monkeypatch):
     async def fake_get_depth(_conn, *, task_id):
         return depth_lookup.by_task_id.get(task_id, depth_lookup.default)
 
+    async def fake_get_root(_conn, *, task_id):
+        # Tests don't set up multi-level parent chains; treat the
+        # task_id itself as the root (which is true for the synthetic
+        # plans these tests use).
+        return task_id
+
     async def fake_update_outcome(_conn, *, plan_id, final_answer=None,
                                   success=None, score=None, error=None):
         return None
@@ -149,6 +155,9 @@ def exec_env(monkeypatch):
     )
     monkeypatch.setattr(
         "wolfpaw.agents.executor.tasks_dao.get_depth", fake_get_depth,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.executor.tasks_dao.get_root", fake_get_root,
     )
     monkeypatch.setattr(
         "wolfpaw.agents.executor.procedural.update_outcome",
@@ -367,6 +376,60 @@ async def test_parallel_subagent_steps_dispatched_concurrently(
     elapsed = time.monotonic() - start
     assert execution.success
     assert elapsed < 0.18, f"subagents not concurrent (took {elapsed:.2f}s)"
+
+
+async def test_subagent_concurrency_capped_per_root(monkeypatch, exec_env):
+    """7 sibling subagents share a per-root cap of 5 — at most 5 run
+    concurrently, the remaining 2 wait until a slot frees up."""
+    from wolfpaw.agents import executor as exec_mod
+
+    in_flight = {"current": 0, "max_seen": 0}
+
+    async def gated_create_and_run(**kwargs):
+        in_flight["current"] += 1
+        in_flight["max_seen"] = max(in_flight["max_seen"], in_flight["current"])
+        try:
+            # Long enough that all "first batch" siblings overlap before
+            # any of them release the slot.
+            await asyncio.sleep(0.05)
+        finally:
+            in_flight["current"] -= 1
+        # Build a successful outcome the same way FakeTaskService would.
+        fake_task = Task(
+            id=uuid4(), user_id=kwargs["user_id"],
+            parent_task_id=kwargs.get("parent_task_id"),
+            title=kwargs["title"], description=kwargs.get("description"),
+            status="completed", current_plan_id=None,
+            budget_cents=kwargs.get("budget_cents"), spent_cents=0,
+            blocking_reason=None,
+            channel_for_completion=kwargs.get("channel_for_completion"),
+            schedule_pattern=None,
+            created_at=datetime.now(timezone.utc),
+            started_at=None, completed_at=None, last_active_at=None,
+        )
+        return TaskOutcome(
+            task=fake_task, plan=None, execution=None,
+            verdict=SimpleNamespace(score=80),
+            final_answer="ok",
+        )
+
+    fake_service = SimpleNamespace(create_and_run=gated_create_and_run)
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+
+    fake = FakeAnthropic(replies=["synth"])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id=f"s{i}", kind="subagent", description=f"step {i}",
+             inputs={"query": f"q{i}"}, parallel_group=1)
+        for i in range(7)
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert execution.success
+    assert in_flight["max_seen"] == exec_mod.MAX_CONCURRENT_SUBAGENTS_PER_ROOT
 
 
 async def test_subagent_with_trailing_reasoning_step_skips_synthesis(

@@ -187,6 +187,20 @@ def test_help_lists_usage_command():
     assert "/usage" in r.text
 
 
+def test_chat_reset_emits_reset_event_before_command():
+    """`/reset` from web should emit a `reset` SSE event so the client
+    drops its thread_id, followed by the usual command + done events."""
+    client = _client()
+    r = client.post("/channels/web/chat", json={"content": "/reset"})
+    assert r.status_code == 200
+    events = _parse_events(r.text)
+    kinds = [e for e, _ in events]
+    assert "reset" in kinds
+    assert "command" in kinds
+    assert kinds.index("reset") < kinds.index("command")
+    assert kinds[-1] == "done"
+
+
 def test_chat_preserves_trace_id_header():
     client = _client()
     r = client.post(

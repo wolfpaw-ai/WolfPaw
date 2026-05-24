@@ -373,3 +373,130 @@ async def test_step_cap_rejects_oversized_plans(exec_env):
     execution = await executor.execute(ctx=_ctx(), plan=big_plan)
     assert execution.success is False
     assert execution.error == "step_cap_exceeded"
+
+
+# --- WorkspaceCollision → ask_user hook ---------------------------------
+
+
+class _CollidingWriteDoc:
+    """Stand-in for the real write_doc tool: raises WorkspaceCollision on
+    the first call when `overwrite` is not set, succeeds on retry."""
+
+    def __init__(self, *, existing_filename: str = "report.md",
+                 existing_version: int = 1):
+        from datetime import datetime, timezone
+        from wolfpaw.workspace.files import WorkspaceFile
+
+        self.name = "write_doc"
+        self.description = "fake write_doc"
+        self.input_schema = {"type": "object", "properties": {}}
+        self._existing = WorkspaceFile(
+            id=uuid4(), user_id=uuid4(), task_id=None, source="agent_output",
+            filename=existing_filename, mime_type="text/markdown",
+            storage_url="local://x", size_bytes=1, version=existing_version,
+            supersedes_id=None, sha256=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, ctx, **inputs):
+        self.calls.append(dict(inputs))
+        if not inputs.get("overwrite"):
+            from wolfpaw.workspace.files import WorkspaceCollision
+            raise WorkspaceCollision(self._existing)
+        return {
+            "file_id": str(uuid4()),
+            "filename": inputs["filename"],
+            "version": self._existing.version + 1,
+            "size_bytes": len(inputs.get("content", "")),
+            "sha256": None,
+        }
+
+
+class _FakeAskUser:
+    """Stand-in for the ask_user tool; replies with a canned answer."""
+
+    def __init__(self, answer: str):
+        self.name = "ask_user"
+        self.description = "fake ask_user"
+        self.input_schema = {"type": "object", "properties": {}}
+        self._answer = answer
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, ctx, **inputs):
+        self.calls.append(dict(inputs))
+        return {"question_id": str(uuid4()), "answer": self._answer}
+
+
+async def test_workspace_collision_with_yes_retries_with_overwrite(exec_env):
+    """write_doc raises WorkspaceCollision → executor calls ask_user → on
+    "yes" the step retries with overwrite=True and succeeds."""
+    writer = _CollidingWriteDoc()
+    asker = _FakeAskUser(answer="yes")
+    fake = FakeAnthropic(replies=["synth"])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake),
+        registry=_registry(writer, asker),
+    )
+    plan = _plan(
+        [Step(id="w", kind="functional", tool="write_doc",
+              description="save report",
+              inputs={"filename": "report.md", "content": "hello"})],
+        plan_id=uuid4(),
+    )
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert execution.success is True
+    # First call: no overwrite (raised). Second call: overwrite=True.
+    assert len(writer.calls) == 2
+    assert writer.calls[0].get("overwrite") in (None, False)
+    assert writer.calls[1]["overwrite"] is True
+    # ask_user was prompted once with the filename in the question.
+    assert len(asker.calls) == 1
+    assert "report.md" in asker.calls[0]["question"]
+
+
+async def test_workspace_collision_with_no_propagates_failure(exec_env):
+    writer = _CollidingWriteDoc()
+    asker = _FakeAskUser(answer="no")
+    fake = FakeAnthropic(replies=[])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake),
+        registry=_registry(writer, asker),
+    )
+    plan = _plan(
+        [Step(id="w", kind="functional", tool="write_doc",
+              description="save report",
+              inputs={"filename": "report.md", "content": "hello"})],
+        plan_id=uuid4(),
+    )
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert execution.success is False
+    # The collision message bubbles into the step error.
+    failed = next(r for r in execution.results if r.status == StepStatus.FAILED)
+    assert "report.md" in failed.error
+    # Asked once, no retry.
+    assert len(asker.calls) == 1
+    assert len(writer.calls) == 1
+
+
+async def test_workspace_collision_without_task_skips_ask_user(exec_env):
+    """Without a Task context, ask_user can't be used. The collision
+    surfaces as a normal step failure — same v1 behavior as before."""
+    writer = _CollidingWriteDoc()
+    asker = _FakeAskUser(answer="yes")  # shouldn't be called
+    fake = FakeAnthropic(replies=[])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake),
+        registry=_registry(writer, asker),
+    )
+    plan = _plan(
+        [Step(id="w", kind="functional", tool="write_doc",
+              description="save",
+              inputs={"filename": "x.md", "content": "y"})],
+        plan_id=uuid4(),
+    )
+    ctx = ToolContext(user_id=uuid4(), task_id=None)
+    execution = await executor.execute(ctx=ctx, plan=plan)
+    assert execution.success is False
+    assert len(asker.calls) == 0
+    assert len(writer.calls) == 1

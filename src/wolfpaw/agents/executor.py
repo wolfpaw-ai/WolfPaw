@@ -30,7 +30,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Awaitable, Callable
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import UUID
 
 from wolfpaw.config import get_settings
@@ -49,12 +50,56 @@ from wolfpaw.schemas import (
 )
 from wolfpaw.toolbox.registry import Registry, ToolContext, get_registry
 from wolfpaw.tracing import get_logger
+from wolfpaw.workspace.files import WorkspaceCollision
+
+# Affirmative answers to the "overwrite?" prompt. Anything not in here is
+# treated as a decline (which is the safer default — the executor will
+# surface the collision rather than clobber data).
+_OVERWRITE_YES = frozenset({"y", "yes", "overwrite", "ok", "confirm"})
 
 # Max ancestor depth for `subagent` steps (step 16). The Executor checks
 # `tasks_dao.get_depth` before spawning a child; spawning is rejected when
 # the parent's depth is already at MAX_SUBAGENT_DEPTH (child would be 1
 # deeper). Keeps recursive plans bounded.
 MAX_SUBAGENT_DEPTH = 3
+
+# Cap concurrent subagent spawns scoped to the root task. Subagents at any
+# depth under the same root contend for one semaphore so a wide-fanout plan
+# can't overwhelm the model provider or sandbox capacity. Per-root keeps
+# unrelated user tasks independent.
+MAX_CONCURRENT_SUBAGENTS_PER_ROOT = 5
+
+# Process-local registry of root-task → semaphore. Refcounted so an entry
+# is dropped once its last in-flight subagent releases — keeps the dict
+# small for long-running processes with many root tasks over time.
+_subagent_semaphores: dict[UUID, asyncio.Semaphore] = {}
+_subagent_semaphore_refs: dict[UUID, int] = {}
+_subagent_registry_lock = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _acquire_subagent_slot(root_task_id: UUID) -> AsyncIterator[None]:
+    """Acquire one slot from the per-root subagent semaphore. Blocks when
+    `MAX_CONCURRENT_SUBAGENTS_PER_ROOT` siblings are already running."""
+    async with _subagent_registry_lock:
+        sem = _subagent_semaphores.get(root_task_id)
+        if sem is None:
+            sem = asyncio.Semaphore(MAX_CONCURRENT_SUBAGENTS_PER_ROOT)
+            _subagent_semaphores[root_task_id] = sem
+        _subagent_semaphore_refs[root_task_id] = (
+            _subagent_semaphore_refs.get(root_task_id, 0) + 1
+        )
+    try:
+        async with sem:
+            yield
+    finally:
+        async with _subagent_registry_lock:
+            remaining = _subagent_semaphore_refs[root_task_id] - 1
+            if remaining <= 0:
+                _subagent_semaphores.pop(root_task_id, None)
+                _subagent_semaphore_refs.pop(root_task_id, None)
+            else:
+                _subagent_semaphore_refs[root_task_id] = remaining
 
 log = get_logger()
 
@@ -288,7 +333,45 @@ class ExecutorAgent:
             tool = self.registry.get(step.tool)
         except KeyError as e:
             raise ValueError(f"unknown tool: {step.tool!r}") from e
-        return await tool.run(ctx, **step.inputs)
+        try:
+            return await tool.run(ctx, **step.inputs)
+        except WorkspaceCollision as collision:
+            return await self._handle_workspace_collision(
+                ctx=ctx, step=step, tool=tool, collision=collision,
+            )
+
+    async def _handle_workspace_collision(
+        self, *, ctx: ToolContext, step: Step, tool: Any,
+        collision: WorkspaceCollision,
+    ) -> Any:
+        """Ask the user whether to overwrite, then retry the tool with
+        `overwrite=True` if they say yes.
+
+        Requires `ctx.task_id` — the `ask_user` tool only works inside a
+        task lifecycle. Outside a task, the collision propagates as a
+        normal step failure (same v1 behavior as before this hook).
+        """
+        if ctx.task_id is None:
+            raise collision
+
+        existing = collision.existing
+        ask_tool = self.registry.get("ask_user")
+        prompt = (
+            f"File {existing.filename!r} already exists at v{existing.version}."
+            " Overwrite it? (yes / no)"
+        )
+        answer_payload = await ask_tool.run(
+            ctx,
+            question=prompt,
+            options=["yes", "no"],
+            urgency="normal",
+        )
+        answer = str(answer_payload.get("answer", "")).strip().lower()
+        if answer not in _OVERWRITE_YES:
+            raise collision
+        retry_inputs = dict(step.inputs)
+        retry_inputs["overwrite"] = True
+        return await tool.run(ctx, **retry_inputs)
 
     async def _run_reasoning(
         self, ctx: ToolContext, step: Step, plan: Plan, prior: list[StepResult],
@@ -349,6 +432,7 @@ class ExecutorAgent:
 
         async with acquire() as conn:
             depth = await tasks_dao.get_depth(conn, task_id=ctx.task_id)
+            root_task_id = await tasks_dao.get_root(conn, task_id=ctx.task_id)
         if depth >= MAX_SUBAGENT_DEPTH:
             raise ValueError(
                 f"subagent depth cap reached (parent depth={depth},"
@@ -360,24 +444,28 @@ class ExecutorAgent:
         from wolfpaw.tasks.service import get_task_service
 
         service = get_task_service()
-        outcome = await service.create_and_run(
-            user_id=ctx.user_id,
-            thread_id=None,                 # subagent gets fresh context
-            content=query,
-            title=title,
-            description=(
-                f"Subagent spawned by parent task {ctx.task_id} for"
-                f" step {step.id!r}: {step.description}"
-            ),
-            parent_task_id=ctx.task_id,
-            budget_cents=budget,
-            complexity_hint=child_complexity,
-            # Don't propagate emit — multiple parallel subagents would
-            # interleave step events into the parent's SSE stream and
-            # make the timeline confusing. The parent's step.start /
-            # step.end events show that the subagent ran.
-            emit=None,
-        )
+        # Per-root semaphore: bound fanout so a wide plan can't saturate
+        # the model provider or sandbox pool. Siblings in a parallel_group
+        # contend for the same slots as cousins under the same root.
+        async with _acquire_subagent_slot(root_task_id):
+            outcome = await service.create_and_run(
+                user_id=ctx.user_id,
+                thread_id=None,                 # subagent gets fresh context
+                content=query,
+                title=title,
+                description=(
+                    f"Subagent spawned by parent task {ctx.task_id} for"
+                    f" step {step.id!r}: {step.description}"
+                ),
+                parent_task_id=ctx.task_id,
+                budget_cents=budget,
+                complexity_hint=child_complexity,
+                # Don't propagate emit — multiple parallel subagents would
+                # interleave step events into the parent's SSE stream and
+                # make the timeline confusing. The parent's step.start /
+                # step.end events show that the subagent ran.
+                emit=None,
+            )
 
         if outcome.task.status != "completed":
             raise ValueError(

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from wolfpaw.auth.deps import require_user_id
 from wolfpaw.memory.db import acquire
 from wolfpaw.persona import user_profile as up
+from wolfpaw.persona.builder import invalidate_profile
 
 router = APIRouter(prefix="/me", tags=["persona"])
 
@@ -97,4 +98,7 @@ async def patch_profile(
             raise HTTPException(
                 404, "no user_profile row — sign in again to seed one",
             )
+    # Drop any in-process cache entry so the next agent call sees the
+    # updated row immediately (the TTL also self-heals other workers).
+    invalidate_profile(user_id)
     return ProfileResponse.from_dao(updated)

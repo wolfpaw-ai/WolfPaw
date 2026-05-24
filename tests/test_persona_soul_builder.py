@@ -121,3 +121,85 @@ def test_build_system_prompt_skips_default_utc_timezone_line():
         soul=None, user_profile=profile, agent_role="role.",
     )
     assert "Timezone:" not in s
+
+
+# --- profile cache --------------------------------------------------------
+
+from contextlib import asynccontextmanager  # noqa: E402
+
+from wolfpaw.persona import builder as builder_mod  # noqa: E402
+
+
+@asynccontextmanager
+async def _fake_acquire():
+    yield None
+
+
+@pytest.fixture(autouse=True)
+def _reset_profile_cache_between_tests():
+    builder_mod.clear_profile_cache()
+    yield
+    builder_mod.clear_profile_cache()
+
+
+async def test_build_for_agent_caches_profile_across_calls(monkeypatch):
+    """Two back-to-back agent calls for the same user → one DAO hit."""
+    user_id = uuid4()
+    call_count = {"n": 0}
+
+    async def fake_get(_conn, *, user_id):
+        call_count["n"] += 1
+        return _profile(user_id=user_id, persona_md="Cached Alice")
+
+    monkeypatch.setattr("wolfpaw.persona.builder.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.persona.builder.up.get", fake_get)
+    monkeypatch.setattr("wolfpaw.persona.builder.get_soul", lambda: None)
+
+    s1 = await builder_mod.build_for_agent(user_id=user_id, agent_role="role")
+    s2 = await builder_mod.build_for_agent(user_id=user_id, agent_role="role")
+
+    assert "Cached Alice" in s1
+    assert "Cached Alice" in s2
+    assert call_count["n"] == 1
+
+
+async def test_invalidate_profile_forces_reload(monkeypatch):
+    user_id = uuid4()
+    call_count = {"n": 0}
+    versions = ["v1", "v2"]
+
+    async def fake_get(_conn, *, user_id):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        return _profile(user_id=user_id, persona_md=versions[idx])
+
+    monkeypatch.setattr("wolfpaw.persona.builder.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.persona.builder.up.get", fake_get)
+    monkeypatch.setattr("wolfpaw.persona.builder.get_soul", lambda: None)
+
+    s1 = await builder_mod.build_for_agent(user_id=user_id, agent_role="role")
+    builder_mod.invalidate_profile(user_id)
+    s2 = await builder_mod.build_for_agent(user_id=user_id, agent_role="role")
+
+    assert "v1" in s1
+    assert "v2" in s2
+    assert call_count["n"] == 2
+
+
+async def test_build_for_agent_falls_back_on_db_failure(monkeypatch):
+    """Cache miss + DAO raises → degraded mode (DEFAULT_PROFILE), still emits role."""
+    user_id = uuid4()
+
+    async def boom(_conn, *, user_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("wolfpaw.persona.builder.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.persona.builder.up.get", boom)
+    monkeypatch.setattr("wolfpaw.persona.builder.get_soul", lambda: None)
+
+    s = await builder_mod.build_for_agent(
+        user_id=user_id, agent_role="degraded role",
+    )
+    assert "degraded role" in s
+    # DEFAULT_PROFILE has empty persona_md → renders the placeholder.
+    assert "hasn't filled in their User File" in s

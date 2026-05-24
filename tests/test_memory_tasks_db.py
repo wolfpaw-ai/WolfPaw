@@ -245,6 +245,83 @@ async def test_get_depth_walks_parent_chain():
         await conn.close()
 
 
+async def test_get_root_walks_to_top_of_chain():
+    """`get_root` is used by the executor to scope the per-root subagent
+    concurrency cap. Roots return themselves; children return the root."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    conn = await _conn()
+    try:
+        root = await tasks_dao.create(conn, user_id=uid, title="root")
+        child = await tasks_dao.create(
+            conn, user_id=uid, title="child", parent_task_id=root.id,
+        )
+        grand = await tasks_dao.create(
+            conn, user_id=uid, title="grandchild", parent_task_id=child.id,
+        )
+        assert await tasks_dao.get_root(conn, task_id=root.id) == root.id
+        assert await tasks_dao.get_root(conn, task_id=child.id) == root.id
+        assert await tasks_dao.get_root(conn, task_id=grand.id) == root.id
+    finally:
+        await conn.close()
+
+
+async def test_rollup_spent_cents_sums_token_and_compute_usage():
+    """rollup_spent_cents writes the sum of this task's token + compute
+    cost rows back to `tasks.spent_cents`. Called by TaskService on
+    terminal transitions so the listing reflects authoritative cost."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    conn = await _conn()
+    try:
+        t = await tasks_dao.create(conn, user_id=uid, title="cost test")
+        # Two token-usage rows + one compute-usage row attributed to this task.
+        await conn.execute(
+            "INSERT INTO token_usage"
+            " (user_id, task_id, agent, model, cost_cents)"
+            " VALUES ($1, $2, 'quick', 'claude-haiku-4-5', 17),"
+            "        ($1, $2, 'quick', 'claude-haiku-4-5', 13)",
+            uid, t.id,
+        )
+        await conn.execute(
+            "INSERT INTO compute_usage"
+            " (user_id, task_id, compute_seconds, cost_cents)"
+            " VALUES ($1, $2, 5, 7)",
+            uid, t.id,
+        )
+        # A row on a DIFFERENT task must not contribute.
+        other = await tasks_dao.create(conn, user_id=uid, title="other")
+        await conn.execute(
+            "INSERT INTO token_usage"
+            " (user_id, task_id, agent, model, cost_cents)"
+            " VALUES ($1, $2, 'quick', 'claude-haiku-4-5', 999)",
+            uid, other.id,
+        )
+
+        total = await tasks_dao.rollup_spent_cents(conn, task_id=t.id)
+        row = await tasks_dao.get_by_id(conn, user_id=uid, task_id=t.id)
+    finally:
+        await conn.close()
+    assert total == 17 + 13 + 7
+    assert row is not None and row.spent_cents == 17 + 13 + 7
+
+
+async def test_rollup_spent_cents_writes_zero_when_no_rows():
+    """A task that incurred no spend (e.g. cancelled before any model
+    call) rolls up to 0 — no rows means the COALESCE kicks in."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    conn = await _conn()
+    try:
+        t = await tasks_dao.create(conn, user_id=uid, title="empty")
+        total = await tasks_dao.rollup_spent_cents(conn, task_id=t.id)
+        row = await tasks_dao.get_by_id(conn, user_id=uid, task_id=t.id)
+    finally:
+        await conn.close()
+    assert total == 0
+    assert row is not None and row.spent_cents == 0
+
+
 async def test_attach_plan_updates_current_plan_id():
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     uid = await _seed_user(dsn)

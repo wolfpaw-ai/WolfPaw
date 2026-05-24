@@ -129,6 +129,12 @@ async def cancel_task(
                 conn, task_id=task_id, event_type="status.cancelled",
                 content={"by": "user"},
             )
+            # Lock in the cost the task already accrued before cancellation
+            # so the listing reflects partial spend rather than 0.
+            await tasks_dao.rollup_spent_cents(conn, task_id=task_id)
+            cancelled = await tasks_dao.get_by_id(
+                conn, user_id=user_id, task_id=task_id,
+            )
     if cancelled is None:
         # Either doesn't exist (for this user) or is already terminal.
         async with acquire() as conn:

@@ -30,8 +30,12 @@ Router gets "task" verdict
       6. terminal:
            execution.success           → tasks_dao.mark_completed() + event
            else                        → tasks_dao.mark_failed()    + event
+      7. tasks_dao.rollup_spent_cents() → sum of token_usage + compute_usage rows
+                                          for this task → tasks.spent_cents
   ← TaskOutcome(task, plan, execution, verdict, final_answer)
 ```
+
+`spent_cents` rollup runs on every terminal transition (including planner-failed / executor-crashed via `_fail`, plus the `/cancel` route + slash command) so `/tasks` and `/task <id>` show authoritative final cost. The roll-up sums *direct* spend only — a subagent's own `spent_cents` reflects its own model + compute rows; a future recursive query could surface the full subtree cost on the root.
 
 ## ask_user pause/resume
 
@@ -59,5 +63,4 @@ In-process registry caveats:
 
 - **Real async via arq** (deferred): add `workers/arq_app.py` that picks runnable tasks (status='pending' or 'awaiting_user' resumes) and calls `TaskService.run(task_id)`. The TaskService can be split into `create()` + `run()` so the Router can create the row + return immediately while the worker picks up the run.
 - **Recurring tasks**: `tasks.schedule_pattern` is already a column; a cron-style scheduler in `workers/` enqueues runs.
-- **WorkspaceCollision → ask_user**: catch `WorkspaceCollision` in the executor, call ask_user with "Overwrite?", on yes pass `overwrite=True` and retry the step. Small follow-up.
-- **Per-task `spent_cents` rollup** (deferred): `/usage` already aggregates per-user; a per-task rollup would let `/task <id>` show "spent X of Y budget" once a real consumer needs it.
+- **Recursive subtree cost**: `spent_cents` currently reflects direct spend only. A recursive CTE over `parent_task_id` would surface the full subtree cost on the root once budget enforcement needs it.

@@ -21,6 +21,11 @@ from wolfpaw.channels import InboundMessage
 @dataclass(frozen=True)
 class CommandResult:
     text: str
+    # Channels that maintain client-side thread state (web SSE) read this to
+    # know they should drop the current thread_id, so the next user message
+    # starts a fresh conversation. Channels without client thread state
+    # (Telegram) ignore the flag; those handlers do the reset server-side.
+    clear_thread: bool = False
 
 
 CommandHandler = Callable[[InboundMessage, str], Awaitable[CommandResult]]
@@ -102,3 +107,36 @@ async def _help(message: InboundMessage, args: str) -> CommandResult:
     for spec in _dispatcher.commands():
         lines.append(f"  /{spec.name} — {spec.description}")
     return CommandResult(text="\n".join(lines))
+
+
+@register("reset", "Start a fresh conversation thread.")
+async def _reset(message: InboundMessage, args: str) -> CommandResult:
+    """Reset the user's current conversation thread.
+
+    Web (and any client-driven channel) signals via `clear_thread=True`
+    so the client forgets its thread_id; the next message creates a
+    fresh thread on the server. Telegram has no client-side thread
+    state — the channel always resolves the user's most-recent thread —
+    so we mint an empty new thread now and the resolver will pick it
+    up for the next message.
+    """
+    if message.channel_name == "telegram":
+        # Lazy import — avoids loading the DB layer at command-registration
+        # time (which happens at import).
+        from wolfpaw.memory import conversational as conv
+        from wolfpaw.memory.db import acquire
+
+        try:
+            async with acquire() as conn:
+                await conv.get_or_create_thread(
+                    conn, user_id=message.user_id, channel="telegram",
+                    thread_id=None,
+                )
+        except Exception:  # noqa: BLE001
+            return CommandResult(
+                text="Couldn't reset the thread right now. Try again in a moment.",
+            )
+    return CommandResult(
+        text="Thread reset. Your next message starts a fresh conversation.",
+        clear_thread=True,
+    )

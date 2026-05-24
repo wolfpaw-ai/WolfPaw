@@ -44,6 +44,7 @@ from wolfpaw.auth.deps import require_user_id
 from wolfpaw.channels import Channel, InboundMessage
 from wolfpaw.channels.commands import get_dispatcher
 from wolfpaw.channels.telegram_client import TelegramClient, get_telegram_client
+from wolfpaw.channels.telegram_markdown import to_markdown_v2
 from wolfpaw.channels.telegram_tokens import (
     LinkTokenError,
     consume as consume_link_token,
@@ -300,7 +301,14 @@ async def _handle_inbound(
         final = await get_router().handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=None,
         )
-        await client.send_message(chat_id=tg_chat_id, text=final)
+        # Convert agent-flavored markdown to Telegram MarkdownV2 so bold,
+        # code spans, and links render. Plain-text agents stay readable
+        # since `to_markdown_v2` falls back to character-level escaping
+        # for anything not in its pattern set.
+        await client.send_message(
+            chat_id=tg_chat_id, text=to_markdown_v2(final),
+            parse_mode="MarkdownV2",
+        )
     except Exception as e:  # noqa: BLE001
         log.exception(
             "channels.telegram.inbound_failed", user_id=str(user_id),

@@ -87,3 +87,18 @@ async def test_register_rejects_empty_name():
 
     with pytest.raises(ValueError):
         d.register("/", "empty", h)
+
+
+async def test_reset_on_web_sets_clear_thread_flag():
+    """`/reset` from a web client signals via clear_thread; no DB I/O needed."""
+    result = await get_dispatcher().dispatch(_msg("/reset"))
+    assert isinstance(result, CommandResult)
+    assert result.clear_thread is True
+    assert "fresh" in result.text.lower()
+
+
+async def test_help_lists_reset_command():
+    """`/reset` is registered as a built-in command so it shows in /help."""
+    result = await get_dispatcher().dispatch(_msg("/help"))
+    assert isinstance(result, CommandResult)
+    assert "/reset" in result.text

@@ -135,6 +135,8 @@ async def chat(
         # they don't burn model tokens or create a thread.
         cmd_result = await get_dispatcher().dispatch(inbound)
         if cmd_result is not None:
+            if cmd_result.clear_thread:
+                yield _sse_event("reset", "")
             yield _sse_event("command", cmd_result.text)
             yield _sse_event("done", "")
             return

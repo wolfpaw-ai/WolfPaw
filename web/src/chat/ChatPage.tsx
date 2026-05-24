@@ -93,6 +93,12 @@ export function ChatPage() {
       setThreadId(ev.data);
       return;
     }
+    if (ev.event === "reset") {
+      // `/reset` command — drop the thread_id so the next send creates
+      // a fresh thread on the server.
+      setThreadId(null);
+      return;
+    }
     if (ev.event === "delta") {
       setTurns((prev) =>
         prev.map((t) =>

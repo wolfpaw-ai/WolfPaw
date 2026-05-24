@@ -22,10 +22,21 @@ without filesystem I/O.
 
 `build_for_agent(...)` is the convenience wrapper agents use: pass a
 user_id + role string, it loads Soul + profile + assembles.
+
+Caching: `build_for_agent` reads the profile from Postgres on every
+call, and a single user can drive a single Router turn through many
+agent calls (Triage → Planner → many Executor steps → Post-Eval). We
+cache the loaded `UserProfile` per-user with a short TTL to keep the
+DAO calls down to one per request burst. `invalidate_profile(user_id)`
+must be called whenever the row is mutated (the PATCH endpoint does
+this); for multi-process safety the TTL ensures stale entries clear on
+their own within `_PROFILE_TTL_SECONDS`.
 """
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -36,6 +47,46 @@ from wolfpaw.persona.user_profile import DEFAULT_PROFILE, UserProfile
 from wolfpaw.tracing import get_logger
 
 log = get_logger()
+
+
+# Short — long enough to coalesce one user's request burst, short enough
+# that cross-process staleness from a PATCH on another worker self-heals
+# within seconds. PATCH on this process is invalidated synchronously.
+_PROFILE_TTL_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class _CachedProfile:
+    profile: UserProfile
+    expires_at: float
+
+
+_profile_cache: dict[UUID, _CachedProfile] = {}
+
+
+def invalidate_profile(user_id: UUID) -> None:
+    """Drop the cached profile for this user. Called after PATCH so the
+    next agent call sees the updated row immediately on this process."""
+    _profile_cache.pop(user_id, None)
+
+
+def clear_profile_cache() -> None:
+    """Test hook — wipe the whole cache between cases."""
+    _profile_cache.clear()
+
+
+async def _load_profile_cached(user_id: UUID) -> UserProfile:
+    now = time.monotonic()
+    cached = _profile_cache.get(user_id)
+    if cached is not None and cached.expires_at > now:
+        return cached.profile
+    async with acquire() as conn:
+        loaded = await up.get(conn, user_id=user_id)
+    profile = loaded if loaded is not None else DEFAULT_PROFILE
+    _profile_cache[user_id] = _CachedProfile(
+        profile=profile, expires_at=now + _PROFILE_TTL_SECONDS,
+    )
+    return profile
 
 
 def _format_preferences(preferences: dict[str, Any]) -> str:
@@ -97,14 +148,11 @@ async def build_for_agent(*, user_id: UUID, agent_role: str) -> str:
     except Exception:  # noqa: BLE001 — degraded mode is fine
         log.warning("persona.soul.load_failed", exc_info=True)
         soul = None
-    profile = DEFAULT_PROFILE
     try:
-        async with acquire() as conn:
-            loaded = await up.get(conn, user_id=user_id)
-        if loaded is not None:
-            profile = loaded
+        profile = await _load_profile_cached(user_id)
     except Exception:  # noqa: BLE001
         log.warning("persona.profile.load_failed", exc_info=True)
+        profile = DEFAULT_PROFILE
     return build_system_prompt(
         soul=soul, user_profile=profile, agent_role=agent_role,
     )

@@ -289,3 +289,57 @@ async def get_depth(
         depth += 1
         current = parent
     return depth
+
+
+async def rollup_spent_cents(
+    conn: asyncpg.Connection, *, task_id: UUID,
+) -> int:
+    """Sum `token_usage.cost_cents + compute_usage.cost_cents` rows whose
+    `task_id` is this task, then write the total to `tasks.spent_cents`.
+    Returns the written total.
+
+    Only counts spend *directly* attributed to this task — child subagent
+    tasks have their own task_id and roll up against their own rows. Each
+    subagent task's `spent_cents` reflects its own direct spend; a future
+    recursive roll-up could surface the full tree cost on the root.
+
+    Called by `TaskService` on terminal transitions so the `/tasks` and
+    `/task <id>` UIs see an authoritative final cost without rescanning
+    `token_usage` per request."""
+    token_cost = await conn.fetchval(
+        "SELECT COALESCE(SUM(cost_cents), 0) FROM token_usage WHERE task_id = $1",
+        task_id,
+    )
+    compute_cost = await conn.fetchval(
+        "SELECT COALESCE(SUM(cost_cents), 0) FROM compute_usage WHERE task_id = $1",
+        task_id,
+    )
+    total = int(token_cost or 0) + int(compute_cost or 0)
+    await conn.execute(
+        "UPDATE tasks SET spent_cents = $2 WHERE id = $1",
+        task_id, total,
+    )
+    return total
+
+
+async def get_root(
+    conn: asyncpg.Connection, *, task_id: UUID,
+) -> UUID:
+    """Walk `parent_task_id` to the top of the chain and return the root
+    task id. A root task returns its own id.
+
+    Used by the Executor to scope the per-root subagent concurrency cap:
+    sibling subagents on the same root share one semaphore so a single
+    root can't fan out beyond the configured cap, even when descendants
+    are spread across multiple branches. Capped at `_MAX_DEPTH_WALK` for
+    the same loop-safety reason as `get_depth`."""
+    current = task_id
+    for _ in range(_MAX_DEPTH_WALK):
+        parent = await conn.fetchval(
+            "SELECT parent_task_id FROM tasks WHERE id = $1",
+            current,
+        )
+        if parent is None:
+            return current
+        current = parent
+    return current

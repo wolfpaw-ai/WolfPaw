@@ -203,6 +203,17 @@ class TaskService:
                 extra_content={"error": execution.error},
             )
 
+        # 7. Authoritative cost roll-up. Done after the terminal transition
+        # so the reload below picks it up. Best-effort — a missing roll-up
+        # row leaves spent_cents at 0 (the default) rather than blocking
+        # the task return.
+        try:
+            async with acquire() as conn:
+                await tasks_dao.rollup_spent_cents(conn, task_id=task.id)
+        except Exception:  # noqa: BLE001
+            log.warning("tasks.service.rollup_failed", task_id=str(task.id),
+                        exc_info=True)
+
         return TaskOutcome(
             task=await self._reload(task.id, user_id) or task,
             plan=plan, execution=execution, verdict=verdict,
@@ -240,6 +251,14 @@ class TaskService:
             lambda c: tasks_dao.mark_failed(c, task_id=task_id, reason=reason),
             extra_content={"reason": reason},
         )
+        # Roll up any partial spend (e.g. a planner call that succeeded
+        # before the executor crashed). Best-effort.
+        try:
+            async with acquire() as conn:
+                await tasks_dao.rollup_spent_cents(conn, task_id=task_id)
+        except Exception:  # noqa: BLE001
+            log.warning("tasks.service.rollup_failed", task_id=str(task_id),
+                        exc_info=True)
 
     async def _reload(self, task_id: UUID, user_id: UUID) -> tasks_dao.Task | None:
         async with acquire() as conn:

@@ -297,6 +297,54 @@ def test_webhook_linked_user_dispatches_slash_command(monkeypatch, fake_telegram
     assert "Available commands" in body
 
 
+def test_webhook_linked_user_free_form_sends_markdown_v2(monkeypatch, fake_telegram):
+    """Free-form text from a linked user → Router runs → reply sent back
+    via Telegram with MarkdownV2 escaping. The agent's `**bold**` is
+    converted to `*bold*` and parenthesized prose is escaped."""
+    bound_user = uuid4()
+
+    async def fake_find_user(_conn, *, channel, external_id):
+        return bound_user
+
+    async def fake_resolve_thread(_conn, _user_id):
+        return uuid4()
+
+    class FakeRouter:
+        async def handle(self, *, ctx, thread_id, content, emit=None):
+            return "The answer is **42** (final)."
+
+    monkeypatch.setattr(channel_links, "find_user", fake_find_user)
+    monkeypatch.setattr(
+        "wolfpaw.channels.telegram._resolve_telegram_thread",
+        fake_resolve_thread,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.telegram.get_router", lambda: FakeRouter(),
+    )
+
+    app = create_app()
+    client = TestClient(app)
+    r = client.post(
+        "/channels/telegram/webhook",
+        json=_message_update(text="what's the meaning of life?"),
+    )
+    assert r.status_code == 200
+
+    async def _wait():
+        for _ in range(50):
+            if fake_telegram.sent:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.get_event_loop().run_until_complete(_wait())
+    assert len(fake_telegram.sent) >= 1
+    sent = fake_telegram.sent[-1]
+    assert sent["parse_mode"] == "MarkdownV2"
+    # **42** → *42*  and  (final). → \(final\)\.
+    assert "*42*" in sent["text"]
+    assert "\\(final\\)\\." in sent["text"]
+
+
 def test_webhook_malformed_json_doesnt_500(fake_telegram):
     app = create_app()
     client = TestClient(app)
