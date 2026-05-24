@@ -14,12 +14,11 @@ Its motto, *Tread lightly,* is also its design constraint: take the smallest act
 
 **One sentence:** *Wolfpaw is the trustworthy long-running agent for the channels you already use — at a cost you can see, with capabilities you explicitly grant.*
 
-## Two ways to use Wolfpaw
+## Deploying Wolfpaw
 
-- **Wolfpaw Cloud (paid, hosted).** Sign up at wolfpaw.ai, pick a plan, talk to your agent in minutes. No API keys, no installation, no developer setup. Inference is included up to your tier's allowance. Pay-as-you-go is opt-in, never automatic.
-- **Wolfpaw Open Source (self-hosted, free).** Same code, deployable to your own server, laptop, or homelab. Bring your own API keys. Operate your own Telegram bot. You own everything. License TBD.
+This repo is the Wolfpaw app — agents, channels, memory, tools, sandbox, metering, REST + SSE API, React web client. Deployable to your own server, laptop, or homelab. Bring your own model + embedding + (optional) sandbox API keys. Operate your own Telegram bot. You own everything. License TBD.
 
-One codebase, two distributions. The hosted product exists so non-developers can use Wolfpaw without setup; the OSS version exists so developers can hack on it, run it privately, and verify what it does with their data.
+Wolfpaw ships everything it needs to run on a single host or be wrapped behind a multi-tenant service. The deployment story — reverse proxy, log shipper, secrets management, infra-as-code — is intentionally left to the operator so this repo stays vendor-neutral.
 
 ---
 
@@ -29,10 +28,10 @@ Wolfpaw is channel-native: you reach it where you already work.
 
 ### Channels
 
-- **Web chat** — sign in at `wolfpaw.ai` (or your self-host URL), type in the chat box. Replies stream live. The React app under `web/` ships chat + task list + workspace files + usage dashboard + profile editor + Telegram link minting.
-- **Telegram** — DM `@WolfpawBot` after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile` or the channel-settings UI). One shared bot for hosted; OSS users provision their own via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
-- **Email** *(v1.5, step 23)* — forward anything to `alice@wolfpaw.ai`; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
-- **Slack** *(v2, step 25)* — workspace install, slash command + DM.
+- **Web chat** — sign in at your deployment's URL, type in the chat box. Replies stream live. The React app under `web/` ships chat + task list + workspace files + usage dashboard + profile editor + Telegram link minting.
+- **Telegram** — DM your bot after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile` or the channel-settings UI). Operators provision the bot via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
+- **Email** *(v1.5)* — forward to a per-user alias on your deployment's domain; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
+- **Slack** *(v2, step 21)* — workspace install, slash command + DM.
 
 ### Slash commands
 
@@ -47,7 +46,7 @@ Intercepted before the model in every channel so they don't burn tokens.
 
 ### Workspace
 
-Upload files for Wolfpaw to work with; pick up deliverables it produces. Same workspace whether you arrived via web, Telegram, or email — per-user prefix in S3 for hosted, local FS for self-host. v1 is a flat namespace; folders and Drive / Dropbox sync are v2.
+Upload files for Wolfpaw to work with; pick up deliverables it produces. Same workspace whether you arrived via web, Telegram, or email — backed by the configured `Storage` provider (`LocalStorage` for dev / self-host; `S3Storage` for managed deployments). v1 is a flat namespace; folders and Drive / Dropbox sync are v2.
 
 ### Tasks
 
@@ -55,7 +54,7 @@ Anything beyond a single chat turn becomes a **Task** — a persistent unit of w
 
 ### Cost control
 
-Every model call and every sandbox-second is metered. Hard pause at allowance — no silent overage. Opt-in overage with a per-user cap. Notifications at 50% / 80% / 100% of allowance. `/usage` is the always-on receipt.
+Every model call and every sandbox-second is metered. The OSS app ships with a no-op `Enforcer` (every user runs as `tier="dev"`, metering on but no gating) — the `subscriptions` + `tier_limits` + `cost_notifications` schema is in place so operators can wire in a real enforcer + billing provider without migrations. `/usage` is the always-on receipt regardless of whether enforcement is wired.
 
 ### Trying it locally today
 
@@ -89,12 +88,12 @@ Non-slash messages go through the Router: Triage classifies → Quick (one-shot 
 
 | System | Optimized for | Wolfpaw's contrast |
 |---|---|---|
-| **OpenClaw** | Open-source, local-first, full system access on a power user's own hardware. Hackable kernel, mature ecosystem. | Wolfpaw is hosted-first and intentionally conservative on local capability. Audience is people who *don't* want an agent with root on their laptop. Same OSS option for those who do. |
+| **OpenClaw** | Open-source, local-first, full system access on a power user's own hardware. Hackable kernel, mature ecosystem. | Wolfpaw is channel-native (web / Telegram / email) rather than desktop-native, and intentionally conservative on local capability. Audience is people who *don't* want an agent with root on their laptop. |
 | **NanoClaw** | A minimal agent kernel — small, focused, a building block you wire up yourself. | Wolfpaw is a full product, not a kernel: channels, tasks, billing, memory, sandbox, observability all in one. Wolfpaw borrows NanoClaw's credential-vault pattern but ships the whole stack around it. |
 | **Claude Desktop** | A first-party chat client for Claude on macOS / Windows, with MCP tool integration and local file access. Conversational, in-the-moment. | Wolfpaw runs *across* sessions, not inside one. It owns long-running tasks that pause when blocked and resume across days, pings you on whichever channel suits the moment, and produces real deliverables — not just a chat reply. |
-| **Claude Cowork** | Anthropic's hosted agentic system for knowledge workers — bundled inference, desktop companion, deep first-party integrations (Drive, Gmail, Slack, DocuSign, FactSet). | Wolfpaw differentiates on channel mix (Telegram + email forwarding, not desktop), explicit cost mechanics (hard pause at cap, opt-in overage, `/usage`), read-only-by-default scopes, model portability (v2), and the OSS / self-host distribution. |
+| **Claude Cowork** | Anthropic's hosted agentic system for knowledge workers — bundled inference, desktop companion, deep first-party integrations (Drive, Gmail, Slack, DocuSign, FactSet). | Wolfpaw differentiates on channel mix (Telegram + email forwarding, not desktop), explicit cost mechanics (hard pause at cap, `/usage`), read-only-by-default scopes, model portability (v2), and self-host as a first-class deployment path. |
 
-The through-line: **OpenClaw maximizes capability on your own machine. NanoClaw is the minimum viable kernel. Claude Desktop is a chat client. Cowork is the model vendor's first-party hosted agent. Wolfpaw is the careful, channel-native worker that gets real work done at a cost you can see.**
+The through-line: **OpenClaw maximizes capability on your own machine. NanoClaw is the minimum viable kernel. Claude Desktop is a chat client. Cowork is the model vendor's first-party agent. Wolfpaw is the careful, channel-native worker that gets real work done at a cost you can see — self-hostable and operator-deployable.**
 
 A longer feature-by-feature comparison lives in [`spec.md`](spec.md).
 
@@ -578,7 +577,7 @@ web/                                  # React + Vite SPA (step 19)  [README]
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
 
-**Not built yet:** `billing/` (step 24), `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction), `infra/` Terraform (step 21). The implementation plan tracks order and scope.
+**Not built yet:** `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction). Deployment artifacts and billing integration are intentionally out of repo — see the per-deployment notes that operators maintain alongside their fork or pinned dependency. The implementation plan tracks order and scope for the OSS app itself.
 
 ---
 
@@ -605,7 +604,7 @@ Steps 1–19 of the v1 build order are shipped (see [`implementation_plan.md`](i
 
 **Tests:** `pytest` runs 247 unit tests in ~1s; 100 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** Tiered conversational compaction (12.5), CloudWatch dashboards (20), Terraform (21).
+**Next up:** Tiered conversational compaction (12.5), OSS packaging (step 20 — Docker Compose, install script, self-host docs), Slack channel (step 21).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 

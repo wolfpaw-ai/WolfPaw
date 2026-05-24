@@ -14,34 +14,32 @@ Living document. Updated as decisions are made.
 ## Decisions locked in
 
 1. **Datastore:** Postgres + `pgvector`. Oracle AI Database evaluated later for specific use cases.
-2. **Hosting:** Wolfpaw Cloud runs on its own EC2 instance(s), possibly in a separate AWS account. RDS Postgres separate from the API instance for hosted; co-located acceptable for self-host.
-3. **Repo:** Standalone, separate from `dmitris-fabulous`. Living in `wolfpaw/` here for now; will move to its own repo before public release.
-4. **License:** TBD. Will be open-source-friendly; specific license deferred.
-5. **Distribution:** Hosted SaaS (`wolfpaw.ai`) + self-host OSS, single codebase. Hosted-first build order; self-host packaging in v1.5.
-6. **Framework:** Python 3.12 + FastAPI. Pydantic v2.
-7. **Channels:**
-   - **v1:** Web chat, Telegram (single shared `@WolfpawBot` for hosted; OSS users provision their own bot via BotFather)
-   - **v1.5:** Email forwarding (`alice@wolfpaw.ai`, SES inbound, drafts-out to verified owner address only)
+2. **Repo:** Standalone, separate from `dmitris-fabulous`. Living in `wolfpaw/` here for now; will move to its own repo before public release.
+3. **License:** TBD. Will be open-source-friendly; specific license deferred.
+4. **Distribution:** Single codebase; deployment is the operator's choice. The app ships everything it needs to run on a single host or be wrapped behind a multi-tenant service.
+5. **Framework:** Python 3.12 + FastAPI. Pydantic v2.
+6. **Channels:**
+   - **v1:** Web chat, Telegram (operators provision their own bot via BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`)
+   - **v1.5:** Email forwarding (operator wires inbound mail to `POST /channels/email/inbound`; drafts-out to verified owner address only)
    - **v2:** Slack (OAuth workspace install)
-8. **Auth:** Email + magic link (passwordless) + Google OAuth as v1. Plus per-user API keys for programmatic access. `X-API-Key` static header is dev-only.
-9. **Web search:** Tavily.
-10. **Embeddings:** Voyage AI `voyage-3` (1024 dims), behind a swap-friendly interface.
-11. **Models (Anthropic SDK direct):**
+7. **Auth:** Email + magic link (passwordless) + Google OAuth as v1. Plus per-user API keys for programmatic access. `X-API-Key` static header is dev-only.
+8. **Web search:** Tavily.
+9. **Embeddings:** Voyage AI `voyage-3` (1024 dims), behind a swap-friendly interface.
+10. **Models (Anthropic SDK direct):**
     - Triage → Haiku 4.5
     - Quick Agent → Haiku 4.5 (with tools)
     - Planner → Sonnet 4.6 default; Opus 4.7 when Triage flags "ambitious" *and* user's tier permits
     - Executor reasoning steps → Sonnet 4.6
     - Post-Evaluator → Haiku 4.5
-12. **Billing:** Stripe (Checkout + customer portal + webhooks). Tier specifics deferred — we set numbers after we have real usage data.
-13. **Token metering:** Mandatory in the hot path for every model call from day one. Recorded per request, per agent, per model. Always-on regardless of subscription state.
-14. **At cap:** Hard pause + one-click upgrade or opt-in overage. No silent overage. (Behavior locked; threshold numbers TBD.)
-15. **`/usage` command:** First-class, available in every channel. Reports tokens in/out per model, estimated cost per model, sandbox-compute cost, and totals — for the current billing period and today.
-16. **Code execution sandbox:** First-class v1 capability. Sandboxed Python environment per task, network egress restricted, time/memory/disk limits, compute time metered alongside tokens. Provider: E2B for hosted (purpose-built for agent code execution); Docker for self-host. Without this, Wolfpaw can't really *do* most things.
-17. **Tasks as first-class objects:** Persistent units of work distinct from chat threads or single plans. Have status (pending/running/blocked/awaiting_user/completed/failed/cancelled), survive across days, can be paused/resumed, ping the user via their preferred channel when blocked or done. A thread can spawn many tasks; a task can have many plans over its life.
-18. **Artifact production tools:** Wolfpaw produces real deliverables — `.xlsx`, `.pdf`, `.pptx`, charts as `.png`/`.svg`. Stored in user's workspace folder (Drive/Dropbox via OAuth, or Wolfpaw S3 prefix).
-19. **Sub-agent delegation:** Planner can mark plan branches as parallelizable; executor spawns sub-tasks with allocated budget from the parent. Hard limits on depth (3 levels) and concurrency (5 sub-agents) per task.
-20. **Framework choice:** Build the agent loop, planner, executor, all memory subsystems, prompt versioning, channel abstraction, and tool registry from scratch on the Anthropic SDK. No LangChain, no LangGraph in v1. Adopt **LangSmith** for LLM-specific observability (per-call tracing, replay, eval datasets). CloudWatch + structured logs continue to own ops-tier observability. Rationale, alternatives, and the named fallback (LangGraph for task checkpointing if persistence work blocks the timeline) in [docs/decisions/framework-choice.md](docs/decisions/framework-choice.md) and [docs/decisions/observability.md](docs/decisions/observability.md).
-21. **Two persona inputs.** Every agent prompt is conditioned on both the **Soul File** (agent persona, shared across all users) and a per-user **User File** (the user's persona, preferences, working style, recurring constraints). Soul is global config; User File is a per-`user_id` record. Both are versioned and stamped on `threads` so procedural-memory retrieval can scope to "same persona × same user profile version."
+11. **Token metering:** Mandatory in the hot path for every model call from day one. Recorded per request, per agent, per model. Always-on regardless of subscription state.
+12. **At cap:** `Enforcer` interface defines the contract; OSS ships a no-op. Real implementations are expected to hard-pause at allowance with no silent overage. (Behavior locked; numbers and billing integration are operator concerns.)
+13. **`/usage` command:** First-class, available in every channel. Reports tokens in/out per model, estimated cost per model, sandbox-compute cost, and totals — for the current billing period and today.
+14. **Code execution sandbox:** First-class v1 capability. Sandboxed Python environment per task, network egress restricted, time/memory/disk limits, compute time metered alongside tokens. Providers: `SubprocessSandbox` (dev/test default — NOT a security boundary), `DockerSandbox` (per-instance self-host), `E2BSandbox` (purpose-built for agent code execution). Operators select via config. Without sandboxed execution, Wolfpaw can't really *do* most things.
+15. **Tasks as first-class objects:** Persistent units of work distinct from chat threads or single plans. Have status (pending/running/blocked/awaiting_user/completed/failed/cancelled), survive across days, can be paused/resumed, ping the user via their preferred channel when blocked or done. A thread can spawn many tasks; a task can have many plans over its life.
+16. **Artifact production tools:** Wolfpaw produces real deliverables — `.xlsx`, `.pdf`, `.pptx`, charts as `.png`/`.svg`. Stored in user's workspace folder (Drive/Dropbox via OAuth, or via the configured `Storage` backend — `LocalStorage` for dev/self-host, `S3Storage` for managed deployments).
+17. **Sub-agent delegation:** Planner can mark plan branches as parallelizable; executor spawns sub-tasks with allocated budget from the parent. Hard limits on depth (3 levels) and concurrency (5 sub-agents) per task.
+18. **Framework choice:** Build the agent loop, planner, executor, all memory subsystems, prompt versioning, channel abstraction, and tool registry from scratch on the Anthropic SDK. No LangChain, no LangGraph in v1. Adopt **LangSmith** for LLM-specific observability (per-call tracing, replay, eval datasets). Structured JSON logs to stdout own ops-tier observability — operators wire those into whatever log shipper they prefer. Rationale, alternatives, and the named fallback (LangGraph for task checkpointing if persistence work blocks the timeline) in [docs/decisions/framework-choice.md](docs/decisions/framework-choice.md) and [docs/decisions/observability.md](docs/decisions/observability.md).
+19. **Two persona inputs.** Every agent prompt is conditioned on both the **Soul File** (agent persona, shared across all users) and a per-user **User File** (the user's persona, preferences, working style, recurring constraints). Soul is global config; User File is a per-`user_id` record. Both are versioned and stamped on `threads` so procedural-memory retrieval can scope to "same persona × same user profile version."
 
 ## Architecture commitments
 
@@ -51,17 +49,16 @@ Living document. Updated as decisions are made.
 
 ## Stack
 
-- **Web layer:** FastAPI with `StreamingResponse` for SSE; `uvicorn` behind Caddy.
-- **DB:** Postgres (RDS for hosted) + `pgvector`. `asyncpg`. Raw SQL via numbered migration files.
-- **Background jobs:** `arq` (Redis-backed) for cost notifications, scheduled tasks, email dispatch, Telegram message processing.
-- **Cache / queue:** Redis (ElastiCache for hosted; local for self-host).
-- **Object storage:** S3 for raw inbound emails, file uploads, plan artifacts.
+- **Web layer:** FastAPI with `StreamingResponse` for SSE; `uvicorn` (behind a reverse proxy of the operator's choice in production).
+- **DB:** Postgres + `pgvector`. `asyncpg`. Raw SQL via numbered migration files.
+- **Background jobs:** `arq` (Redis-backed) — planned for cost notifications, scheduled tasks, email dispatch, Telegram message processing. Currently fire-and-forget `asyncio.create_task` until arq is wired (deferred from step 15).
+- **Cache / queue:** Redis (for arq, when wired).
+- **Object storage:** `Storage` ABC — `LocalStorage` (dev/self-host default) or `S3Storage` (when configured) for file uploads, plan artifacts, inbound email payloads (v1.5).
 - **Telegram:** webhook on `/channels/telegram/webhook`, dispatches into the same chat pipeline as web.
-- **Email:** SES inbound → S3 → SES event Lambda → `POST /channels/email/inbound` (with shared secret) → chat pipeline.
-- **Stripe:** webhook on `/billing/webhook`.
-- **Logging (ops):** structured JSON to stdout → CloudWatch Logs. `trace_id` threaded everywhere.
+- **Email (v1.5):** operator-provisioned inbound mail → `POST /channels/email/inbound` (with shared secret) → chat pipeline. The OSS app accepts the dispatch; how the operator gets mail there (mail provider inbound rules, a function-as-a-service shim, etc.) is deployment-specific.
+- **Logging (ops):** structured JSON to stdout. `trace_id` threaded everywhere. Operators wire stdout into whatever log aggregator they prefer.
 - **LLM observability:** LangSmith for per-call tracing, replay, eval datasets. Gated on `LANGSMITH_ENABLED`. See [docs/decisions/observability.md](docs/decisions/observability.md).
-- **Secrets:** AWS Secrets Manager (hosted) / `.env` (self-host).
+- **Secrets:** environment variables (`.env` for dev, operator-managed for production — vault / secrets manager / encrypted env file, etc.).
 
 ## Repo layout (in `wolfpaw/` for now)
 
@@ -135,17 +132,12 @@ wolfpaw/
       __init__.py                    # Channel ABC
       web.py                         # /chat SSE endpoint
       telegram.py                    # webhook + bot client
-      email.py                       # SES inbound dispatcher (v1.5)
+      email.py                       # inbound mail dispatcher (v1.5)
       slack.py                       # workspace app (v2)
-    billing/
-      stripe_client.py
-      webhook.py                     # Stripe webhook handler
-      tiers.py                       # tier definitions, limits, prices
-      cost_notifications.py
     metering/
       pricing.py                     # model_prices table accessor
       recorder.py                    # writes token_usage rows
-      enforcer.py                    # checks cap before model calls
+      enforcer.py                    # cap check before model calls (no-op stub by default)
       summarizer.py                  # rolls token_usage → usage_summaries
       prompt_versions.py             # prompt_versions accessor + bump helper
       langsmith_client.py            # LangSmith trace forwarding (gated on LANGSMITH_ENABLED)
@@ -153,17 +145,11 @@ wolfpaw/
       arq_app.py                     # arq worker entrypoint
       jobs/                          # scheduled tasks, notifications, compact_thread
         compact_thread.py            # rolls verbatim msgs → level-1 → level-2 summaries
-  infra/
-    terraform/                       # EC2, RDS, ElastiCache, SES, etc.
-    dashboards/
-      wolfpaw.json                   # CloudWatch dashboard
-      insights/                      # saved Logs Insights queries
-    deploy/
-      systemd/                       # unit files
-      caddy/                         # Caddyfile
   tests/
     test_*.py
 ```
+
+Deployment artifacts (Terraform / Helm / Compose / dashboards / reverse-proxy config) are out of scope for this repo — operators wire those up to fit their environment. The OSS packaging step (build order #20) ships a reference Docker Compose for the simplest self-host path.
 
 ## Postgres schema (v1)
 
@@ -173,7 +159,7 @@ wolfpaw/
 - `user_profiles(user_id, version, persona_md, preferences jsonb, timezone, updated_at)` — the "User File" from the diagram. `persona_md` is free-form Markdown the user (or Wolfpaw, with permission) edits; `preferences` is structured (preferred channel, quiet hours, formality, units, comm style, recurring constraints). Loaded into every agent's system prompt for that user. Versioned so we can stamp `threads.user_profile_version` and scope procedural-memory retrieval.
 - `user_auth_methods(user_id, method enum, identifier, secret_hash, ...)` — magic link, Google OAuth, etc.
 - `api_keys(id, user_id, prefix, hash, name, last_used_at, created_at)`
-- `subscriptions(user_id, stripe_customer_id, stripe_subscription_id, tier enum, status, current_period_start, current_period_end, allowance_cents, overage_authorized bool, overage_cap_cents nullable)`
+- `subscriptions(user_id, billing_customer_id, billing_subscription_id, tier enum, status, current_period_start, current_period_end, allowance_cents, overage_authorized bool, overage_cap_cents nullable)` — billing-provider fields are nullable; the OSS app doesn't fill them. Operators wiring a real billing integration map their provider's identifiers into these columns. *(NB: the v1 SQL still has `stripe_customer_id` / `stripe_subscription_id` column names — a follow-up migration will rename to the generic form.)*
 - `tier_limits(tier, allowance_cents, channels_allowed text[], opus_allowed bool, scheduled_tasks_allowed bool)` — seeded, code-managed
 - `model_prices(model_id, input_per_mtok_cents, output_per_mtok_cents, cache_read_per_mtok_cents, cache_write_per_mtok_cents, effective_from, effective_to)` — versioned
 
@@ -198,7 +184,7 @@ wolfpaw/
 ### Channels
 
 - `channel_links(id, user_id, channel enum, external_id, external_username, metadata jsonb, created_at)` — Telegram user IDs, Slack workspace IDs, etc.
-- `email_aliases(user_id, alias)` — `alice@wolfpaw.ai` → `user_id=42`
+- `email_aliases(user_id, alias)` — `<slug>@<your-domain>` → `user_id=42`
 - `verified_owner_emails(user_id, email, verified_at)` — drafts-out destinations
 
 ### Metering
@@ -297,7 +283,7 @@ Wolfpaw needs a place where the user can drop files for the agent to read, and w
 - Drive / Dropbox (v2) become *additional* storage targets the user can pick per file or per task — not a replacement for the Wolfpaw workspace.
 
 **Frontend ↔ API**
-- Uploads and downloads use **short-lived pre-signed URLs** issued by the API. Bytes never transit EC2.
+- Uploads and downloads use **short-lived pre-signed URLs** issued by the API. Bytes never transit the application server.
 - `POST /workspace/upload-url` → API validates the filename, issues a URL scoped to `s3://wolfpaw-workspace/<user_id>/<filename>` with a 5-minute TTL and a max-size header. Client PUTs directly to S3. On client success, `POST /workspace/files` registers the `workspace_files` row.
 - `GET /workspace/files` lists the user's files (read from Postgres, not S3). `GET /workspace/files/<id>/download-url` issues a signed download URL with a 5-minute TTL.
 - The signing endpoint validates the requested key starts with `<authenticated_user_id>/` server-side; the bucket policy denies cross-prefix access defense-in-depth.
@@ -314,7 +300,7 @@ Wolfpaw needs a place where the user can drop files for the agent to read, and w
 **Quotas + retention**
 - Per-user storage quota enforced at upload time against `sum(size_bytes) WHERE user_id = ?`. Default quota lives in `tier_limits` (column added when tiers are set; placeholder for `dev` tier is generous).
 - No automatic deletion of agent outputs in v1 — the user owns their files. Lifecycle policies (e.g. expire superseded versions after 90 days) are a v2 concern once we see real usage shapes.
-- S3 bucket has versioning enabled at the AWS level as a belt-and-braces measure against the application layer; cost is negligible at expected file volumes.
+- Belt-and-braces versioning at the storage backend (e.g. S3 bucket versioning) is recommended for deployments using `S3Storage`.
 
 **Build placement.** Workspace ships in the same step as the read/write tools — it's the substrate they need. The `Storage` ABC + S3 adapter + signing endpoints + `workspace_files` table land at **build step 7** alongside `read_doc` / `write_doc`. Sandbox pre-staging integrates at step 8.
 
@@ -395,16 +381,13 @@ Commands are dispatched in `channels/commands.py`, shared across all channel ada
 
 ### Telegram specifics
 
-- One shared `@WolfpawBot` for hosted; bot token in Secrets Manager.
-- Onboarding link: `https://t.me/WolfpawBot?start=link_<token>` from web app; `/start link_<token>` triggers `channel_links` write.
-- Webhook receives all updates → enqueue to `arq` for processing → response back via Bot API.
-- OSS: user supplies `TELEGRAM_BOT_TOKEN` env var; same code path.
+- Operators provision a bot via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
+- Onboarding link: `https://t.me/<bot_username>?start=link_<token>` from web app; `/start link_<token>` triggers `channel_links` write.
+- Webhook receives all updates → dispatched into the chat pipeline (fire-and-forget background task until arq lands) → response back via Bot API.
 
 ### Email specifics (v1.5)
 
-- MX records for `wolfpaw.ai` → SES inbound.
-- Receipt rule writes raw `.eml` to S3, triggers Lambda.
-- Lambda parses and calls back into Wolfpaw API at `/channels/email/inbound` with shared secret.
+- Operator wires inbound mail delivery to the OSS endpoint `POST /channels/email/inbound` (shared-secret authenticated). The mechanism — mail provider inbound rules, function-as-a-service shim, IMAP poller — is deployment-specific.
 - Wolfpaw maps `to:` address → `user_id` via `email_aliases`, dispatches into chat pipeline.
 - Outbound: agent can only send to `verified_owner_emails` for that user. Hard-coded constraint, not promptable.
 - Forwarded email body treated as **untrusted user-provided text**, not as instructions. Built into the agent system prompt; subject to defense-in-depth review during build.
@@ -469,30 +452,27 @@ Today (May 5)
 
 ## Cost notifications
 
-- 50% / 80% / 100% of allowance, sent through every connected channel (email always; Telegram if linked; web in-app banner).
-- 100% notification includes upgrade link + overage opt-in toggle.
-- Opt-in daily summary (one email/day with spend, plan count, top tools used).
-- Dedup via `cost_notifications` table.
-- Sent via `arq` jobs scheduled by the recorder when threshold crossed.
+- Threshold-crossing notifications at 50% / 80% / 100% of allowance, dedup via the `cost_notifications` table.
+- 100% notification includes whatever upgrade affordance the deployment offers (or none for self-host).
+- Channel delivery is best-effort in OSS — a web in-app banner is the only built-in surface; operators are free to fan out to email / Telegram / etc.
 
 ## Cap enforcement behavior
 
-- **At allowance and overage off:** API returns `402 Payment Required`. Web UI shows paywall modal. Telegram bot replies with the cap message + upgrade link. New requests blocked until upgrade or overage opt-in. **In-flight requests** finish (we don't strand a user mid-stream).
-- **Overage on:** Allow up to `overage_cap_cents`. Charged via Stripe usage-based pricing at end of period. 80% overage notification sent.
-- **Hard ceiling:** Even with overage, no single user can exceed a system-wide hard ceiling (e.g. $500/mo) without manual approval — protects against runaway loops.
+The `Enforcer` interface defines the contract; the OSS app ships a no-op implementation (every user runs as `tier = "dev"`). Behavior when an operator wires a real enforcer:
+
+- **At allowance:** `Enforcer.check_can_spend(user_id)` raises `OverCap`; the ModelClient surfaces that as an API error. **In-flight requests finish** (we don't strand a user mid-stream).
+- **Optional overage:** Implementations are free to allow a per-user overage band with a system-wide hard ceiling — the recorder writes the same `token_usage` rows regardless; enforcement is just the gating decision.
 
 ## Subscription tiers
 
-**Specifics deferred.** Tier names, dollar amounts, allowances, and channel gating are placeholders until we have real usage data from a working app. The schema (`subscriptions`, `tier_limits`, `model_prices`, `token_usage`, `usage_summaries`) is built day one so we can switch to any tier shape without migrations later.
+**Schema is built day one** (`subscriptions`, `tier_limits`, `model_prices`, `token_usage`, `usage_summaries`) so any tier shape slots in without migrations. The OSS app doesn't define tier names, dollar amounts, or gating — that's a deployment choice.
 
-What is locked in:
-- Flat-rate plans with an included inference allowance, denominated in **dollars**, not tokens.
-- **Hard pause at cap.** No silent overage. New requests blocked; in-flight requests finish.
-- **Opt-in overage** with a per-user cap and a system-wide hard ceiling.
-- **Cost notifications** at 50% / 80% / 100% of allowance, plus opt-in daily summary, delivered through every connected channel.
-- **Self-host:** tier = `self_host`, no enforcement, but token usage is still recorded so the user can see their own spend.
+What the schema locks in:
+- Flat-rate plans with an inference allowance denominated in **dollars**, not tokens.
+- Hard-pause-at-cap is the natural behavior of `Enforcer.check_can_spend` raising on the first request past allowance; opt-in overage is the implementation's choice.
+- `cost_notifications` table dedups threshold crossings regardless of how delivery is wired.
 
-Until tiers are decided, every authenticated user runs as `tier = "dev"` with metering on but no enforcement — same shape as self-host. Lets us build the app and accumulate real usage telemetry before pricing.
+Every authenticated user runs as `tier = "dev"` with metering on but no enforcement. That's the OSS default and the right starting point for self-host — accumulate usage telemetry, decide pricing later.
 
 ## Soul file & User file integration
 
@@ -545,35 +525,28 @@ Seeded skills land via a Python seeder (or `migrations/004_seed_skills.sql`) on 
 
 End-to-end traceability is a v1 requirement. Three layers, each scoped to a different question:
 
-| Layer | Tool | Question it answers |
+| Layer | Mechanism | Question it answers |
 |---|---|---|
-| Operational metrics + logs | CloudWatch (structured JSON) | "Is the system healthy? Where's the latency? Are users hitting their cap?" |
-| LLM-call detail | LangSmith | "What did the planner generate on request X? Replay it. Diff prompts. Score against a dataset." |
-| Prompt versioning | Custom (`prompt_versions` table) | "Which prompt template produced this output? Did v8 outperform v7 across the procedural-memory dataset?" |
+| Operational metrics + logs | Structured JSON to stdout | "Is the system healthy? Where's the latency? Are users hitting their cap?" |
+| LLM-call detail | LangSmith (gated) | "What did the planner generate on request X? Replay it. Diff prompts. Score against a dataset." |
+| Prompt versioning | `prompt_versions` table | "Which prompt template produced this output? Did v8 outperform v7 across the procedural-memory dataset?" |
 
-`trace_id` is the through-line. It's emitted on every structured log line, attached to every LangSmith trace, and recorded on every `token_usage` row alongside `prompt_version_id`. Pulling a `trace_id` out of a CloudWatch log lands you on the matching LangSmith trace and the relevant `token_usage` rows.
+`trace_id` is the through-line. It's emitted on every structured log line, attached to every LangSmith trace, and recorded on every `token_usage` row alongside `prompt_version_id`. Pulling a `trace_id` out of a log line lands you on the matching LangSmith trace and the relevant `token_usage` rows.
 
 Full design rationale and rejected alternatives in [docs/decisions/observability.md](docs/decisions/observability.md).
 
-### Operational layer (CloudWatch)
+### Operational layer (structured JSON logs)
 
-**Logging shape**
-- Structured JSON to stdout (one event per line). systemd → CloudWatch via the CloudWatch agent.
+- Structured JSON to stdout (one event per line). The OSS app produces; the deployment picks them up (file logger, journald, CloudWatch agent, Loki — operator's choice).
 - Every line includes: `trace_id`, `user_id`, `thread_id`, `agent`, `step_id`, `event`, `model`, `prompt_version_id`, `input_tokens`, `output_tokens`, `latency_ms`, `extra` (jsonb).
 - Events: `request.start`, `agent.start`, `agent.end`, `tool.call`, `tool.result`, `step.start`, `step.end`, `model.call`, `cap.exceeded`, `notification.sent`, `request.end`, `error`.
-
-**Metrics**
-- CloudWatch metric filters extract: `wolfpaw.requests` (count by tier × triage_path × channel), `wolfpaw.latency_ms` (p50/p95/p99 by agent), `wolfpaw.tokens` (input/output by model), `wolfpaw.cost_cents` (by tier), `wolfpaw.plan_score`, `wolfpaw.errors` (by agent × class), `wolfpaw.cap_pause` (count).
-
-**Dashboards**
-- CloudWatch Dashboard JSON in `infra/dashboards/wolfpaw.json` — single pane: request rate, latency, token spend, plan-success rate, cap-pause rate, errors. Public/shared URL for the "online dashboard."
 
 ### LLM-call layer (LangSmith)
 
 - Every model call is wrapped in a LangSmith trace alongside the token-recorder write. Implementation in `metering/langsmith_client.py`.
 - Trace tags: `trace_id`, `user_id`, `agent`, `model`, `prompt_version_id`, `task_id` (when applicable).
 - LangSmith handles: per-call replay, prompt-version diffs, eval-dataset runs against historical prompts, dashboards for plan-success rate by prompt version.
-- Gated by `LANGSMITH_ENABLED` config flag — defaults on in dev/private-beta, evaluated before public launch (third-party data handler; privacy disclosure required).
+- Gated by `LANGSMITH_ENABLED` config flag — third-party data handler, so deployments that can't ship request content off-host should leave it off.
 
 ### Prompt-versioning layer (custom)
 
@@ -617,17 +590,14 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
 ## Open questions
 
 - **Tier specifics.** Deferred — set after real usage data accumulates. Schema is ready when we are.
-- **Domain.** `wolfpaw.ai` confirmed? Worth checking `wolfpaw.com` / `wolfpaw.app` availability — `.com` deliverability is materially better for outbound email.
-- **Postgres location for hosted.** RDS (managed, ~$15/mo for db.t4g.micro) vs co-located on the EC2 instance (cheaper, recoverable from snapshot). Lean RDS for hosted, co-located for self-host.
-- **Anthropic vs Bedrock.** Direct Anthropic API for v1 (simpler, cleaner usage data). Reconsider Bedrock if AWS Activate credits move it.
-- **Web app stack.** React + Vite (matching dmitris-fabulous frontend), or something else? Lean React + Vite — known stack, fast.
+- **Web app stack.** React + Vite chosen (step 19). Revisit only if a hard constraint appears.
 - **Mobile app.** Out of scope for v1, but consider whether the Telegram bot is *good enough* as a mobile experience for the first year. (Probably yes.)
 
 ## Build order
 
 1. ✅ **completed** — **Foundation.** `pyproject.toml`, FastAPI skeleton, `config.py`, `tracing.py`, health endpoint.
 2. ✅ **completed** — **Database.** `001_init.sql` (users, user_profiles, threads, messages, message_embeddings, thread_summaries, plans, skills, tools, user_data schema, tasks, task_events, workspace_files, sandboxes, token_usage, compute_usage, usage_summaries, model_prices). `memory/db.py` pool. `model_prices` seeded.
-3. ✅ **completed** — **Auth.** Magic link via SES. `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"`.
+3. ✅ **completed** — **Auth.** Magic link via the pluggable `EmailSender` interface (console backend ships by default; operators swap in their provider). `users` + `user_auth_methods`. Auth middleware → `request.state.user`. Default `tier = "dev"`.
 4. ✅ **completed** — **Metering + observability harness (before any model calls).** `metering/pricing.py`, `metering/recorder.py`, `metering/prompt_versions.py`, `metering/langsmith_client.py`. Token-recording `call_model()` wrapper writes a `token_usage` row (with `prompt_version_id`), forwards a trace to LangSmith (gated on `LANGSMITH_ENABLED`), and emits a structured log line with `trace_id`. Enforcer no-op stub. The `prompt_versions` table is seeded as each agent comes online in steps 10+.
 5. ✅ **completed** — **Channel skeleton + slash commands.** `Channel` ABC, web channel with SSE, command dispatcher with `/help`.
 6. ✅ **completed** — **`/usage` command.** Against `token_usage` + `compute_usage` + `model_prices`. Returns empty/zero state cleanly.
@@ -652,11 +622,9 @@ OTel is the long-term-correct answer for cross-service tracing. v1 is a single F
     - **WorkspaceCollision → ask_user.** Executor's `_run_functional` now catches `WorkspaceCollision`, prompts via the `ask_user` tool ("Overwrite {filename} (v{n})? (yes / no)"), retries the same tool with `overwrite=True` on a yes-ish answer (`yes`, `y`, `overwrite`, `ok`, `confirm`), propagates the original failure otherwise. Outside a Task (no `ctx.task_id`) the collision surfaces as the previous step-failure behavior.
     - **Per-task `spent_cents` rollup.** New `memory.tasks.rollup_spent_cents(task_id)` sums `token_usage.cost_cents + compute_usage.cost_cents` for the task and writes back to `tasks.spent_cents`. Called by `TaskService` on every terminal transition (including planner-failed / executor-crashed via `_fail`), plus the `/cancel` REST + slash command paths. Direct spend only — a subagent's own `spent_cents` reflects its own rows; a future recursive CTE could surface full subtree cost on the root.
     - **Markdown formatting for Telegram.** New `channels/telegram_markdown.py` (`to_markdown_v2`) converts the agent's CommonMark-ish output (`**bold**`, ` `code` `, ` ```block``` `, `[text](url)`, `_italic_`, `*italic*`) into Telegram MarkdownV2 with proper backslash-escaping of every reserved character outside formatting markup. Unmatched markup falls back to character-level escaping so the Bot API never rejects the message. `HttpTelegramClient.send_message` gained an optional `parse_mode`; `_handle_inbound` sends agent replies with `parse_mode="MarkdownV2"` so bold + code + links actually render in Telegram. Slash commands and onboarding messages stay plain-text (no parse_mode), so their literal `/help` / `/usage` text doesn't need escaping. _21 new tests added (10 markdown + 1 web `/reset` + 2 commands + 4 builder cache + 3 executor collision + 1 subagent cap). Suite total: 268 passing + 103 DB-gated skipped._
-20. **CloudWatch dashboards + Logs Insights queries.** Committed in `infra/dashboards/`.
-21. **Infra: Terraform.** EC2 + RDS + ElastiCache + SES + Secrets + IAM + Caddy + systemd. E2B account/keys.
-22. **OSS packaging (v1.5 entry).** Docker Compose (incl. Docker-based sandbox runtime for self-host), install script, README, env-template.
-23. **Email forwarding (v1.5).** SES inbound, Lambda dispatcher, `email_aliases`, verified owners, drafts-out constraint.
-24. **Billing + tier enforcement (when ready to monetize).** Stripe Checkout + customer portal + webhook → `subscriptions`. Flip enforcer from no-op to real cap checks. Cost notifications at 50/80/100%. `003_billing.sql`.
-25. **Slack (v2).** OAuth workspace install, app manifest, slash command + DMs.
+20. **OSS packaging (v1.5 entry).** Docker Compose (incl. Docker-based sandbox runtime for self-host), install script, README, env-template.
+21. **Slack (v2).** OAuth workspace install, app manifest, slash command + DMs.
+
+Deployment, observability infrastructure, hosted email forwarding, and billing integration live outside this plan — self-hosters wire those up to fit their environment.
 
 The reordering keeps metering + `/usage` ahead of any model call and adds sandbox + artifact tools (steps 8–9) before any agent uses them, so from step 10 forward every model call is metered AND every code execution is metered AND every artifact is tracked. Tasks (15) and sub-agents (16) sit between the agent loop and the channels — once they exist, Wolfpaw can take on multi-day work.
