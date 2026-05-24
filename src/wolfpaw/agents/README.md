@@ -1,15 +1,16 @@
 # agents/
 
-Agent implementations + the Router that composes them. Step 10 shipped the Quick Agent; step 11 added the Triage Agent and the Router; step 12 added the Planning Agent; step 13 added the Executor. Post-Evaluator lands in step 14.
+Agent implementations + the Router that composes them. Step 10 shipped the Quick Agent; step 11 added the Triage Agent and the Router; step 12 added the Planning Agent; step 13 added the Executor; step 14 added the Post-Evaluator. That closes the loop on plan-path quality: Planner → Executor → Post-Evaluator → score back to procedural memory.
 
 ## Files
 
-- **`__init__.py`** — re-exports `QuickAgent`, `TriageAgent`, `TriageVerdict`, `PlannerAgent`, `PlanContext`, `ExecutorAgent`, `Router`, and the `get_*` / `reset_*` helpers. Add new agents here as they come online.
+- **`__init__.py`** — re-exports `QuickAgent`, `TriageAgent`, `TriageVerdict`, `PlannerAgent`, `PlanContext`, `ExecutorAgent`, `PostEvaluatorAgent`, `Router`, and the `get_*` / `reset_*` helpers. Add new agents here as they come online.
 - **`quick.py`** — `QuickAgent`: Haiku 4.5 + the 7 non-sandbox tools. The actual "do work" agent for one-shot answers. Singleton accessor `get_quick_agent()`; test hook `reset_quick_agent()`.
 - **`triage.py`** — `TriageAgent`: Haiku 4.5 with a *forced* `classify` tool_use that returns `TriageVerdict(route, complexity, reasoning)`. Read-only — never writes to `messages`. Singleton accessor `get_triage_agent()`.
-- **`planner.py`** — `PlannerAgent`: Sonnet 4.6 (Opus 4.7 for ambitious-complexity verdicts) with a *forced* `generate_plan` tool_use. Embeds the query via Voyage, retrieves similar past plans + matching seeded skills, inlines them into the system prompt, then asks Sonnet for a structured `Plan` (`schemas.Plan` with a list of `Step`s + `is_task` flag). Persists every generated plan into procedural memory (success/score=None until step 14's Post-Evaluator). Singleton accessor `get_planner_agent()`.
+- **`planner.py`** — `PlannerAgent`: Sonnet 4.6 (Opus 4.7 for ambitious-complexity verdicts) with a *forced* `generate_plan` tool_use. Embeds the query via Voyage, retrieves similar past plans + matching seeded skills, inlines them into the system prompt, then asks Sonnet for a structured `Plan` (`schemas.Plan` with a list of `Step`s + `is_task` flag). Persists every generated plan into procedural memory (success/score=None until the Executor and Post-Evaluator run). Singleton accessor `get_planner_agent()`.
 - **`executor.py`** — `ExecutorAgent`: runs a `Plan`. Walks steps in execution order, batches contiguous parallel-group steps via `asyncio.gather`. Functional steps dispatch through the tool registry; reasoning + evaluation steps make Sonnet calls with the plan + prior step results in context. On step failure: marks remaining steps `SKIPPED`, returns an error summary as the final answer. Tears down the task's sandbox in `finally`. Persists `final_answer` + `success` + `error` to procedural memory (Post-Evaluator follows up with `score`). Synthesis is skipped when the last completed step is reasoning (the planner already produced the final text). Singleton accessor `get_executor_agent()`.
-- **`router.py`** — `Router`: orchestrates Triage → downstream dispatch for every channel. Calls `TriageAgent.classify`, emits a `triage` event, then dispatches to Quick or Planner+Executor or Task (currently falls through to Quick with a preamble until step 15). The plan path emits a `plan` event with a step summary and propagates the executor's `step.start` / `step.end` / `step.error` events as they fire.
+- **`post_evaluator.py`** — `PostEvaluatorAgent`: Haiku 4.5 with a *forced* `record_score` tool_use returning `PostEvalVerdict(score, summary, what_went_well, what_went_wrong, improvements)` on a 0-100 scale. Score is clamped server-side. Runs synchronously in the Router after the Executor; failures are swallowed so scoring never blocks the user response. Singleton accessor `get_post_evaluator_agent()`.
+- **`router.py`** — `Router`: orchestrates Triage → downstream dispatch for every channel. Calls `TriageAgent.classify`, emits a `triage` event, then dispatches to Quick or Planner+Executor+Post-Evaluator or Task (currently falls through to Quick with a preamble until step 15). The plan path emits a `plan` event with a step summary, propagates the executor's `step.start` / `step.end` / `step.error` events, then emits a `score` event with the verdict before returning the final answer.
 
 ## Flow
 
@@ -24,6 +25,10 @@ channel /chat → Router.handle(content) →
                   → ExecutorAgent.execute(plan)
                       → emit("step.start" / "step.end" / "step.error") per step
                       → returns ExecutionPlan(final_answer, success, results)
+                  → PostEvaluatorAgent.evaluate(plan, execution)
+                      → emit("score", verdict)
+                      → procedural.update_outcome(plan_id, score=...)
+                      → task_events.append_event("plan_scored", verdict)
                   → persist user + final_answer to messages
                   → return final_answer
         - task  → (step 15) TaskService.create(...); today: Quick + preamble
@@ -100,6 +105,40 @@ execute(ctx, plan, emit=None) → ExecutionPlan →
 Failure semantics: a single failed step fails the whole plan (no retry in v1). The Router renders the executor's `final_answer` regardless of `success` — on failure it's the markdown summary "I ran into a problem on step X…". The Post-Evaluator (step 14) scores the outcome via `procedural.update_outcome(score=...)`.
 
 Sandbox lifecycle: always closed in `finally`. SandboxManager pops by `(user_id, task_id)` key, so closing a sandbox that was never spun up is a safe no-op. Functional steps that hit sandbox tools (`run_python`, `create_pdf`, etc.) implicitly create the sandbox on first call; this method tears it down on exit so the next plan starts fresh.
+
+## How the Post-Evaluator works
+
+```
+evaluate(ctx, plan, execution) → PostEvalVerdict →
+    1. Lazy-seed `post_evaluator:v1` into prompt_versions
+    2. Build prompt: user request + plan summary + step list + step outcomes + final answer + success flag
+    3. ModelClient.call(Haiku) with tools=[record_score],
+       tool_choice={"type":"tool","name":"record_score"}
+    4. Extract forced tool_use → PostEvalVerdict, clamp score to [0, 100]
+    5. Return verdict (Router persists separately)
+```
+
+Persistence (done by the Router, not the agent):
+```
+procedural.update_outcome(plan_id, score=verdict.score)
+task_events.append_event(
+    event_type="plan_scored",
+    content={plan_id, score, summary, what_went_well, what_went_wrong, improvements},
+)
+```
+
+Failure posture: the Post-Evaluator runs in a guarded `try` block in the Router. If `evaluate` raises (Anthropic outage, malformed response, etc.), the user still receives the Executor's `final_answer` and a `WARN` log is emitted. Scoring is purely for the recipe-box (procedural memory + observability) — it must never block the user response.
+
+Fallback verdict: if the model somehow returns without calling the forced tool, the agent defaults to `score=50` for successful executions and `score=0` for failed ones, with a `summary` noting that the score was defaulted. The Planner's future `min_score` filters will treat these neutrally rather than as endorsements.
+
+Scoring scale (from the system prompt):
+- 100 = served the request completely, cleanly, efficiently.
+- 70–99 = served well; small issues.
+- 40–69 = partially served; missing pieces or notable inefficiencies.
+- 1–39 = poorly served; major gaps.
+- 0 = total failure.
+
+Skills auto-emission is **v2** — when a plan scores 90+ and looks reusable, future versions will emit a new row into `skills` keyed on the originating plan. The schema (`skills.source_plan_id`) is ready; the agent logic is not.
 
 ## How the Triage Agent works
 

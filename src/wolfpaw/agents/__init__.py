@@ -4,7 +4,7 @@ Step 10: Quick Agent (Haiku + non-sandbox tools).
 Step 11: Triage Agent + Router (composes triage → downstream handlers).
 Step 12: Planning Agent (Sonnet/Opus + procedural + skills retrieval).
 Step 13: Executor (runs a Plan, dispatches step kinds, parallel groups).
-Step 14+: Post-Evaluator.
+Step 14: Post-Evaluator (scores completed executions, updates procedural memory).
 """
 
 from wolfpaw.agents.executor import (
@@ -17,6 +17,11 @@ from wolfpaw.agents.planner import (
     PlanContext,
     get_planner_agent,
     reset_planner_agent,
+)
+from wolfpaw.agents.post_evaluator import (
+    PostEvaluatorAgent,
+    get_post_evaluator_agent,
+    reset_post_evaluator_agent,
 )
 from wolfpaw.agents.quick import QuickAgent
 from wolfpaw.agents.router import Router, get_router, reset_router
@@ -32,6 +37,7 @@ __all__ = [
     "ExecutorAgent",
     "PlanContext",
     "PlannerAgent",
+    "PostEvaluatorAgent",
     "QuickAgent",
     "Route",
     "Router",
@@ -39,8 +45,10 @@ __all__ = [
     "TriageVerdict",
     "get_executor_agent",
     "get_planner_agent",
+    "get_post_evaluator_agent",
     "get_router",
     "reset_executor_agent",
     "reset_planner_agent",
+    "reset_post_evaluator_agent",
     "reset_router",
 ]

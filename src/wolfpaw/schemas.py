@@ -115,3 +115,29 @@ class ExecutionPlan:
     final_answer: str
     success: bool
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class PostEvalVerdict:
+    """Post-Evaluator's scoring output (step 14).
+
+    `score` is on a 0-100 scale: 100 = the plan + execution served the
+    user's request perfectly; 70+ = good; 40-70 = mixed; <40 = poor;
+    0 = total failure. The Planner reads `score` (via procedural memory)
+    to decide whether to adapt or reject a past plan on similar future
+    requests."""
+
+    score: int
+    summary: str
+    what_went_well: str = ""
+    what_went_wrong: str = ""
+    improvements: str = ""
+
+    def to_jsonb(self) -> dict[str, Any]:
+        return {
+            "score": self.score,
+            "summary": self.summary,
+            "what_went_well": self.what_went_well,
+            "what_went_wrong": self.what_went_wrong,
+            "improvements": self.improvements,
+        }

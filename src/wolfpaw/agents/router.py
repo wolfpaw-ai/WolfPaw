@@ -3,12 +3,13 @@
 Channels call `Router.handle(...)`; the router runs Triage to classify the
 message, then dispatches to the appropriate handler:
     - "quick" → QuickAgent.handle (final text response)
-    - "plan"  → PlannerAgent.plan → ExecutorAgent.execute → final text
+    - "plan"  → PlannerAgent.plan → ExecutorAgent.execute
+                  → PostEvaluatorAgent.evaluate → final text + score persisted
     - "task"  → falls through to Quick with a preamble until Tasks (step 15)
 
-The router emits a `triage` event right after classification, then a
-`plan` event with the plan summary when the Planner path is taken, then
-step-level events from the Executor as the plan runs.
+SSE events for the plan path, in order:
+    triage → plan → (step.start/step.end/step.error per step) →
+    score → delta → done
 """
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ from uuid import UUID
 
 from wolfpaw.agents.executor import ExecutorAgent, get_executor_agent
 from wolfpaw.agents.planner import PlannerAgent, get_planner_agent
+from wolfpaw.agents.post_evaluator import (
+    PostEvaluatorAgent,
+    get_post_evaluator_agent,
+)
 from wolfpaw.agents.quick import QuickAgent, get_quick_agent
 from wolfpaw.agents.triage import (
     Route,
@@ -27,8 +32,9 @@ from wolfpaw.agents.triage import (
     get_triage_agent,
 )
 from wolfpaw.memory import conversational as conv
+from wolfpaw.memory import procedural, task_events
 from wolfpaw.memory.db import acquire
-from wolfpaw.schemas import Plan
+from wolfpaw.schemas import ExecutionPlan, Plan, PostEvalVerdict
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -50,11 +56,13 @@ class Router:
         quick: QuickAgent | None = None,
         planner: PlannerAgent | None = None,
         executor: ExecutorAgent | None = None,
+        post_evaluator: PostEvaluatorAgent | None = None,
     ) -> None:
         self._triage = triage
         self._quick = quick
         self._planner = planner
         self._executor = executor
+        self._post_evaluator = post_evaluator
 
     @property
     def triage(self) -> TriageAgent:
@@ -71,6 +79,10 @@ class Router:
     @property
     def executor(self) -> ExecutorAgent:
         return self._executor or get_executor_agent()
+
+    @property
+    def post_evaluator(self) -> PostEvaluatorAgent:
+        return self._post_evaluator or get_post_evaluator_agent()
 
     async def handle(
         self,
@@ -134,6 +146,11 @@ class Router:
             ctx=ctx, plan=plan, emit=emit,
         )
 
+        # Score the run. Scoring is best-effort — never block the user.
+        await self._score_and_persist(
+            ctx=ctx, plan=plan, execution=execution, emit=emit,
+        )
+
         final = execution.final_answer
         try:
             async with acquire() as conn:
@@ -148,6 +165,50 @@ class Router:
 
         return final
 
+    async def _score_and_persist(
+        self,
+        *,
+        ctx: ToolContext,
+        plan: Plan,
+        execution: ExecutionPlan,
+        emit: EmitFn | None,
+    ) -> None:
+        """Run the Post-Evaluator, persist score to procedural memory,
+        write a `plan_scored` task_event. Failures are logged + swallowed
+        — scoring must never block returning the user's answer."""
+        try:
+            verdict = await self.post_evaluator.evaluate(
+                ctx=ctx, plan=plan, execution=execution,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("router.post_evaluator_failed", exc_info=True)
+            return
+
+        await _maybe_emit(
+            emit, "score", f"{verdict.score}/100 — {verdict.summary}",
+        )
+
+        if plan.id is None:
+            # Planner didn't persist — nothing to score in procedural memory.
+            return
+
+        try:
+            async with acquire() as conn:
+                await procedural.update_outcome(
+                    conn, plan_id=plan.id, score=verdict.score,
+                )
+                await task_events.append_event(
+                    conn,
+                    task_id=ctx.task_id,
+                    event_type="plan_scored",
+                    content={
+                        "plan_id": str(plan.id),
+                        **verdict.to_jsonb(),
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("router.score_persist_failed", exc_info=True)
+
 
 def _summarize_plan_for_event(plan: Plan) -> str:
     n = len(plan.steps)
@@ -159,14 +220,6 @@ def _summarize_plan_for_event(plan: Plan) -> str:
     if plan.is_task:
         bits.append("would create a Task")
     return ", ".join(bits)
-
-
-async def _maybe_emit(emit: EmitFn | None, event: str, data: str) -> None:
-    if emit is None:
-        return
-    result = emit(event, data)
-    if hasattr(result, "__await__"):
-        await result
 
 
 async def _maybe_emit(emit: EmitFn | None, event: str, data: str) -> None:
