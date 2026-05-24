@@ -1,0 +1,36 @@
+# Keep the build context small + reproducible.
+# Anything not needed inside the image lives here.
+
+.git
+.github
+.venv
+venv
+.env
+.env.local
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+dist
+build
+.DS_Store
+
+# Tests + dev planning — not part of the runtime image.
+tests
+implementation_plan.md
+saas.md
+spec.md
+docs
+WolfPaw_00.pdf
+conversational-memory-improvements.md
+
+# The web client builds in its own Dockerfile from web/. Don't ship its
+# build artifacts inside the backend image.
+web/node_modules
+web/dist
+web/.vite
+
+# Local workspace + sandbox scratch.
+.wolfpaw_workspace

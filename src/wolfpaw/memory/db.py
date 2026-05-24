@@ -9,6 +9,7 @@ once per connection via the asyncpg `init` callback so we can pass/receive
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -73,7 +74,16 @@ async def acquire() -> AsyncIterator[asyncpg.Connection]:
 
 
 def migrations_dir() -> Path:
-    """Return the absolute path to the repo's `migrations/` directory."""
+    """Return the absolute path to the `migrations/` directory.
+
+    Honors `WOLFPAW_MIGRATIONS_DIR` first — set this when the wolfpaw
+    package is installed somewhere other than the source tree (Docker
+    images, system-wide install, etc.). Falls back to the in-source
+    location for dev + tests.
+    """
+    override = os.getenv("WOLFPAW_MIGRATIONS_DIR")
+    if override:
+        return Path(override).resolve()
     # src/wolfpaw/memory/db.py → repo root → migrations
     return Path(__file__).resolve().parents[3] / "migrations"
 

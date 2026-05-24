@@ -1,0 +1,84 @@
+# Wolfpaw — self-host docker compose.
+#
+# Brings up four services:
+#   db      : Postgres 16 + pgvector
+#   migrate : one-shot, applies schema_migrations idempotently
+#   app     : FastAPI backend on :8000 (inside the network)
+#   web     : nginx serving the React build, proxying API paths to `app`,
+#             published on :3000 of the host (override via WOLFPAW_WEB_PORT)
+#
+# Quickstart:
+#   1. cp .env.example .env
+#   2. fill in WOLFPAW_ANTHROPIC_API_KEY (required), and any optional keys
+#      you want (VOYAGE for production embeddings, TAVILY for web search,
+#      TELEGRAM_* for the Telegram channel, LANGSMITH_* for tracing)
+#   3. docker compose up -d --build
+#   4. visit http://localhost:3000
+#
+# See docs/self-host.md for the full reference.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wolfpaw
+      POSTGRES_PASSWORD: ${WOLFPAW_DB_PASSWORD:-wolfpaw}
+      POSTGRES_DB: wolfpaw
+    volumes:
+      - wolfpaw_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wolfpaw -d wolfpaw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    image: wolfpaw-app:local
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      WOLFPAW_DATABASE_URL: postgresql://wolfpaw:${WOLFPAW_DB_PASSWORD:-wolfpaw}@db:5432/wolfpaw
+    command: ["python", "-m", "scripts.migrate"]
+
+  app:
+    build: .
+    image: wolfpaw-app:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      WOLFPAW_DATABASE_URL: postgresql://wolfpaw:${WOLFPAW_DB_PASSWORD:-wolfpaw}@db:5432/wolfpaw
+      # The browser talks to nginx on host:3000; the verify-link email URL
+      # should match. Operators override WOLFPAW_WEB_BASE_URL in .env when
+      # they put the app behind a real domain.
+      WOLFPAW_WEB_BASE_URL: ${WOLFPAW_WEB_BASE_URL:-http://localhost:3000}
+    volumes:
+      - wolfpaw_workspace:/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\").read()'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  web:
+    build: ./web
+    image: wolfpaw-web:local
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${WOLFPAW_WEB_PORT:-3000}:80"
+
+volumes:
+  wolfpaw_db:
+  wolfpaw_workspace:

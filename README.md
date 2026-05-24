@@ -56,9 +56,19 @@ Anything beyond a single chat turn becomes a **Task** — a persistent unit of w
 
 Every model call and every sandbox-second is metered. The OSS app ships with a no-op `Enforcer` (every user runs as `tier="dev"`, metering on but no gating) — the `subscriptions` + `tier_limits` + `cost_notifications` schema is in place so operators can wire in a real enforcer + billing provider without migrations. `/usage` is the always-on receipt regardless of whether enforcement is wired.
 
-### Trying it locally today
+### Running Wolfpaw
 
-Two processes — backend on :8000, React app on :5173:
+Two paths:
+
+**Self-host via Docker Compose** *(step 20 — recommended for actually using the app)*:
+
+```bash
+./install.sh
+```
+
+That generates a session key, asks you to fill in `WOLFPAW_ANTHROPIC_API_KEY` in `.env`, and on re-run brings up Postgres + the backend + the React app behind nginx. Visit http://localhost:3000. Full reference in [`docs/self-host.md`](docs/self-host.md).
+
+**Direct (no Docker, for contributing)** — two processes, backend on :8000, React app on :5173:
 
 ```bash
 # terminal 1 — backend
@@ -544,11 +554,18 @@ wolfpaw/
   implementation_plan.md             # schema, infra, build order (✅ marks shipped steps)
   soul.md                            # agent persona
   WolfPaw_00.pdf                     # architecture diagram (canonical)
+  Dockerfile                         # backend image (step 20)
+  docker-compose.yml                 # db + migrate + app + web (step 20)
+  install.sh                         # one-shot self-host setup (step 20)
+  .env.example                       # env template (step 20)
   docs/
+    self-host.md                     # self-host reference (step 20)
     uml_class_diagram.md             # anticipated class structure (Mermaid)
     decisions/                       # architecture decision records
       framework-choice.md
       observability.md
+  scripts/
+    migrate.py                       # idempotent schema migration runner
   migrations/
     001_init.sql                     # users, threads, plans, tasks, sandboxes, token_usage, …
     002_auth.sql                     # magic_link_tokens
@@ -571,13 +588,13 @@ wolfpaw/
     toolbox/                         # tool registry + 16 tools (info, docs, SQL, sandbox, artifacts, ask_user)  [README]
     workspace/                       # workspace_files DAO + REST API  [README]
   tests/
-    test_*.py                        # 247 unit + 100 DB-gated tests as of step 19
-web/                                  # React + Vite SPA (step 19)  [README]
+    test_*.py                        # 268 unit + 103 DB-gated tests as of step 20
+web/                                  # React + Vite SPA (step 19) — Dockerfile + nginx config for self-host  [README]
 ```
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
 
-**Not built yet:** `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction). Deployment artifacts and billing integration are intentionally out of repo — see the per-deployment notes that operators maintain alongside their fork or pinned dependency. The implementation plan tracks order and scope for the OSS app itself.
+**Not built yet:** `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction). Hosted-deploy specifics (managed observability, billing integration) are intentionally out of repo — see the per-deployment notes that operators maintain alongside their fork or pinned dependency. The implementation plan tracks order and scope for the OSS app itself.
 
 ---
 
@@ -604,7 +621,7 @@ Steps 1–19 of the v1 build order are shipped (see [`implementation_plan.md`](i
 
 **Tests:** `pytest` runs 247 unit tests in ~1s; 100 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
 
-**Next up:** Tiered conversational compaction (12.5), OSS packaging (step 20 — Docker Compose, install script, self-host docs), Slack channel (step 21).
+**Next up:** Tiered conversational compaction (12.5), Slack channel (step 21).
 
 The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
 
