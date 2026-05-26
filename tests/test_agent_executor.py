@@ -129,6 +129,19 @@ def exec_env(monkeypatch):
     monkeypatch.setattr(
         "wolfpaw.agents.executor.get_sandbox_manager", lambda: _SandboxStub(),
     )
+
+    # Step 28: _run_functional now falls through to user-tools when the
+    # builtin registry doesn't have the name. The DB call inside that
+    # fallback needs a stub so tests with an empty registry surface
+    # the right "unknown tool" error instead of an asyncpg NPE.
+    async def fake_find_user_tool(_conn, *, user_id, name):
+        return None
+
+    import wolfpaw.memory.tools as _tools_dao
+
+    monkeypatch.setattr(
+        _tools_dao, "find_active_by_name", fake_find_user_tool,
+    )
     yield persisted
 
 

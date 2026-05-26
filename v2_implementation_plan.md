@@ -118,15 +118,28 @@ The Planner now declares per-subagent-step failure handling. v1 behaviour ("any 
 - Tests: 7 new in `test_agent_executor_subagent.py` covering each policy (`fail` default, `drop` single + parallel, `retry` happy path + retry-also-fails), unknown-policy normalization, and the invariant that the policy doesn't shadow input-validation errors. Suite: **374 passing / 130 DB-gated skipped / 2 deselected** (was 368/130/1).
 - **Pre-existing failure, unrelated to step 27**: `test_parallel_subagent_steps_dispatched_concurrently` fails on `dev` HEAD with an asyncpg connection-refused — confirmed by stashing my changes and reproducing. Looks like the test relies on a real DB at localhost:5432 that isn't there on this machine. Deselected for the suite count; should be triaged separately.
 
-### 28. Tool Creator agent — L
+### 28. Tool Creator agent — L ✅ **completed**
 
-Agent proposes new tools when it hits a gap (similar to `create_table` in step 7 but generalized).
+The Planner can now autonomously propose new user-tools when it spots a gap; the user approves via `ask_user`; approved tools execute through the sandbox alongside builtins.
 
-- New: `agents/tool_creator.py` — given a query the registry can't fulfill, drafts a tool spec (name, description, input_schema, Python implementation)
-- Human-in-loop approval via `ask_user` before registration
-- New: `tools` table (already in `001_init.sql`) gets populated with agent-created entries
-- Approved tools land in the registry for that user only by default; promote-to-global is a manual step
-- High risk for a first pass — gate behind a feature flag
+- New step kind `tool_creator` in `schemas.StepKind`. Planner role prompt + `_GENERATE_PLAN_TOOL` enum updated; the model is told to emit `tool_creator` steps with `inputs.{intent, required_inputs?}` only on genuine gaps (and not to invent tool names that don't exist).
+- New `agents/tool_creator.py` — `ToolCreatorAgent` with a forced `propose_tool` tool_use returning `{name, description, input_schema, implementation}`. Validated via `_normalize_spec` (snake_case names only; non-empty implementation; JSON-schema object shape). Sonnet via `model_planner` for code quality.
+- Pipeline (`create_tool(...)`): propose → embed description → cosine-dedup against existing approved user-tools (threshold `WOLFPAW_TOOL_DEDUP_SIMILARITY_THRESHOLD`, default 0.85) → short-circuit on hit → persist as `proposed` → ask_user → mark `approved`/`rejected`. Returns a `ToolCreationOutcome(status, tool_id, name, message)` the Executor surfaces as the step's output.
+- New `toolbox/tools/_dynamic_user_tool.py` — `DynamicUserTool` adapter that satisfies the `Tool` interface but executes the user-approved Python in the sandbox. Same I/O pattern as the artifact tools: `inputs.json` in, `output.json` out, constant wrapper template, the user's code as the body. Network egress + CPU + memory caps from the sandbox layer are the security boundary.
+- Executor changes:
+  - New `_run_tool_creator(ctx, step, plan)` branch handling the `tool_creator` step kind. Lazy-imports `get_tool_creator_agent` to dodge the `agents.tool_creator → tools_dao` import path.
+  - `_run_functional` factored to call `_resolve_tool(ctx, name)` which checks the builtin registry first, then falls through to `memory.tools.find_active_by_name` for user-tools (builtins always win the name collision).
+- New migration `011_tool_creator.sql` — restructures the previously-unused `tools` table: `id` UUID PK replaces the global `name` PK; new columns `user_id`, `implementation`, `status` (`proposed`/`approved`/`rejected`), `source_plan_id`, `source_task_id`, `approved_at`. Partial unique indexes on `(user_id, name)` for user-tools and on `name WHERE user_id IS NULL` for builtins keep both namespaces clean.
+- New `memory/tools.py` DAO: `store_proposed`, `mark_approved` / `mark_rejected` (idempotent on the state machine — second call returns False), `find_active_by_name` (Executor dispatch hot path; user-scoped, only surfaces `status='approved'`), `list_approved_for_user` (Planner inlines these into its prompt), `search_by_task` (cosine, dedup at proposal time).
+- Planner now inlines `user_tools_dao.list_approved_for_user(user_id)` into `PlanContext` + the system prompt's retrieved-context block. The model picks user-tools alongside builtins on subsequent plans.
+- New config: `tool_creator_enabled` (default `True`, env `WOLFPAW_TOOL_CREATOR_ENABLED`), `tool_dedup_similarity_threshold` (default 0.85).
+- Failure posture: model failure (no tool_use, malformed spec) → `ToolError` from `create_tool` → executor marks the step FAILED. ask_user timeout → row stays in `proposed` for a future resume. Persistence failure → log + raise so the user sees a real error (rather than silently shrugging on a destructive operation).
+- Tests: 13 new unit in `test_agent_tool_creator.py` (normalize_spec edge cases, happy approve, reject, dedup short-circuit, feature flag, malformed propose, forced tool_use), 8 in `test_tool_dynamic_user_tool.py` (sandbox I/O happy path + complex inputs + indentation preservation + every failure mode), 5 in `test_agent_executor_tool_creator.py` (tool_creator step dispatch, missing intent, no task context, user-tool fallthrough on registry miss, builtin-wins-on-collision), 8 DB-gated in `test_memory_tools_db.py` (state machine, idempotency, user-scoping, list filter, cosine search, schema unique constraint). Suite: **400 passing / 138 DB-gated skipped / 2 deselected** (was 374/130/2).
+- **Open issue from step 27 still open**: `test_parallel_subagent_steps_dispatched_concurrently` deselected — pre-existing asyncpg-connection failure on local dev, not from this step.
+- **Followups not in scope here**:
+  - Promote-to-global flow (an operator turning a user-tool into a builtin). Plumbed-for via the partial unique indexes; the operator action is undefined.
+  - Surfacing rejected tools to the Planner ("we already tried this and you said no") — DAO stores them, the Planner doesn't read them yet.
+  - Re-proposal on iterating: today, a rejected name is just gone. A v3 affordance might let the model propose `name_v2` after the user gave feedback in the rejection.
 
 ---
 

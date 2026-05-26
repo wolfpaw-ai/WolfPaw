@@ -28,14 +28,14 @@ downstream handler's responsibility, same posture as Triage.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
 from wolfpaw.config import get_settings
 from wolfpaw.embeddings import EmbeddingClient, get_embedder
 from wolfpaw.memory import conversational as conv
-from wolfpaw.memory import procedural, skills as skills_mem
+from wolfpaw.memory import procedural, skills as skills_mem, tools as user_tools_dao
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
@@ -58,6 +58,7 @@ class PlanContext:
     relevant_skills: list[skills_mem.Skill]
     summaries: list[conv.ThreadSummary]
     vector_recall: list[conv.Message]
+    user_tools: list[user_tools_dao.UserTool] = field(default_factory=list)
 
 
 _GENERATE_PLAN_TOOL = {
@@ -90,6 +91,7 @@ _GENERATE_PLAN_TOOL = {
                             "enum": [
                                 "functional", "reasoning",
                                 "evaluation", "subagent",
+                                "tool_creator",
                             ],
                         },
                         "description": {"type": "string"},
@@ -122,8 +124,26 @@ ALWAYS consult retrieved context first:
 
 Step kinds:
   - "functional" — invoke a specific tool with structured inputs (set `tool` + `inputs`).
+                   The tool must exist (either a builtin OR an approved user-tool
+                   from the "User tools" section, if present). If you need an
+                   operation that no available tool covers, use "tool_creator"
+                   instead — DON'T invent a tool name and hope it exists.
   - "reasoning"  — a model call you'll handle inline (no tool); describe what to think through.
   - "evaluation" — a model-graded check; describe what to validate.
+  - "tool_creator" — propose a brand-new user-tool for an operation no existing
+                   tool covers. The user gets to approve the proposal via
+                   ask_user before the tool is registered. Use sparingly:
+                     * prefer composing existing tools when possible
+                     * one tool_creator step per genuine gap (never speculative)
+                     * follow with a functional step that uses the new tool by
+                       its proposed name, OR end the plan and let a future
+                       request use the new tool
+                   `inputs` carries `{intent, required_inputs?}`:
+                     * `intent`: one-paragraph description of what the tool
+                       should do (the Tool Creator agent will translate this
+                       into a structured spec).
+                     * `required_inputs`: optional array of input field names
+                       (e.g. `["url", "max_pages"]`) — hints, not a contract.
   - "subagent"   — delegate a chunk of work to a child task that runs its own full
                    Planner→Executor→Post-Evaluator pipeline. Use this when:
                      * the work splits into independent investigations that benefit
@@ -286,12 +306,20 @@ class PlannerAgent:
                 )
                 if query_embedding is not None else []
             )
+            # Every approved user-tool for this user — small list in
+            # practice, well under the model's budget. Inlined into the
+            # prompt so the Planner can pick them alongside builtins
+            # (and avoid proposing a duplicate via `tool_creator`).
+            user_tools = await user_tools_dao.list_approved_for_user(
+                conn, user_id=ctx.user_id,
+            )
 
         plan_ctx = PlanContext(
             past_plans=past_plans,
             relevant_skills=relevant_skills,
             summaries=summaries,
             vector_recall=vector_recall,
+            user_tools=user_tools,
         )
 
         # 5. Build messages. The system prompt is Soul + User File + the
@@ -306,6 +334,7 @@ class PlannerAgent:
             relevant_skills=relevant_skills,
             summaries=summaries,
             vector_recall=vector_recall,
+            user_tools=user_tools,
         )
         role_with_context = _AGENT_ROLE
         if revision_diagnosis:
@@ -407,6 +436,7 @@ def _format_context_block(
     relevant_skills: list[skills_mem.Skill],
     summaries: list[conv.ThreadSummary],
     vector_recall: list[conv.Message],
+    user_tools: list[user_tools_dao.UserTool],
 ) -> str:
     parts: list[str] = []
     summary_block = conv.format_summaries_block(summaries)
@@ -432,6 +462,16 @@ def _format_context_block(
                 f"- name={s.name} similarity={s.similarity:.2f}"
                 f"\n  description: {s.description}"
                 f"\n  steps skeleton: {json.dumps(s.steps)}"
+            )
+        parts.append("\n".join(lines))
+    if user_tools:
+        lines = [
+            "## User tools (approved by this user, available like builtins)",
+        ]
+        for t in user_tools:
+            lines.append(
+                f"- `{t.name}`: {t.description}"
+                f"\n  input_schema: {json.dumps(t.signature)}"
             )
         parts.append("\n".join(lines))
     return "\n\n".join(parts)

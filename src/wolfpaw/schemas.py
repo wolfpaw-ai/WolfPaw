@@ -13,7 +13,9 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
-StepKind = Literal["functional", "reasoning", "evaluation", "subagent"]
+StepKind = Literal[
+    "functional", "reasoning", "evaluation", "subagent", "tool_creator",
+]
 _VALID_STEP_KINDS = {"functional", "reasoning", "evaluation", "subagent"}
 
 

@@ -113,6 +113,9 @@ def planner_env(monkeypatch):
     async def fake_search_skills(_conn, *, user_id, query_embedding, k=5):
         return []
 
+    async def fake_list_user_tools(_conn, *, user_id):
+        return []
+
     async def fake_store(
         _conn, *, user_id, thread_id, task_id, query, query_embedding,
         steps, final_answer=None, success=None, score=None,
@@ -160,6 +163,10 @@ def planner_env(monkeypatch):
     )
     monkeypatch.setattr(
         "wolfpaw.agents.planner.skills_mem.search_by_task", fake_search_skills,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.planner.user_tools_dao.list_approved_for_user",
+        fake_list_user_tools,
     )
     monkeypatch.setattr(
         "wolfpaw.agents.planner.bump_prompt_version", fake_bump,

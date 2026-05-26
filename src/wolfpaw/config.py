@@ -120,6 +120,21 @@ class Settings(BaseSettings):
     skill_emit_min_score: int = 90
     skill_dedup_similarity_threshold: float = 0.85
 
+    # Tool Creator (step 28). When the Planner emits a `tool_creator`
+    # step the Executor invokes the Tool Creator agent, which drafts a
+    # spec, asks the user to approve via `ask_user`, persists on
+    # approval. The approved tool then dispatches via the sandbox
+    # whenever the Planner names it on subsequent plans.
+    # Default on — the spec calls out "high risk for a first pass" but
+    # also says "gate behind a feature flag," and we've gated the
+    # actual execution behind ``ask_user`` approval, so the flag is
+    # mainly for operators who want to disable the capability entirely.
+    tool_creator_enabled: bool = True
+    # Cosine threshold for skipping a Tool Creator proposal that
+    # duplicates an existing approved user-tool (same shape as the
+    # Skill Distiller's dedup, similar threshold).
+    tool_dedup_similarity_threshold: float = 0.85
+
     # Persona (step 17). Soul file path; empty → fall back to the
     # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
     soul_path: str = ""

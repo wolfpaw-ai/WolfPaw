@@ -300,6 +300,8 @@ class ExecutorAgent:
                 output = await self._run_evaluation(ctx, step, plan, snapshot)
             elif step.kind == "subagent":
                 output = await self._run_subagent(ctx, step)
+            elif step.kind == "tool_creator":
+                output = await self._run_tool_creator(ctx, step, plan)
             else:
                 raise ValueError(f"unknown step kind: {step.kind!r}")
         except Exception as e:  # noqa: BLE001 — any failure becomes a step failure
@@ -329,16 +331,36 @@ class ExecutorAgent:
     async def _run_functional(self, ctx: ToolContext, step: Step) -> Any:
         if not step.tool:
             raise ValueError(f"functional step {step.id!r} has no `tool`")
-        try:
-            tool = self.registry.get(step.tool)
-        except KeyError as e:
-            raise ValueError(f"unknown tool: {step.tool!r}") from e
+        tool = await self._resolve_tool(ctx, step.tool)
         try:
             return await tool.run(ctx, **step.inputs)
         except WorkspaceCollision as collision:
             return await self._handle_workspace_collision(
                 ctx=ctx, step=step, tool=tool, collision=collision,
             )
+
+    async def _resolve_tool(self, ctx: ToolContext, name: str) -> Any:
+        """Resolve a tool name to a Tool instance, falling through to
+        the per-user approved user-tools when no builtin matches.
+
+        Builtins take precedence: if a user-tool happens to share a
+        name with a builtin, the builtin wins (the Planner is told
+        not to propose duplicates, but defense-in-depth here matters)."""
+        try:
+            return self.registry.get(name)
+        except KeyError:
+            pass
+        # Fall through to user-tools.
+        from wolfpaw.memory import tools as tools_dao
+        from wolfpaw.toolbox.tools._dynamic_user_tool import DynamicUserTool
+
+        async with acquire() as conn:
+            row = await tools_dao.find_active_by_name(
+                conn, user_id=ctx.user_id, name=name,
+            )
+        if row is None:
+            raise ValueError(f"unknown tool: {name!r}")
+        return DynamicUserTool(row)
 
     async def _handle_workspace_collision(
         self, *, ctx: ToolContext, step: Step, tool: Any,
@@ -398,6 +420,44 @@ class ExecutorAgent:
         # v1: same shape as reasoning. v2 adds a forced verdict tool_use
         # that drives continue/retry/branch logic.
         return await self._run_reasoning(ctx, step, plan, prior)
+
+    async def _run_tool_creator(
+        self, ctx: ToolContext, step: Step, plan: Plan,
+    ) -> dict[str, Any]:
+        """Invoke the Tool Creator: draft a spec, dedup, ask the user,
+        persist. Returns the outcome dict so subsequent steps can read
+        the new tool's name out of ``prior_results``.
+
+        Requires ``ctx.task_id`` because ``ask_user`` lives inside the
+        task lifecycle. The Planner only emits ``tool_creator`` steps
+        inside the task path; we re-validate here defensively.
+        """
+        if ctx.task_id is None:
+            raise ValueError(
+                "tool_creator steps require a parent task — the Router"
+                " should have created one for this plan"
+            )
+        inputs = step.inputs or {}
+        intent = inputs.get("intent")
+        if not isinstance(intent, str) or not intent.strip():
+            raise ValueError(
+                f"tool_creator step {step.id!r} missing required `inputs.intent`"
+            )
+        required_inputs = inputs.get("required_inputs")
+        if required_inputs is not None and not isinstance(required_inputs, list):
+            required_inputs = None
+        # Lazy import: tool_creator imports from agents.* which would
+        # otherwise complete a cycle at module load.
+        from wolfpaw.agents.tool_creator import get_tool_creator_agent
+
+        agent = get_tool_creator_agent()
+        outcome = await agent.create_tool(
+            ctx=ctx,
+            intent=intent,
+            required_inputs=required_inputs,
+            plan_id=plan.id,
+        )
+        return outcome.to_jsonb()
 
     async def _run_subagent(
         self, ctx: ToolContext, step: Step,

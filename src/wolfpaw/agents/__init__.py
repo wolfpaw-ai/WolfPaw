@@ -7,12 +7,19 @@ Step 13: Executor (runs a Plan, dispatches step kinds, parallel groups).
 Step 14: Post-Evaluator (scores completed executions, updates procedural memory).
 Step 24 (v2): Plan Pre-Evaluator (sanity-check between Planner and Executor).
 Step 25 (v2): Skill Distiller (auto-emit skills from high-scoring plans).
+Step 28 (v2): Tool Creator (propose, get user-approval, run user-tools).
 """
 
 from wolfpaw.agents.executor import (
     ExecutorAgent,
     get_executor_agent,
     reset_executor_agent,
+)
+from wolfpaw.agents.tool_creator import (
+    ToolCreatorAgent,
+    ToolCreationOutcome,
+    get_tool_creator_agent,
+    reset_tool_creator_agent,
 )
 from wolfpaw.agents.plan_pre_evaluator import (
     PlanPreEvaluatorAgent,
@@ -57,6 +64,8 @@ __all__ = [
     "Route",
     "Router",
     "SkillDistillerAgent",
+    "ToolCreationOutcome",
+    "ToolCreatorAgent",
     "TriageAgent",
     "TriageVerdict",
     "get_executor_agent",
@@ -65,6 +74,7 @@ __all__ = [
     "get_pre_evaluator_agent",
     "get_router",
     "get_skill_distiller_agent",
+    "get_tool_creator_agent",
     "maybe_distill_skill",
     "plan_with_pre_evaluation",
     "reset_executor_agent",
@@ -73,4 +83,5 @@ __all__ = [
     "reset_pre_evaluator_agent",
     "reset_router",
     "reset_skill_distiller_agent",
+    "reset_tool_creator_agent",
 ]
