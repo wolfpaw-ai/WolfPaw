@@ -10,8 +10,8 @@ from wolfpaw.toolbox.registry import Registry, Tool, get_registry
 
 
 def test_v1_tool_set_registered():
-    names = get_registry().names()
-    assert set(names) == {
+    names = set(get_registry().names())
+    expected_v1 = {
         # step 7 (info & data + docs)
         "calculator", "create_table", "http_get", "read_doc",
         "sql_query", "web_search", "write_doc",
@@ -24,6 +24,13 @@ def test_v1_tool_set_registered():
         # step 15 (HITL)
         "ask_user",
     }
+    # Subset check so Phase C+ integration tools (Dropbox, Notion,
+    # Microsoft Calendar) registered as a side-effect of other test
+    # imports don't break this assertion. The v1 set must always be
+    # present.
+    assert expected_v1.issubset(names), (
+        f"missing v1 tools: {expected_v1 - names}"
+    )
 
 
 def test_anthropic_schema_shape():

@@ -135,6 +135,37 @@ class Settings(BaseSettings):
     # Skill Distiller's dedup, similar threshold).
     tool_dedup_similarity_threshold: float = 0.85
 
+    # OAuth integrations (Phase C). Each provider gets a client_id +
+    # client_secret pair the operator registers with the provider and
+    # pastes into `.env`. Blank values mean the integration is
+    # disabled on this deployment — the install-url endpoint returns
+    # 503 and the tools surface "not connected" errors.
+    integration_state_ttl_minutes: int = 15
+
+    # Dropbox (step 29). App-folder scope. Register an app at
+    # https://www.dropbox.com/developers/apps with permission_type =
+    # "App folder". Callback URL must match
+    # ${WOLFPAW_WEB_BASE_URL}/integrations/dropbox/oauth/callback.
+    dropbox_client_id: str = ""
+    dropbox_client_secret: str = ""
+
+    # Notion (step 30). Public OAuth integration. Create one at
+    # https://www.notion.so/my-integrations. Callback URL must match
+    # ${WOLFPAW_WEB_BASE_URL}/integrations/notion/oauth/callback.
+    notion_client_id: str = ""
+    notion_client_secret: str = ""
+
+    # Microsoft Calendar (step 32). Register an "App registration" in
+    # the Azure portal under Entra ID; configure a Web platform with
+    # redirect ${WOLFPAW_WEB_BASE_URL}/integrations/microsoft/oauth/callback;
+    # API permissions: Microsoft Graph delegated Calendars.ReadWrite +
+    # offline_access + User.Read. `microsoft_tenant` is the OAuth
+    # tenant id — "common" works for any user account; pin to a
+    # specific tenant id when the deployment is single-tenant.
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_tenant: str = "common"
+
     # Persona (step 17). Soul file path; empty → fall back to the
     # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
     soul_path: str = ""

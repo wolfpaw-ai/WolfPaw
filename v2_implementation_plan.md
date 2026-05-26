@@ -147,14 +147,70 @@ The Planner can now autonomously propose new user-tools when it spots a gap; the
 
 Every integration follows the same shape: OAuth flow → per-user token in a new table → tool implementation that wraps the provider's API → planner discovers it via the registry.
 
-### 29. Dropbox app-folder — M
+### 29. Dropbox app-folder — M ✅ **completed**
 
-Easiest of the integration set. Sandboxed `/Apps/Wolfpaw/` folder, full read/edit/delete inside.
+App-folder OAuth scope; everything stays under `/Apps/Wolfpaw/` on the user's actual Dropbox.
 
-- New: `channels/dropbox_oauth.py` (mirrors slack OAuth pattern)
-- New: migration `008_dropbox.sql` — `dropbox_links(user_id, access_token, refresh_token, expires_at)`
-- New: tools `dropbox_read_file`, `dropbox_write_file`, `dropbox_list_folder`
-- Refresh-token rotation on every call (Dropbox tokens expire ~4h)
+- New `migrations/012_integrations.sql` — adds the **shared** `integration_state_tokens` table (single-use, TTL'd state nonces for every Phase C OAuth flow) + the per-provider `dropbox_links(user_id, access_token, refresh_token, expires_at, account_id, scope)`. Phase C reuses 012 across providers so the shared scaffolding lives in one migration; each integration gets its own table.
+- New `integrations/oauth_state.py` — `issue` / `consume` mirror `channels/telegram_tokens.py` exactly (plaintext in URL, SHA-256 on disk, atomic mark-used). Rejects cross-provider mismatch so a Dropbox-minted state never completes at a Notion callback.
+- New `memory/dropbox_links.py` DAO: `upsert`, `update_tokens` (preserves the existing refresh_token when Dropbox doesn't rotate), `get`, `delete`.
+- New `integrations/dropbox/` package:
+  - `client.py` — `build_authorize_url`, `exchange_code`, `refresh_access_token` + `DropboxClient` per-user/per-request class. `_ensure_fresh_token` auto-refreshes when within 60s of expiry (Dropbox access tokens are ~4h). `DropboxNotConnectedError` surfaces the install hint when the user hasn't connected.
+  - `routes.py` — `GET /integrations/dropbox/install-url` (mints state, returns Dropbox authorize URL), `GET /integrations/dropbox/oauth/callback` (validates state, exchanges code, persists), `DELETE /integrations/dropbox` (disconnect). Callback renders a tiny HTML success/failure page since the redirect lands in the browser.
+  - `tools.py` — `dropbox_list_folder`, `dropbox_read_file` (UTF-8 only, raises on binary), `dropbox_write_file` (refuses overwrite by default; agent must explicitly pass `overwrite=true` after `ask_user` approval). All three surface `"isn't connected"` ToolError when the user hasn't connected.
+- New config: `dropbox_client_id`, `dropbox_client_secret`, `integration_state_ttl_minutes` (default 15). Operator registers the app at `https://www.dropbox.com/developers/apps` with permission_type=`App folder` and pastes the credentials.
+- Planner integration: new `_resolve_connected_integrations(conn, user_id)` queries each provider's `_links` DAO and surfaces the connected provider names in a "OAuth integrations" block in the system prompt — the model picks `dropbox_*` tools only when "dropbox connected" is in the list.
+- Tests: **14 unit** in `test_integrations_dropbox.py` (authorize-URL shape, exchange + refresh + non-200 paths, list_folder normalization, read_file bytes, write_file metadata, token-refresh-on-expiry, tool happy paths + not-connected error, non-UTF-8 raise), **6 DB-gated** (DAO upsert+get+overwrite, update_tokens preserves refresh, state-token issue/consume + wrong-provider + single-use). Suite: 414 passing / 144 DB-gated skipped.
+
+### 30. Notion — M ✅ **completed**
+
+Notion OAuth is simpler than Dropbox — tokens don't expire, no refresh path. Per-user bot-scoped workspace token.
+
+- New migration `013_notion.sql` — `notion_links(user_id, access_token, workspace_id, workspace_name, workspace_icon, bot_id, owner)`. Re-installing replaces the row (upsert).
+- New `memory/notion_links.py` DAO: `upsert`, `get`, `delete`. No `update_tokens` because Notion tokens are evergreen.
+- New `integrations/notion/` package:
+  - `client.py` — `build_authorize_url` (with `owner=user`), `exchange_code` (uses HTTP Basic auth on `client_id:client_secret` per Notion's contract — different from Dropbox's body-auth shape), `NotionClient` per-user API class. Includes a 3-req/sec sliding-window rate limiter (`_rate_limit`) for Notion's documented cap.
+  - `routes.py` — install-url / callback / disconnect, same shape as Dropbox.
+  - `tools.py` — `notion_search` (workspace-scoped search), `notion_read_page` (page metadata + child blocks merged into one normalized payload — nested blocks NOT recursively expanded; agent can drill in by id), `notion_create_page` (title + optional `body_markdown` rendered as a paragraph block; richer block types deferred to v3).
+- New config: `notion_client_id`, `notion_client_secret`. Operator creates the integration at `https://www.notion.so/my-integrations`.
+- Planner integration: `_resolve_connected_integrations` also checks `notion_links_dao.get`; `notion_*` tools surface when connected.
+- Tests: **11 unit** (authorize-URL, Basic-auth body, workspace-payload parsing, search normalization, read_page two-call merge, create_page body shape, rate-limit timing, tool happy paths + not-connected), **2 DB-gated** (upsert+get, upsert overwrites).
+
+### 31. Google Calendar — L
+
+Verification timing matters — start the Google review **before** building the integration.
+
+- New: `channels/google_oauth.py` (shared with Drive + Gmail later)
+- New: migration `010_google.sql` — `google_links` (broad enough for Drive/Gmail token sharing)
+- New: tools `calendar_list_events`, `calendar_create_event`
+- Verification timing matters — start the Google review **before** building the integration
+
+> **Deferred in this Phase C wave.** Google's sensitive-tier OAuth verification is external work that takes weeks; the spec explicitly says "start the review before building." Revisit when the user has started the Google verification flow.
+
+### 32. Microsoft Calendar — M ✅ **completed**
+
+Microsoft Graph OAuth with `Calendars.ReadWrite + offline_access + User.Read`. Tokens ~1h, refresh tokens ~90 days.
+
+- New migration `014_microsoft.sql` — `microsoft_links` (mirrors Dropbox's shape: access + refresh + expires_at + scope, plus optional `tenant_id`).
+- New `memory/microsoft_links.py` DAO: `upsert`, `update_tokens`, `get`, `delete`.
+- New `integrations/microsoft/` package:
+  - `client.py` — `build_authorize_url` (tenant-scoped URL, configurable via `microsoft_tenant` config — default `"common"` allowing any account), `exchange_code`, `refresh_access_token`, `MicrosoftClient` per-user API. Uses `/me/calendarView` (expands recurring events) for listing and `/me/events` for creation. `_ensure_fresh_token` auto-refreshes.
+  - `routes.py` — install-url / callback / disconnect, same shape as the other two.
+  - `tools.py` — `outlook_calendar_list_events` (ISO-8601 window, ranked by start time) and `outlook_calendar_create_event` (subject + start/end + optional time_zone / body_html / attendees / location). Both validate inputs before touching the client.
+- New config: `microsoft_client_id`, `microsoft_client_secret`, `microsoft_tenant` (default `"common"`). Operator registers an App registration in Entra ID with a Web redirect URI and the three delegated permissions.
+- Planner integration: third entry in `_resolve_connected_integrations`; surfaces "microsoft connected" so the model picks `outlook_*` tools.
+- Tests: **11 unit** (authorize-URL scope coverage, exchange + refresh preserve-old-refresh, list_events normalization, create_event full body roundtrip, expired-token refresh, tool dispatch + not-connected + input validation), **1 DB-gated** (DAO upsert+get).
+
+### 33. Gmail readonly — L
+
+Read only. Drafts still flow via Wolfpaw → owner-email pattern (never via Gmail API). Restricted-tier scope; CASA audit timed to public launch.
+
+- Extends `google_links` from #31
+- New: tools `gmail_search`, `gmail_read_message`
+- Hard policy in `agents/`: no write/send/modify scopes ever
+- Audit + verification gating: start CASA process when revenue justifies (~$15k-75k/year)
+
+> **Deferred in this Phase C wave** alongside step 31. Restricted-tier scope + CASA audit ($15k-75k/year) timed to public launch when revenue justifies.
 
 ### 30. Notion — M
 

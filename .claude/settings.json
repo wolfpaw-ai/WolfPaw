@@ -2,9 +2,19 @@
   "permissions": {
     "allow": [
       "Bash(.venv/bin/python -c ' *)",
-      "Bash(.venv/bin/python -m pytest tests/test_tasks_routes_db.py tests/test_usage_routes.py)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(python -c *)",
+      "Bash(python -m pytest *)",
+      "Bash(pytest *)",
       "Bash(git check-ignore *)",
-      "Bash(python -m pytest tests/ --deselect tests/test_tool_artifacts_e2e.py::test_create_pdf_emits_valid_pdf -q)"
+      "Bash(git status*)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(grep *)",
+      "Bash(find . *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)"
     ]
   }
 }

@@ -35,7 +35,14 @@ from uuid import UUID
 from wolfpaw.config import get_settings
 from wolfpaw.embeddings import EmbeddingClient, get_embedder
 from wolfpaw.memory import conversational as conv
-from wolfpaw.memory import procedural, skills as skills_mem, tools as user_tools_dao
+from wolfpaw.memory import (
+    dropbox_links as dropbox_links_dao,
+    microsoft_links as microsoft_links_dao,
+    notion_links as notion_links_dao,
+    procedural,
+    skills as skills_mem,
+    tools as user_tools_dao,
+)
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
 from wolfpaw.metering.prompt_versions import bump_prompt_version
@@ -59,6 +66,7 @@ class PlanContext:
     summaries: list[conv.ThreadSummary]
     vector_recall: list[conv.Message]
     user_tools: list[user_tools_dao.UserTool] = field(default_factory=list)
+    connected_integrations: list[str] = field(default_factory=list)
 
 
 _GENERATE_PLAN_TOOL = {
@@ -313,6 +321,14 @@ class PlannerAgent:
             user_tools = await user_tools_dao.list_approved_for_user(
                 conn, user_id=ctx.user_id,
             )
+            # Which OAuth integrations this user has connected.
+            # Surfaced as plain provider names so the prompt can tell
+            # the model "you may use the dropbox_* tools because the
+            # user has connected Dropbox" / "don't propose Notion
+            # steps, they haven't connected it."
+            connected_integrations = await _resolve_connected_integrations(
+                conn, user_id=ctx.user_id,
+            )
 
         plan_ctx = PlanContext(
             past_plans=past_plans,
@@ -320,6 +336,7 @@ class PlannerAgent:
             summaries=summaries,
             vector_recall=vector_recall,
             user_tools=user_tools,
+            connected_integrations=connected_integrations,
         )
 
         # 5. Build messages. The system prompt is Soul + User File + the
@@ -335,6 +352,7 @@ class PlannerAgent:
             summaries=summaries,
             vector_recall=vector_recall,
             user_tools=user_tools,
+            connected_integrations=connected_integrations,
         )
         role_with_context = _AGENT_ROLE
         if revision_diagnosis:
@@ -430,6 +448,38 @@ def _format_revision_block(diagnosis: str) -> str:
     )
 
 
+async def _resolve_connected_integrations(
+    conn, *, user_id: UUID,
+) -> list[str]:
+    """Return the list of provider names the user has connected OAuth
+    tokens for. Currently just Dropbox; Notion + Microsoft Calendar
+    extend this in steps 30 / 32. Best-effort per provider — a DAO
+    error for one doesn't block the others."""
+    connected: list[str] = []
+    try:
+        if await dropbox_links_dao.get(conn, user_id=user_id) is not None:
+            connected.append("dropbox")
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "agents.planner.dropbox_link_lookup_failed", exc_info=True,
+        )
+    try:
+        if await notion_links_dao.get(conn, user_id=user_id) is not None:
+            connected.append("notion")
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "agents.planner.notion_link_lookup_failed", exc_info=True,
+        )
+    try:
+        if await microsoft_links_dao.get(conn, user_id=user_id) is not None:
+            connected.append("microsoft")
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "agents.planner.microsoft_link_lookup_failed", exc_info=True,
+        )
+    return connected
+
+
 def _format_context_block(
     *,
     past_plans: list[procedural.StoredPlan],
@@ -437,6 +487,7 @@ def _format_context_block(
     summaries: list[conv.ThreadSummary],
     vector_recall: list[conv.Message],
     user_tools: list[user_tools_dao.UserTool],
+    connected_integrations: list[str],
 ) -> str:
     parts: list[str] = []
     summary_block = conv.format_summaries_block(summaries)
@@ -474,6 +525,27 @@ def _format_context_block(
                 f"\n  input_schema: {json.dumps(t.signature)}"
             )
         parts.append("\n".join(lines))
+    # OAuth integrations: tell the model which provider tools are
+    # actually usable. Dropbox (step 29), Notion (30), Microsoft
+    # Calendar (32) tool names all share a `<provider>_*` prefix; the
+    # model is expected to read this list and ONLY pick tools whose
+    # prefix is in the connected set.
+    integration_lines = [
+        "## OAuth integrations (provider tools the user can use)",
+    ]
+    if connected_integrations:
+        for provider in connected_integrations:
+            integration_lines.append(
+                f"- `{provider}` connected — `{provider}_*` tools are usable."
+            )
+    else:
+        integration_lines.append(
+            "- None connected. Do NOT pick `dropbox_*`, `notion_*`, or"
+            " `outlook_*` tools — they'll surface 'not connected'"
+            " errors. If a plan needs one, end the plan with a"
+            " reasoning step telling the user how to connect."
+        )
+    parts.append("\n".join(integration_lines))
     return "\n\n".join(parts)
 
 

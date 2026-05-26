@@ -14,6 +14,12 @@ from wolfpaw.channels.slack import router as slack_channel_router
 from wolfpaw.channels.telegram import router as telegram_channel_router
 from wolfpaw.channels.web import router as web_channel_router
 from wolfpaw.config import get_settings
+from wolfpaw.integrations import dropbox as _dropbox_integration  # noqa: F401 — registers Dropbox tools
+from wolfpaw.integrations import microsoft as _microsoft_integration  # noqa: F401 — registers Outlook tools
+from wolfpaw.integrations import notion as _notion_integration  # noqa: F401 — registers Notion tools
+from wolfpaw.integrations.dropbox.routes import router as dropbox_router
+from wolfpaw.integrations.microsoft.routes import router as microsoft_router
+from wolfpaw.integrations.notion.routes import router as notion_router
 from wolfpaw.memory.db import close_pool
 from wolfpaw.workers.queue import close_pool as close_queue_pool
 from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — registers /usage
@@ -86,6 +92,9 @@ def create_app() -> FastAPI:
     app.include_router(persona_router)
     app.include_router(tasks_router)
     app.include_router(usage_router)
+    app.include_router(dropbox_router)
+    app.include_router(notion_router)
+    app.include_router(microsoft_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
