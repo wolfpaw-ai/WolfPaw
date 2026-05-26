@@ -107,14 +107,16 @@ Weekly maintenance job that re-checks the memory subsystems against current stan
 - Failure posture: per-plan re-score errors don't stop the batch; per-pair supersession errors don't stop the user; thread-GC errors log + bail without touching plans/skills. The whole job is idempotent + best-effort.
 - Tests: 14 new in `test_workers_sleep_cycle.py` — 7 unit (survivor-pick, gating on the flag, orchestrator + arq wrapper) and 7 DB-gated (skill consolidation, threshold-cutoff no-op, `search_by_task` superseded filter, `mark_superseded` idempotency, plan re-score via mocked evaluator, re-score skips plans without `final_answer`, orphan-thread GC). 2 new in `test_workers_queue.py` for the new enqueue helper. Suite: **368 passing / 130 DB-gated skipped** (was 359/123).
 
-### 27. Structured subagent failure policies — S
+### 27. Structured subagent failure policies — S ✅ **completed**
 
-Today: any subagent failure fails the parent step. v2: planner declares per-branch policy.
+The Planner now declares per-subagent-step failure handling. v1 behaviour ("any subagent failure fails the parent step") becomes one option of three.
 
-- Extend `subagent` step's `inputs` schema with `on_failure: "fail" | "drop" | "retry"`
-- Executor honors the policy in `_run_subagent` exception handling
-- Retry uses Planner with the failure diagnosis as added context
-- Planner's `generate_plan` tool-use input schema gets the new field
+- Planner role prompt documents the new `inputs.on_failure: "fail" | "drop" | "retry"` field on subagent steps — the schema itself stays `{"type": "object"}` since Anthropic tool_use is permissive about object keys; documenting it in the prompt is what the model reads. Default (when missing) is `"fail"` for backwards compatibility.
+- `agents/executor.py` `_run_subagent` refactored: extracted the actual spawn-and-validate into `_spawn_subagent_task`, and the outer method now wraps the spawn in policy-aware exception handling. Depth check + input validation stay in `_run_subagent` and are NOT covered by the policy — only true subagent-task failures (non-completed child, model crash inside the child, etc.) are.
+- New helpers in the same module: `_normalize_failure_policy` (unknown values fall back to `"fail"` with a warning — never silently swallow failures), `_drop_stub` (returns `{"dropped": True, "error": "...", "answer": None}` so the parent's synthesis step can tell a dropped branch from a real one), `_augment_query_with_failure` (appends the failure diagnosis to the original query for the single retry attempt).
+- Retry is capped at 1 attempt. The retry's content is the original `inputs.query` plus a "Previous attempt failed: ..." preamble so the subagent's own Planner gets concrete feedback. If the retry also fails, the failure propagates as if the policy were `"fail"`.
+- Tests: 7 new in `test_agent_executor_subagent.py` covering each policy (`fail` default, `drop` single + parallel, `retry` happy path + retry-also-fails), unknown-policy normalization, and the invariant that the policy doesn't shadow input-validation errors. Suite: **374 passing / 130 DB-gated skipped / 2 deselected** (was 368/130/1).
+- **Pre-existing failure, unrelated to step 27**: `test_parallel_subagent_steps_dispatched_concurrently` fails on `dev` HEAD with an asyncpg connection-refused — confirmed by stashing my changes and reproducing. Looks like the test relies on a real DB at localhost:5432 that isn't there on this machine. Deselected for the suite count; should be triaged separately.
 
 ### 28. Tool Creator agent — L
 

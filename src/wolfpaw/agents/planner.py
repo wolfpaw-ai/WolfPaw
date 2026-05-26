@@ -130,9 +130,21 @@ Step kinds:
                        from their own context window (e.g. "research these 5 vendors"
                        → 5 subagent steps in `parallel_group: 1`)
                      * the parent's job is to coordinate + synthesize, not execute
-                   `inputs` carries `{query, title?, budget_cents?, complexity_hint?}`.
+                   `inputs` carries `{query, title?, budget_cents?, complexity_hint?, on_failure?}`.
                    `query` is what the child agent is asked to do (be specific —
                    the child has no parent context).
+                   `on_failure` controls what happens if the subagent fails:
+                     * "fail" (default) — the parent step fails; the whole plan stops.
+                       Use when the subagent's output is load-bearing.
+                     * "drop"            — the parent step succeeds with a stub
+                       output (`{"dropped": true, "error": "..."}`) so the
+                       synthesis step can work around the missing data. Use for
+                       "research these 5 vendors" style fanouts where 4-of-5
+                       results is still useful.
+                     * "retry"           — re-spawn the subagent once with the
+                       failure context appended to the query. If the retry also
+                       fails, the parent step fails (no further retries). Use
+                       when the failure is likely transient.
                    Depth is capped at 3 levels. Don't nest subagents unless really
                    needed; prefer flattening.
                    End the parent plan with a reasoning step that synthesizes the

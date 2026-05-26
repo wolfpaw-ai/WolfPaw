@@ -410,6 +410,14 @@ class ExecutorAgent:
         Depth check: `MAX_SUBAGENT_DEPTH` ancestors. A subagent at the
         max depth itself can't spawn further subagents.
 
+        Failure policy (step 27): `step.inputs.on_failure` selects how
+        the executor handles a child task that didn't complete:
+          - "fail" (default): propagate as a step failure
+          - "drop": return a stub output marked ``dropped=True`` so
+                    synthesis can carry on with the surviving branches
+          - "retry": re-spawn once with the failure diagnosis appended
+                     to the query; retry-failure propagates as "fail"
+
         Requires `ctx.task_id` — subagent steps only make sense inside a
         Task hierarchy. The plan-path Router would have created a task
         for any plan with `subagent` steps in it.
@@ -429,6 +437,7 @@ class ExecutorAgent:
         title = inputs.get("title") or step.description[:80] or step.id
         budget = inputs.get("budget_cents")
         child_complexity = inputs.get("complexity_hint") or "moderate"
+        on_failure = _normalize_failure_policy(inputs.get("on_failure"))
 
         async with acquire() as conn:
             depth = await tasks_dao.get_depth(conn, task_id=ctx.task_id)
@@ -439,6 +448,55 @@ class ExecutorAgent:
                 f" max={MAX_SUBAGENT_DEPTH}) — flatten the plan"
             )
 
+        spawn_kwargs = dict(
+            ctx=ctx, step=step, title=title, budget=budget,
+            complexity=child_complexity, root_task_id=root_task_id,
+        )
+        try:
+            return await self._spawn_subagent_task(query=query, **spawn_kwargs)
+        except Exception as first_failure:  # noqa: BLE001
+            log.warning(
+                "agents.executor.subagent_failed",
+                step_id=step.id,
+                on_failure=on_failure,
+                error=str(first_failure),
+            )
+            if on_failure == "drop":
+                return _drop_stub(first_failure)
+            if on_failure == "retry":
+                augmented = _augment_query_with_failure(query, first_failure)
+                try:
+                    return await self._spawn_subagent_task(
+                        query=augmented, **spawn_kwargs,
+                    )
+                except Exception as retry_failure:  # noqa: BLE001
+                    log.warning(
+                        "agents.executor.subagent_retry_failed",
+                        step_id=step.id,
+                        first_error=str(first_failure),
+                        retry_error=str(retry_failure),
+                    )
+                    raise retry_failure from first_failure
+            # fail (default) — re-raise so the outer `_run_step` marks
+            # the step FAILED.
+            raise
+
+    async def _spawn_subagent_task(
+        self,
+        *,
+        ctx: ToolContext,
+        step: Step,
+        query: str,
+        title: str,
+        budget: int | None,
+        complexity: str,
+        root_task_id: UUID,
+    ) -> dict[str, Any]:
+        """Single subagent spawn: acquire the per-root semaphore slot,
+        run the child task end-to-end, validate the outcome. Used by
+        both the initial attempt and (under ``on_failure="retry"``) the
+        single retry attempt — depth + input validation already happened
+        in the caller."""
         # Lazy import: `tasks.service` imports back into the agents
         # package, so a top-level import here would create a cycle.
         from wolfpaw.tasks.service import get_task_service
@@ -459,7 +517,7 @@ class ExecutorAgent:
                 ),
                 parent_task_id=ctx.task_id,
                 budget_cents=budget,
-                complexity_hint=child_complexity,
+                complexity_hint=complexity,
                 # Don't propagate emit — multiple parallel subagents would
                 # interleave step events into the parent's SSE stream and
                 # make the timeline confusing. The parent's step.start /
@@ -582,6 +640,55 @@ async def _maybe_emit(emit: EmitFn | None, event: str, data: str) -> None:
     result = emit(event, data)
     if hasattr(result, "__await__"):
         await result
+
+
+# --- subagent failure policy (step 27) -------------------------------------
+
+
+_VALID_FAILURE_POLICIES = frozenset({"fail", "drop", "retry"})
+
+
+def _normalize_failure_policy(raw: Any) -> str:
+    """Coerce ``step.inputs.on_failure`` to one of the three valid
+    policies. Missing → "fail" (preserves pre-step-27 behaviour).
+    Anything else (typo, model hallucinated a policy) → also "fail"
+    with a warning, so we never silently drop subagent failures."""
+    if raw is None:
+        return "fail"
+    if isinstance(raw, str) and raw in _VALID_FAILURE_POLICIES:
+        return raw
+    log.warning(
+        "agents.executor.unknown_failure_policy",
+        on_failure=str(raw),
+    )
+    return "fail"
+
+
+def _drop_stub(exc: Exception) -> dict[str, Any]:
+    """Output payload returned when ``on_failure="drop"`` swallows a
+    subagent failure. Marked ``dropped=True`` so the parent's
+    synthesis step can distinguish "branch X dropped because Y" from
+    a real subagent answer."""
+    return {
+        "subagent_task_id": None,
+        "answer": None,
+        "score": None,
+        "dropped": True,
+        "error": str(exc),
+    }
+
+
+def _augment_query_with_failure(original: str, exc: Exception) -> str:
+    """Build the query the retry attempt receives. The previous failure
+    goes at the bottom so a Planner that ignores the preamble still
+    sees the original instruction; one that reads it gets a concrete
+    "try something different" cue."""
+    return (
+        f"{original}\n\n"
+        f"## Previous attempt failed\n"
+        f"A prior attempt at this task failed with: {exc}\n"
+        f"Try a different approach — don't repeat the failing strategy."
+    )
 
 
 _agent: ExecutorAgent | None = None

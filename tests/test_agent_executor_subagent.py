@@ -432,6 +432,205 @@ async def test_subagent_concurrency_capped_per_root(monkeypatch, exec_env):
     assert in_flight["max_seen"] == exec_mod.MAX_CONCURRENT_SUBAGENTS_PER_ROOT
 
 
+# --- step 27: structured failure policies --------------------------------
+
+
+async def test_subagent_on_failure_default_fails_step(monkeypatch, exec_env):
+    """No `on_failure` set → step fails when the child task fails
+    (same as pre-step-27 behaviour)."""
+    fake_service = FakeTaskService([
+        _ChildResult(answer="child blew up", status="failed", score=None),
+    ])
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+    fake = FakeAnthropic(replies=[])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="s", kind="subagent", description="x",
+             inputs={"query": "do it"}),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert not execution.success
+    assert "failed" in execution.results[0].error
+    # Exactly one spawn — no retry.
+    assert len(fake_service.calls) == 1
+
+
+async def test_subagent_on_failure_drop_returns_stub_and_completes_step(
+    monkeypatch, exec_env,
+):
+    """`on_failure="drop"` → step completes with a stub output marked
+    dropped=True, the rest of the plan keeps going."""
+    fake_service = FakeTaskService([
+        _ChildResult(answer="branch died", status="failed", score=None),
+    ])
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+    fake = FakeAnthropic(replies=["synthesized despite drop"])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="s", kind="subagent", description="x",
+             inputs={"query": "do it", "on_failure": "drop"}),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert execution.success
+    res = execution.results[0]
+    assert res.status == StepStatus.COMPLETED
+    assert res.output["dropped"] is True
+    assert "branch died" in res.output["error"]
+    assert res.output["answer"] is None
+    # Only one spawn — drop doesn't retry.
+    assert len(fake_service.calls) == 1
+
+
+async def test_subagent_on_failure_drop_keeps_sibling_subagents_succeeding(
+    monkeypatch, exec_env,
+):
+    """Parallel subagents with on_failure=drop: one fails (dropped),
+    the other succeeds. The parent step roster reflects both."""
+    fake_service = FakeTaskService([
+        _ChildResult(answer="A ok", status="completed"),
+        _ChildResult(answer="B failed", status="failed", score=None),
+    ])
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+    fake = FakeAnthropic(replies=["combined output"])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="a", kind="subagent", description="A",
+             inputs={"query": "qa", "on_failure": "drop"},
+             parallel_group=1),
+        Step(id="b", kind="subagent", description="B",
+             inputs={"query": "qb", "on_failure": "drop"},
+             parallel_group=1),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert execution.success
+    a = next(r for r in execution.results if r.step_id == "a")
+    b = next(r for r in execution.results if r.step_id == "b")
+    assert a.status == StepStatus.COMPLETED
+    assert a.output.get("dropped") is not True
+    assert b.status == StepStatus.COMPLETED
+    assert b.output["dropped"] is True
+
+
+async def test_subagent_on_failure_retry_respawns_with_augmented_query(
+    monkeypatch, exec_env,
+):
+    """First attempt fails → retry fires with the failure context
+    appended to the query. The second attempt succeeds."""
+    fake_service = FakeTaskService([
+        _ChildResult(answer="first try crashed", status="failed", score=None),
+        _ChildResult(answer="retry worked", status="completed"),
+    ])
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+    fake = FakeAnthropic(replies=["synth"])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="s", kind="subagent", description="x",
+             inputs={"query": "look up vendor A",
+                     "on_failure": "retry"}),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert execution.success
+    res = execution.results[0]
+    assert res.output["answer"] == "retry worked"
+    # Two spawns: first the original query, then the augmented one.
+    assert len(fake_service.calls) == 2
+    assert fake_service.calls[0]["content"] == "look up vendor A"
+    retry_content = fake_service.calls[1]["content"]
+    assert retry_content.startswith("look up vendor A")
+    assert "Previous attempt failed" in retry_content
+    assert "first try crashed" in retry_content
+
+
+async def test_subagent_on_failure_retry_propagates_when_retry_also_fails(
+    monkeypatch, exec_env,
+):
+    """Retry exhausts after one extra attempt — second failure falls
+    through to the default "fail" semantics and the step fails."""
+    fake_service = FakeTaskService([
+        _ChildResult(answer="first crash", status="failed", score=None),
+        _ChildResult(answer="retry crash", status="failed", score=None),
+    ])
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+    fake = FakeAnthropic(replies=[])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="s", kind="subagent", description="x",
+             inputs={"query": "do it", "on_failure": "retry"}),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert not execution.success
+    # Both spawns happened — exactly one retry, then propagate.
+    assert len(fake_service.calls) == 2
+    err = execution.results[0].error
+    assert "retry crash" in err
+
+
+async def test_subagent_on_failure_normalizes_unknown_policy_to_fail(
+    monkeypatch, exec_env,
+):
+    """A typo or hallucinated policy value falls back to "fail" rather
+    than silently dropping the failure."""
+    fake_service = FakeTaskService([
+        _ChildResult(answer="x", status="failed", score=None),
+    ])
+    monkeypatch.setattr(
+        "wolfpaw.tasks.service.get_task_service", lambda: fake_service,
+    )
+    fake = FakeAnthropic(replies=[])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="s", kind="subagent", description="x",
+             inputs={"query": "do it", "on_failure": "yolo"}),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert not execution.success
+    # No retry — "yolo" normalized to "fail".
+    assert len(fake_service.calls) == 1
+
+
+async def test_subagent_on_failure_drop_doesnt_swallow_input_validation(
+    monkeypatch, exec_env,
+):
+    """The failure policy applies to subagent-task failures, NOT to
+    input validation errors. A missing query still fails the step
+    regardless of `on_failure`."""
+    fake = FakeAnthropic(replies=[])
+    executor = ExecutorAgent(
+        model_client=ModelClient(anthropic=fake), registry=Registry(),
+    )
+    plan = _plan([
+        Step(id="s", kind="subagent", description="x",
+             # `query` missing — should still surface as a real failure
+             # even though on_failure="drop".
+             inputs={"on_failure": "drop"}),
+    ])
+    execution = await executor.execute(ctx=_ctx(), plan=plan)
+    assert not execution.success
+    assert "inputs.query" in execution.results[0].error
+
+
 async def test_subagent_with_trailing_reasoning_step_skips_synthesis(
     monkeypatch, exec_env,
 ):
