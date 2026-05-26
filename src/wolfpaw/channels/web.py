@@ -141,15 +141,36 @@ async def chat(
             yield _sse_event("done", "")
             return
 
-        # 2. Resolve or create the thread. Emit the id so the client can
-        # reuse it on the next turn.
+        # 2. Resolve or create the thread.
+        # If the client supplied a thread_id, honor it (validated against
+        # the user's threads inside get_or_create_thread). If not — a
+        # new device, fresh browser, or a tab that lost its in-memory
+        # threadId — continue the user's most-recent web thread so the
+        # conversation history follows them across devices. `/reset`
+        # mints a new thread server-side, which becomes the "most
+        # recent" pickup point for the next message.
         async with acquire() as conn:
-            thread_id = await conv.get_or_create_thread(
-                conn,
-                user_id=user_id,
-                channel=_web_channel.name,
-                thread_id=payload.thread_id,
-            )
+            if payload.thread_id is not None:
+                thread_id = await conv.get_or_create_thread(
+                    conn,
+                    user_id=user_id,
+                    channel=_web_channel.name,
+                    thread_id=payload.thread_id,
+                )
+            else:
+                existing = await conv.get_most_recent_thread(
+                    conn,
+                    user_id=user_id,
+                    channel=_web_channel.name,
+                )
+                if existing is not None:
+                    thread_id = existing
+                else:
+                    thread_id = await conv.get_or_create_thread(
+                        conn,
+                        user_id=user_id,
+                        channel=_web_channel.name,
+                    )
         yield _sse_event("thread", str(thread_id))
 
         # 3. Run the router in a background task so triage + tool event

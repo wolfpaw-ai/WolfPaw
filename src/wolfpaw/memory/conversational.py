@@ -101,6 +101,30 @@ async def append(
     )
 
 
+async def get_most_recent_thread(
+    conn: asyncpg.Connection,
+    *,
+    user_id: UUID,
+    channel: ChannelName,
+) -> UUID | None:
+    """Return the user's most-recent thread on this channel, or None
+    if they have no thread on this channel yet.
+
+    Used by channels for cross-device thread continuity — when a client
+    opens chat without a stored `thread_id` (new browser, new device,
+    new tab), the channel resolves to the user's last conversation
+    rather than minting a fresh thread every time. `/reset` is the
+    explicit escape hatch — it always mints a new thread, which then
+    becomes "most recent" for the next message.
+    """
+    return await conn.fetchval(
+        "SELECT id FROM threads"
+        " WHERE user_id = $1 AND channel = $2::channel"
+        " ORDER BY created_at DESC LIMIT 1",
+        user_id, channel,
+    )
+
+
 async def fetch_recent(
     conn: asyncpg.Connection, *, thread_id: UUID, n: int = 20
 ) -> list[Message]:

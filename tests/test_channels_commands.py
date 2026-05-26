@@ -89,12 +89,37 @@ async def test_register_rejects_empty_name():
         d.register("/", "empty", h)
 
 
-async def test_reset_on_web_sets_clear_thread_flag():
-    """`/reset` from a web client signals via clear_thread; no DB I/O needed."""
+async def test_reset_on_web_sets_clear_thread_flag(monkeypatch):
+    """`/reset` from a web client signals via clear_thread, AND mints a
+    fresh thread server-side so the most-recent-thread resolver picks
+    up the new empty one on the next message (rather than the previous
+    conversation)."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield None
+
+    minted: list[dict] = []
+
+    async def fake_get_or_create_thread(_conn, **kw):
+        minted.append(kw)
+        return uuid4()
+
+    monkeypatch.setattr("wolfpaw.memory.db.acquire", fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.memory.conversational.get_or_create_thread",
+        fake_get_or_create_thread,
+    )
+
     result = await get_dispatcher().dispatch(_msg("/reset"))
     assert isinstance(result, CommandResult)
     assert result.clear_thread is True
     assert "fresh" in result.text.lower()
+    # Verifies the server-side mint actually happened on the right channel.
+    assert len(minted) == 1
+    assert minted[0]["channel"] == "web"
+    assert minted[0]["thread_id"] is None
 
 
 async def test_help_lists_reset_command():

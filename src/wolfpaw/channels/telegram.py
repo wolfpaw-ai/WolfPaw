@@ -324,12 +324,10 @@ async def _handle_inbound(
 
 async def _resolve_telegram_thread(conn, user_id: UUID) -> UUID:
     """Return the user's most recent Telegram thread, creating one if
-    none exists. v1 doesn't have `/reset` for Telegram — the thread
-    grows until cleared via a future command."""
-    existing = await conn.fetchval(
-        "SELECT id FROM threads WHERE user_id = $1 AND channel = 'telegram'"
-        " ORDER BY created_at DESC LIMIT 1",
-        user_id,
+    none exists. `/reset` mints a new empty thread server-side, which
+    then becomes the "most recent" pickup point for the next message."""
+    existing = await conv.get_most_recent_thread(
+        conn, user_id=user_id, channel="telegram",
     )
     if existing is not None:
         return existing

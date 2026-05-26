@@ -508,12 +508,11 @@ async def _handle_freeform(
 
 
 async def _resolve_slack_thread(conn, user_id: UUID) -> UUID:
-    """Same pattern as Telegram: a single rolling thread per user,
-    extended on each new inbound. `/reset` mints a new one."""
-    existing = await conn.fetchval(
-        "SELECT id FROM threads WHERE user_id = $1 AND channel = 'slack'"
-        " ORDER BY created_at DESC LIMIT 1",
-        user_id,
+    """Same pattern as Telegram + web: a single rolling thread per user,
+    extended on each new inbound. `/reset` mints a new one which then
+    becomes the "most recent" pickup point."""
+    existing = await conv.get_most_recent_thread(
+        conn, user_id=user_id, channel="slack",
     )
     if existing is not None:
         return existing

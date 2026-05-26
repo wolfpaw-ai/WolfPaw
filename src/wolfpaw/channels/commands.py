@@ -113,29 +113,30 @@ async def _help(message: InboundMessage, args: str) -> CommandResult:
 async def _reset(message: InboundMessage, args: str) -> CommandResult:
     """Reset the user's current conversation thread.
 
-    Web (and any client-driven channel) signals via `clear_thread=True`
-    so the client forgets its thread_id; the next message creates a
-    fresh thread on the server. Telegram has no client-side thread
-    state — the channel always resolves the user's most-recent thread —
-    so we mint an empty new thread now and the resolver will pick it
-    up for the next message.
+    Always mints a new empty thread server-side. Channels resolve the
+    user's *most-recent* thread when the client doesn't supply one, so
+    just clearing the client-side thread_id isn't enough — without this
+    server-side mint, the next message would land back in the previous
+    thread. Also signals `clear_thread=True` for channels with
+    client-side thread state (web SSE) so the React app drops its
+    stored id and picks up the new thread on the next turn.
     """
-    if message.channel_name == "telegram":
-        # Lazy import — avoids loading the DB layer at command-registration
-        # time (which happens at import).
-        from wolfpaw.memory import conversational as conv
-        from wolfpaw.memory.db import acquire
+    # Lazy imports — avoids loading the DB layer at command-registration
+    # time (which happens at import).
+    from wolfpaw.memory import conversational as conv
+    from wolfpaw.memory.db import acquire
 
-        try:
-            async with acquire() as conn:
-                await conv.get_or_create_thread(
-                    conn, user_id=message.user_id, channel="telegram",
-                    thread_id=None,
-                )
-        except Exception:  # noqa: BLE001
-            return CommandResult(
-                text="Couldn't reset the thread right now. Try again in a moment.",
+    try:
+        async with acquire() as conn:
+            await conv.get_or_create_thread(
+                conn, user_id=message.user_id,
+                channel=message.channel_name,  # type: ignore[arg-type]
+                thread_id=None,
             )
+    except Exception:  # noqa: BLE001
+        return CommandResult(
+            text="Couldn't reset the thread right now. Try again in a moment.",
+        )
     return CommandResult(
         text="Thread reset. Your next message starts a fresh conversation.",
         clear_thread=True,

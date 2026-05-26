@@ -84,11 +84,20 @@ def test_chat_unknown_command_does_not_fall_through():
 
 def _stub_router_and_thread(
     monkeypatch, *, canned_reply: str, events_to_emit=(),
+    existing_thread_id: UUID | None = None,
 ):
     """Patch the web channel's router + thread resolution so plain-message
-    tests run without Postgres or Anthropic. Returns the (fake) thread_id
-    the endpoint will emit."""
-    thread_id = uuid4()
+    tests run without Postgres or Anthropic.
+
+    `existing_thread_id`:
+      - None (default) → simulate a fresh user; `get_most_recent_thread`
+        returns None, so the endpoint mints via `get_or_create_thread`
+        and the returned thread_id is what the test asserts on.
+      - UUID → simulate "this user already has a thread on web"; the
+        endpoint resolves to it without minting.
+    """
+    minted_thread_id = uuid4()
+    effective_thread_id = existing_thread_id or minted_thread_id
 
     class FakeRouter:
         async def handle(self, *, ctx, thread_id, content, emit=None):
@@ -101,10 +110,14 @@ def _stub_router_and_thread(
     monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
     monkeypatch.setattr(
-        "wolfpaw.channels.web.conv.get_or_create_thread",
-        lambda _conn, **_kw: _async_return(thread_id),
+        "wolfpaw.channels.web.conv.get_most_recent_thread",
+        lambda _conn, **_kw: _async_return(existing_thread_id),
     )
-    return thread_id
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_or_create_thread",
+        lambda _conn, **_kw: _async_return(minted_thread_id),
+    )
+    return effective_thread_id
 
 
 async def _async_return(value):
@@ -155,6 +168,65 @@ def test_chat_plain_message_no_tools_still_streams_delta(monkeypatch):
     assert next(d for e, d in events if e == "delta") == "hello back"
 
 
+def test_chat_without_thread_id_picks_up_most_recent_thread(monkeypatch):
+    """Cross-device continuity: a request that doesn't supply a thread_id
+    (new browser, new tab, different device) resolves to the user's
+    most-recent web thread rather than minting a fresh one. The thread
+    event emits the existing id."""
+    existing = uuid4()
+    _stub_router_and_thread(
+        monkeypatch, canned_reply="picked up where we left off",
+        existing_thread_id=existing,
+    )
+    client = _client()
+    r = client.post("/channels/web/chat", json={"content": "what was that?"})
+    events = _parse_events(r.text)
+    thread_payload = next(d for e, d in events if e == "thread")
+    assert thread_payload == str(existing)
+
+
+def test_chat_with_explicit_thread_id_honors_it(monkeypatch):
+    """When the client DOES supply a thread_id, the endpoint honors it
+    (no most-recent fallback) — get_most_recent_thread is never
+    consulted for the explicit case."""
+    explicit = uuid4()
+    called: dict[str, int] = {"most_recent": 0, "get_or_create": 0}
+
+    async def fake_most_recent(_conn, **_kw):
+        called["most_recent"] += 1
+        return None
+
+    async def fake_get_or_create(_conn, **kw):
+        called["get_or_create"] += 1
+        return kw["thread_id"]      # echo back so the assertion holds
+
+    class FakeRouter:
+        async def handle(self, **_kwargs):
+            return "ok"
+
+    monkeypatch.setattr("wolfpaw.channels.web.get_router", lambda: FakeRouter())
+    monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_most_recent_thread", fake_most_recent,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_or_create_thread", fake_get_or_create,
+    )
+
+    client = _client()
+    r = client.post(
+        "/channels/web/chat",
+        json={"content": "hi", "thread_id": str(explicit)},
+    )
+    events = _parse_events(r.text)
+    thread_payload = next(d for e, d in events if e == "thread")
+    assert thread_payload == str(explicit)
+    # most-recent must NOT be consulted when the client provided one.
+    assert called["most_recent"] == 0
+    assert called["get_or_create"] == 1
+
+
 def test_chat_agent_exception_surfaces_as_error_event(monkeypatch):
     class BoomRouter:
         async def handle(self, **_kwargs):
@@ -164,6 +236,10 @@ def test_chat_agent_exception_surfaces_as_error_event(monkeypatch):
     monkeypatch.setattr("wolfpaw.channels.web.get_router", lambda: BoomRouter())
     monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_most_recent_thread",
+        lambda _conn, **_kw: _async_return(None),
+    )
     monkeypatch.setattr(
         "wolfpaw.channels.web.conv.get_or_create_thread",
         lambda _conn, **_kw: _async_return(thread_id),
@@ -187,9 +263,20 @@ def test_help_lists_usage_command():
     assert "/usage" in r.text
 
 
-def test_chat_reset_emits_reset_event_before_command():
+def test_chat_reset_emits_reset_event_before_command(monkeypatch):
     """`/reset` from web should emit a `reset` SSE event so the client
-    drops its thread_id, followed by the usual command + done events."""
+    drops its thread_id, followed by the usual command + done events.
+
+    `/reset` now also mints a fresh thread server-side (because channels
+    resolve to the user's most-recent thread when no thread_id is
+    supplied — without the server-side mint, the next message would
+    land back in the previous thread). Stub the DAO call out."""
+    monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.memory.conversational.get_or_create_thread",
+        lambda _conn, **_kw: _async_return(uuid4()),
+    )
+
     client = _client()
     r = client.post("/channels/web/chat", json={"content": "/reset"})
     assert r.status_code == 200
