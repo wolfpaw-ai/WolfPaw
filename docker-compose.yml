@@ -1,9 +1,12 @@
 # Wolfpaw — self-host docker compose.
 #
-# Brings up four services:
+# Brings up six services:
 #   db      : Postgres 16 + pgvector
+#   redis   : Redis 7 (arq queue + ephemeral state)
 #   migrate : one-shot, applies schema_migrations idempotently
 #   app     : FastAPI backend on :8000 (inside the network)
+#   worker  : arq worker — runs background jobs enqueued by `app`
+#             (thread compaction, message embedding, Tasks, channel dispatch)
 #   web     : nginx serving the React build, proxying API paths to `app`,
 #             published on :3000 of the host (override via WOLFPAW_WEB_PORT)
 #
@@ -33,6 +36,18 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - wolfpaw_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   migrate:
     build: .
     image: wolfpaw-app:local
@@ -52,11 +67,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     env_file: .env
     environment:
       WOLFPAW_DATABASE_URL: postgresql://wolfpaw:${WOLFPAW_DB_PASSWORD:-wolfpaw}@db:5432/wolfpaw
+      WOLFPAW_REDIS_URL: redis://redis:6379/0
+      # Compose mode turns on the workers queue by default — the worker
+      # service below picks up the jobs the app enqueues. Override to
+      # "false" in .env to run single-process (e.g. for debugging).
+      WOLFPAW_WORKERS_ENABLED: ${WOLFPAW_WORKERS_ENABLED:-true}
       # The browser talks to nginx on host:3000; the verify-link email URL
       # should match. Operators override WOLFPAW_WEB_BASE_URL in .env when
       # they put the app behind a real domain.
@@ -68,6 +90,27 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+
+  worker:
+    build: .
+    image: wolfpaw-app:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      WOLFPAW_DATABASE_URL: postgresql://wolfpaw:${WOLFPAW_DB_PASSWORD:-wolfpaw}@db:5432/wolfpaw
+      WOLFPAW_REDIS_URL: redis://redis:6379/0
+      WOLFPAW_WORKERS_ENABLED: ${WOLFPAW_WORKERS_ENABLED:-true}
+      WOLFPAW_WEB_BASE_URL: ${WOLFPAW_WEB_BASE_URL:-http://localhost:3000}
+    volumes:
+      - wolfpaw_workspace:/workspace
+    command: ["arq", "wolfpaw.workers.arq_app.WorkerSettings"]
 
   web:
     build: ./web
@@ -81,4 +124,5 @@ services:
 
 volumes:
   wolfpaw_db:
+  wolfpaw_redis:
   wolfpaw_workspace:

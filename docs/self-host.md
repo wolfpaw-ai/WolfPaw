@@ -32,12 +32,17 @@ docker compose logs -f app
 | Service   | Image                            | Purpose                                         |
 |-----------|----------------------------------|-------------------------------------------------|
 | `db`      | `pgvector/pgvector:pg16`         | Postgres + pgvector. Data on the `wolfpaw_db` volume. |
+| `redis`   | `redis:7-alpine`                 | Backs the arq queue. Data on the `wolfpaw_redis` volume (appendonly). |
 | `migrate` | `wolfpaw-app:local` (one-shot)   | Applies `migrations/*.sql` idempotently. Records what's been applied in `schema_migrations`. |
 | `app`     | `wolfpaw-app:local`              | FastAPI backend on :8000. Workspace files on the `wolfpaw_workspace` volume. |
+| `worker`  | `wolfpaw-app:local`              | arq worker. Runs background jobs (thread compaction, message embedding, queued Tasks, Telegram + Slack dispatch). Same image as `app`. |
 | `web`     | `wolfpaw-web:local` (nginx)      | Serves the React build + proxies API paths to `app`. Published on host :3000. |
 
-Redis isn't included — Wolfpaw's arq worker (true async tasks) is
-deferred from step 15. Add a redis service to compose when arq lands.
+The workers queue gates on `WOLFPAW_WORKERS_ENABLED` (compose sets it
+to `true`). With it off, the app falls back to in-process
+`asyncio.create_task` for the same jobs — fine for local debugging
+without Redis. Web SSE always runs in-process either way; the worker
+is for the work that *isn't* tied to a streaming HTTP response.
 
 ## Required env vars
 

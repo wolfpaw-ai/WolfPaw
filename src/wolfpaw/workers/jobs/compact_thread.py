@@ -278,6 +278,28 @@ async def _drain_l2(
         )
 
 
+# --- arq job wrapper -------------------------------------------------------
+
+
+async def compact_thread_job(_ctx: dict, thread_id_str: str) -> None:
+    """arq-shaped wrapper around :func:`compact_thread`. arq passes the
+    job context dict as the first positional argument and serializes
+    UUIDs as strings on the wire."""
+    await compact_thread(UUID(thread_id_str))
+
+
+async def embed_message_job(
+    _ctx: dict, _thread_id_str: str, message_id_str: str, content: str,
+) -> None:
+    """arq-shaped wrapper around
+    :func:`wolfpaw.memory.conversational.embed_and_store`. The
+    ``thread_id`` is included on the wire for log + dashboard
+    correlation but isn't used by the embedder itself."""
+    from wolfpaw.memory.conversational import embed_and_store
+
+    await embed_and_store(UUID(message_id_str), content)
+
+
 # --- production summarizer -------------------------------------------------
 
 

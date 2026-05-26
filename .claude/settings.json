@@ -3,7 +3,8 @@
     "allow": [
       "Bash(.venv/bin/python -c ' *)",
       "Bash(.venv/bin/python -m pytest tests/test_tasks_routes_db.py tests/test_usage_routes.py)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(python -m pytest tests/ --deselect tests/test_tool_artifacts_e2e.py::test_create_pdf_emits_valid_pdf -q)"
     ]
   }
 }

@@ -16,10 +16,12 @@ Three tiers, all per-thread in v1:
   a top-k cosine lookup over that index alongside the verbatim window
   to surface relevant older context past the recent-window cap.
 
-Embedding-on-append + compaction-trigger run as fire-and-forget
-``asyncio.create_task`` follow-ups so a Voyage hiccup or a Haiku
-summarization call can never block the chat response path. When arq
-lands in step 23 those background calls move onto the worker.
+Embedding-on-append + compaction-trigger run as deferred jobs via
+:mod:`wolfpaw.workers.queue` so a Voyage hiccup or a Haiku
+summarization call never blocks the chat response path. The queue
+abstraction picks between arq (when ``WOLFPAW_WORKERS_ENABLED=true``,
+durable across process restart) and an in-process
+``asyncio.create_task`` fallback (the single-process dev default).
 
 Persistence policy: we store visible user turns and final assistant
 responses only. Intermediate tool-call / tool-result blocks live
@@ -30,7 +32,6 @@ next turn.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -74,7 +75,6 @@ class ThreadSummary:
 # and off in unit tests that exercise the DAO directly. Tests opt in via
 # `enable_post_append_for_test()` when they want the full flow.
 _post_append_enabled = True
-_background_tasks: set[asyncio.Task] = set()
 
 
 def disable_post_append_for_test() -> None:
@@ -147,15 +147,19 @@ async def append(
     content: str,
     metadata: dict[str, Any] | None = None,
 ) -> UUID:
-    """Insert one row into `messages` and (best-effort, fire-and-forget)
-    schedule the post-append follow-ups: embed the content for vector
-    recall, then check whether the thread needs compaction.
+    """Insert one row into `messages` and (best-effort) defer the
+    post-append follow-ups onto the workers queue: embed the content
+    for vector recall, then check whether the thread needs compaction.
 
-    The follow-ups run as ``asyncio.create_task`` so a Voyage hiccup or
-    a Haiku summarization call can never block the chat response path.
-    They are suppressed entirely for tool / system rows (which carry
-    structural payloads, not natural language to embed) and for empty
-    content.
+    The follow-ups go through :mod:`wolfpaw.workers.queue`. With
+    ``WOLFPAW_WORKERS_ENABLED=true`` they run on the arq worker (so a
+    Voyage hiccup or a Haiku summarization call never blocks the chat
+    response path AND the work survives an app restart). With workers
+    off they fall back to ``asyncio.create_task`` inside the caller's
+    event loop — same liveness contract, no Redis required.
+
+    Both follow-ups are suppressed for tool / system rows (structural
+    payloads, not natural language to embed) and for empty content.
     """
     message_id = await conn.fetchval(
         "INSERT INTO messages (thread_id, role, content, metadata)"
@@ -171,15 +175,19 @@ async def append(
         return message_id
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # Called from sync context — no event loop to schedule onto.
-        return message_id
+        from wolfpaw.workers.queue import (
+            enqueue_compact_thread,
+            enqueue_embed_message,
+        )
 
-    task = loop.create_task(_post_append_work(thread_id, message_id, content))
-    # Keep a strong reference so the task isn't GC'd mid-flight.
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+        await enqueue_embed_message(thread_id, message_id, content)
+        await enqueue_compact_thread(thread_id)
+    except Exception:  # noqa: BLE001 — best-effort; never block the write
+        log.warning(
+            "conv.append.post_enqueue_failed",
+            thread_id=str(thread_id), message_id=str(message_id),
+            exc_info=True,
+        )
     return message_id
 
 
@@ -294,35 +302,22 @@ async def search_relevant(
 
 
 # --- post-append follow-ups -------------------------------------------------
+#
+# `append` delegates these to wolfpaw.workers.queue, which runs them on
+# arq when WOLFPAW_WORKERS_ENABLED=true and inline via asyncio.create_task
+# otherwise. The two helpers below are the actual unit-of-work; the
+# queue layer wraps them.
 
 
-async def _post_append_work(
-    thread_id: UUID, message_id: UUID, content: str
-) -> None:
-    """Best-effort: embed the new message, then check if the thread
-    crossed a compaction threshold. Both halves are independently
-    isolated — a Voyage failure must not block compaction, and vice
-    versa."""
-    try:
-        await _embed_and_store(message_id, content)
-    except Exception:  # noqa: BLE001
-        log.warning(
-            "conv.post_append.embed_failed",
-            message_id=str(message_id), exc_info=True,
-        )
-    try:
-        await _trigger_compaction(thread_id)
-    except Exception:  # noqa: BLE001
-        log.warning(
-            "conv.post_append.compact_failed",
-            thread_id=str(thread_id), exc_info=True,
-        )
-
-
-async def _embed_and_store(message_id: UUID, content: str) -> None:
+async def embed_and_store(message_id: UUID, content: str) -> None:
     """Compute the Voyage embedding for ``content`` and insert it into
     ``message_embeddings``. Idempotent: if the message already has an
-    embedding row (the worker also re-embeds on backfill), we skip."""
+    embedding row (the worker also re-embeds on backfill), we skip.
+
+    Called by :mod:`wolfpaw.workers.queue` (and indirectly by
+    :func:`append` through the queue layer) — not invoked directly from
+    `append` so the queue layer can route execution to arq or to the
+    inline fallback depending on ``WOLFPAW_WORKERS_ENABLED``."""
     from wolfpaw.embeddings import get_embedder
     from wolfpaw.memory.db import acquire
     from wolfpaw.metering.recorder import record_usage
@@ -373,15 +368,6 @@ def _voyage_cents(input_tokens: int) -> int:
     from math import ceil
 
     return max(0, ceil((input_tokens * _VOYAGE_MICROCENTS_PER_MTOK) / 1_000_000))
-
-
-async def _trigger_compaction(thread_id: UUID) -> None:
-    """Lazy-import + invoke the compactor. Imported lazily so a missing
-    Anthropic key in a unit-test environment doesn't break ``append``
-    callers — the worker handles model-call failure internally."""
-    from wolfpaw.workers.jobs.compact_thread import compact_thread
-
-    await compact_thread(thread_id)
 
 
 # --- prompt-context block formatters --------------------------------------

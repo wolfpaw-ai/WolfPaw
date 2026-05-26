@@ -157,3 +157,102 @@ async def test_task_path_propagates_emit_callback():
     assert "triage" in kinds
     # FakeTaskService emits a "task" event when given an emit callback.
     assert "task" in kinds
+
+
+# --- workers-enabled path (step 23) ---------------------------------------
+
+
+class _DeferredFakeTaskService:
+    """Workers-on flow drives only `create()` from the Router; the
+    actual `run` happens on the arq worker. This fake records the
+    create call and produces a Task row stub."""
+
+    def __init__(self) -> None:
+        self.create_calls: list[dict] = []
+        self.run_calls: list = []
+
+    async def create(self, **kw):
+        self.create_calls.append(kw)
+        return Task(
+            id=uuid4(), user_id=kw["user_id"], parent_task_id=None,
+            title=kw["title"], description=kw.get("description"),
+            status="pending", current_plan_id=None, budget_cents=None,
+            spent_cents=0, blocking_reason=None,
+            channel_for_completion=kw.get("channel_for_completion"),
+            schedule_pattern=None, created_at=datetime.now(timezone.utc),
+            started_at=None, completed_at=None, last_active_at=None,
+        )
+
+    async def run(self, task_id):
+        # Should NOT be called from the Router when workers are on —
+        # the arq worker owns this path. Record so we can assert.
+        self.run_calls.append(task_id)
+
+
+async def test_workers_on_uses_create_plus_enqueue(monkeypatch, _stub_persistence):
+    """With WOLFPAW_WORKERS_ENABLED=true, the Router calls
+    task_service.create() (not create_and_run) and enqueues the run,
+    then returns an acknowledgment message. The arq worker handles
+    the actual run."""
+    from wolfpaw.config import get_settings
+
+    monkeypatch.setenv("WOLFPAW_WORKERS_ENABLED", "true")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    enqueued: list = []
+
+    async def fake_enqueue_run_task(task_id):
+        enqueued.append(task_id)
+
+    monkeypatch.setattr(
+        "wolfpaw.workers.queue.enqueue_run_task", fake_enqueue_run_task,
+    )
+
+    svc = _DeferredFakeTaskService()
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="task", complexity="moderate", reasoning="r"),
+        ),
+        task_service=svc,  # type: ignore[arg-type]
+    )
+    text = await router.handle(
+        ctx=_ctx(), thread_id=uuid4(), content="monitor X long-term",
+    )
+    assert len(svc.create_calls) == 1
+    assert svc.run_calls == []  # run does NOT happen in the router
+    assert len(enqueued) == 1
+    # The user sees an ack pointing at the new task id.
+    assert "Started Task" in text
+    assert str(enqueued[0]) in text
+
+
+async def test_workers_off_uses_create_and_run_inline(monkeypatch, _stub_persistence):
+    """Default (workers off): the Router uses create_and_run as before
+    and never touches the queue."""
+    from wolfpaw.config import get_settings
+
+    monkeypatch.setenv("WOLFPAW_WORKERS_ENABLED", "false")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    enqueued: list = []
+
+    async def fake_enqueue_run_task(task_id):
+        enqueued.append(task_id)
+
+    monkeypatch.setattr(
+        "wolfpaw.workers.queue.enqueue_run_task", fake_enqueue_run_task,
+    )
+
+    svc = FakeTaskService(final_answer="done")
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="task", complexity="moderate", reasoning="r"),
+        ),
+        task_service=svc,
+    )
+    text = await router.handle(
+        ctx=_ctx(), thread_id=uuid4(), content="short task",
+    )
+    assert text == "done"
+    assert len(svc.calls) == 1
+    assert enqueued == []

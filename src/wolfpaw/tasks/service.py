@@ -1,19 +1,29 @@
 """TaskService — task lifecycle façade.
 
-Orchestrates the synchronous task path: create a task, plan, execute,
-score, transition state, emit task_events. Wraps the existing Planner →
-Executor → Post-Evaluator chain so the Router can call `create_and_run`
-once on a task verdict.
+Orchestrates the planner → executor → post-eval pipeline behind the task
+status machine. Each state transition writes a `task_events` row of
+type ``status.<new>``; the DAO's idempotency on terminal states means a
+double terminal transition (cancelled mid-flight, retried etc.) is safe.
 
-State transitions are the source of truth — every transition writes a
-`task_events` row of type `status.<new>` with the prior status carried
-in `content`. The DAO's idempotency on terminal states means a double
-`mark_completed` is safe.
+Three public entry points:
 
-When the arq worker lands (follow-up), it'll call `run(task_id)` on a
-task already in `pending` rather than `create_and_run`. The same
-sequence applies; the worker just picks up the queued task instead of
-the Router executing it inline.
+- :meth:`TaskService.create_and_run` — synchronous end-to-end (the v1
+  default). Used by subagent execution because the parent's plan
+  cannot continue until the child returns.
+- :meth:`TaskService.create` — creates the row in ``pending`` and emits
+  the ``status.pending`` event, then returns immediately. The Router
+  uses this in the v2 flow when workers are enabled, paired with
+  :func:`wolfpaw.workers.queue.enqueue_run_task` so the long-running
+  pipeline runs on the arq worker rather than blocking the channel.
+- :meth:`TaskService.run` — picks up an existing task by id and drives
+  it to a terminal state. Invoked by the arq worker's ``run_task_job``;
+  also reachable inline via the queue's fallback when workers are off.
+
+The state machine is the source of truth — ``run`` is safe to call
+against any task that's still in ``pending`` (it transitions to
+``running`` first) and idempotent against tasks that have already
+completed/failed/cancelled (the transition helpers no-op on terminal
+states).
 """
 
 from __future__ import annotations
@@ -79,7 +89,9 @@ class TaskService:
     def registry(self) -> AskUserRegistry:
         return self._registry or get_registry()
 
-    async def create_and_run(
+    # --- public entry points -------------------------------------------------
+
+    async def create(
         self,
         *,
         user_id: UUID,
@@ -89,18 +101,16 @@ class TaskService:
         description: str | None = None,
         channel_for_completion: str | None = None,
         complexity_hint: str = "moderate",
-        emit: EmitFn | None = None,
         parent_task_id: UUID | None = None,
         budget_cents: int | None = None,
-    ) -> TaskOutcome:
-        """Create a Task, plan + execute + score, transition through
-        states. Runs synchronously in the calling process.
+    ) -> tasks_dao.Task:
+        """Insert the task row in `pending`, stamp a ``status.pending``
+        event with the inputs the worker will need (content, thread_id,
+        complexity_hint live in the event's `content` JSONB so the run
+        side can recover them without a separate side-table).
 
-        `parent_task_id` set → this is a sub-task spawned by a parent's
-        subagent step (step 16). Budget is informational for now;
-        spent_cents rollup against `budget_cents` is a future enforcement
-        hook."""
-        # 1. Create the task row in `pending`.
+        Returns the new Task; does NOT start the pipeline. Pair with
+        :meth:`run` (inline or via the workers queue)."""
         async with acquire() as conn:
             task = await tasks_dao.create(
                 conn,
@@ -117,18 +127,135 @@ class TaskService:
                 event_type="status.pending",
                 content={
                     "title": task.title,
+                    "content": content,
+                    "thread_id": str(thread_id) if thread_id else None,
+                    "complexity_hint": complexity_hint,
                     **({"parent_task_id": str(parent_task_id)}
                        if parent_task_id else {}),
                 },
             )
+        return task
+
+    async def run(
+        self,
+        task_id: UUID,
+        *,
+        emit: EmitFn | None = None,
+    ) -> TaskOutcome:
+        """Drive a pending Task to a terminal state.
+
+        Loads the input parameters from the ``status.pending`` event
+        (the create() path stamped them there), invokes the planner →
+        executor → post-eval pipeline, then transitions to completed /
+        failed depending on the executor's outcome.
+
+        Safe to call on tasks already in a terminal state — the
+        transition helpers in the DAO are idempotent.
+
+        ``emit`` is honored when run inline (subagent path, dev
+        fallback) but generally unused on the arq worker — the worker
+        process has no SSE stream to push to.
+        """
+        # Reload + hydrate the run inputs from the pending-event.
+        async with acquire() as conn:
+            task = await conn.fetchrow(
+                "SELECT id, user_id FROM tasks WHERE id = $1", task_id,
+            )
+            if task is None:
+                raise ValueError(f"Task {task_id} not found")
+            user_id: UUID = task["user_id"]
+
+            event_row = await conn.fetchrow(
+                "SELECT content FROM task_events"
+                " WHERE task_id = $1 AND event_type = 'status.pending'"
+                " ORDER BY created_at ASC LIMIT 1",
+                task_id,
+            )
+        if event_row is None:
+            raise ValueError(
+                f"Task {task_id} has no status.pending event;"
+                " cannot recover run inputs"
+            )
+        ev = dict(event_row["content"] or {})
+        content = ev.get("content") or ""
+        thread_id_raw = ev.get("thread_id")
+        thread_id = UUID(thread_id_raw) if thread_id_raw else None
+        complexity_hint = ev.get("complexity_hint") or "moderate"
+
+        return await self._run_inner(
+            user_id=user_id,
+            task_id=task_id,
+            thread_id=thread_id,
+            content=content,
+            complexity_hint=complexity_hint,
+            emit=emit,
+        )
+
+    async def create_and_run(
+        self,
+        *,
+        user_id: UUID,
+        thread_id: UUID | None,
+        content: str,
+        title: str,
+        description: str | None = None,
+        channel_for_completion: str | None = None,
+        complexity_hint: str = "moderate",
+        emit: EmitFn | None = None,
+        parent_task_id: UUID | None = None,
+        budget_cents: int | None = None,
+    ) -> TaskOutcome:
+        """Create + immediately run, in the same process. The Router
+        uses this when workers are disabled; subagents (step 16) use it
+        unconditionally because the parent agent waits for the child's
+        output.
+
+        ``parent_task_id`` set → this is a sub-task spawned by a
+        parent's subagent step. Budget is informational for now;
+        ``spent_cents`` rollup against ``budget_cents`` is a future
+        enforcement hook."""
+        task = await self.create(
+            user_id=user_id,
+            thread_id=thread_id,
+            content=content,
+            title=title,
+            description=description,
+            channel_for_completion=channel_for_completion,
+            complexity_hint=complexity_hint,
+            parent_task_id=parent_task_id,
+            budget_cents=budget_cents,
+        )
         await _maybe_emit(emit, "task", str(task.id))
-        ctx = ToolContext(user_id=user_id, task_id=task.id)
+        return await self._run_inner(
+            user_id=user_id,
+            task_id=task.id,
+            thread_id=thread_id,
+            content=content,
+            complexity_hint=complexity_hint,
+            emit=emit,
+        )
 
-        # 2. Transition to running.
-        await self._transition(task.id, "status.running", lambda c:
-                               tasks_dao.mark_started(c, task_id=task.id))
+    # --- internal pipeline ---------------------------------------------------
 
-        # 3. Plan. Subagents have no thread context — the Planner skips
+    async def _run_inner(
+        self,
+        *,
+        user_id: UUID,
+        task_id: UUID,
+        thread_id: UUID | None,
+        content: str,
+        complexity_hint: str,
+        emit: EmitFn | None,
+    ) -> TaskOutcome:
+        ctx = ToolContext(user_id=user_id, task_id=task_id)
+
+        # Transition to running.
+        await self._transition(
+            task_id, "status.running",
+            lambda c: tasks_dao.mark_started(c, task_id=task_id),
+        )
+
+        # Plan. Subagents have no thread context — the Planner skips
         # fetch_recent when thread_id is None (added in step 16).
         try:
             plan, _plan_ctx = await self.planner.plan(
@@ -138,32 +265,32 @@ class TaskService:
             if plan.id is not None:
                 async with acquire() as conn:
                     await tasks_dao.attach_plan(
-                        conn, task_id=task.id, plan_id=plan.id,
+                        conn, task_id=task_id, plan_id=plan.id,
                     )
         except Exception as e:  # noqa: BLE001
-            log.exception("tasks.service.plan_failed", task_id=str(task.id))
-            await self._fail(task.id, f"planner failed: {e}")
+            log.exception("tasks.service.plan_failed", task_id=str(task_id))
+            await self._fail(task_id, f"planner failed: {e}")
             return TaskOutcome(
-                task=await self._reload(task.id, user_id) or task,
+                task=await self._reload_required(task_id, user_id),
                 plan=None, execution=None, verdict=None,
                 final_answer=f"I couldn't plan that: {e}",
             )
 
-        # 4. Execute.
+        # Execute.
         try:
             execution = await self.executor.execute(
                 ctx=ctx, plan=plan, emit=emit,
             )
         except Exception as e:  # noqa: BLE001
-            log.exception("tasks.service.execute_crashed", task_id=str(task.id))
-            await self._fail(task.id, f"executor crashed: {e}")
+            log.exception("tasks.service.execute_crashed", task_id=str(task_id))
+            await self._fail(task_id, f"executor crashed: {e}")
             return TaskOutcome(
-                task=await self._reload(task.id, user_id) or task,
+                task=await self._reload_required(task_id, user_id),
                 plan=plan, execution=None, verdict=None,
                 final_answer=f"The plan failed: {e}",
             )
 
-        # 5. Score (best-effort).
+        # Score (best-effort).
         verdict: PostEvalVerdict | None = None
         try:
             verdict = await self.post_evaluator.evaluate(
@@ -178,7 +305,7 @@ class TaskService:
                         conn, plan_id=plan.id, score=verdict.score,
                     )
                     await task_events.append_event(
-                        conn, task_id=task.id, event_type="plan_scored",
+                        conn, task_id=task_id, event_type="plan_scored",
                         content={
                             "plan_id": str(plan.id),
                             **verdict.to_jsonb(),
@@ -187,35 +314,33 @@ class TaskService:
         except Exception:  # noqa: BLE001
             log.warning("tasks.service.scoring_failed", exc_info=True)
 
-        # 6. Terminal status — completed if execution.success else failed.
+        # Terminal status.
         if execution.success:
             await self._transition(
-                task.id, "status.completed",
-                lambda c: tasks_dao.mark_completed(c, task_id=task.id),
+                task_id, "status.completed",
+                lambda c: tasks_dao.mark_completed(c, task_id=task_id),
             )
         else:
             await self._transition(
-                task.id, "status.failed",
+                task_id, "status.failed",
                 lambda c: tasks_dao.mark_failed(
-                    c, task_id=task.id,
+                    c, task_id=task_id,
                     reason=execution.error or "execution failed",
                 ),
                 extra_content={"error": execution.error},
             )
 
-        # 7. Authoritative cost roll-up. Done after the terminal transition
-        # so the reload below picks it up. Best-effort — a missing roll-up
-        # row leaves spent_cents at 0 (the default) rather than blocking
-        # the task return.
+        # Authoritative cost roll-up. Done after the terminal transition
+        # so the reload below picks it up.
         try:
             async with acquire() as conn:
-                await tasks_dao.rollup_spent_cents(conn, task_id=task.id)
+                await tasks_dao.rollup_spent_cents(conn, task_id=task_id)
         except Exception:  # noqa: BLE001
-            log.warning("tasks.service.rollup_failed", task_id=str(task.id),
+            log.warning("tasks.service.rollup_failed", task_id=str(task_id),
                         exc_info=True)
 
         return TaskOutcome(
-            task=await self._reload(task.id, user_id) or task,
+            task=await self._reload_required(task_id, user_id),
             plan=plan, execution=execution, verdict=verdict,
             final_answer=execution.final_answer,
         )
@@ -263,6 +388,15 @@ class TaskService:
     async def _reload(self, task_id: UUID, user_id: UUID) -> tasks_dao.Task | None:
         async with acquire() as conn:
             return await tasks_dao.get_by_id(conn, user_id=user_id, task_id=task_id)
+
+    async def _reload_required(self, task_id: UUID, user_id: UUID) -> tasks_dao.Task:
+        task = await self._reload(task_id, user_id)
+        if task is None:
+            # The row was deleted between our user_id resolution and
+            # this reload — vanishingly unlikely in practice (ON DELETE
+            # CASCADE from users wouldn't fire mid-task).
+            raise ValueError(f"Task {task_id} disappeared during run")
+        return task
 
 
 async def _maybe_emit(emit: EmitFn | None, event: str, data: str) -> None:

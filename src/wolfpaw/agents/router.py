@@ -155,6 +155,38 @@ class Router:
         complexity_hint: str,
         emit: EmitFn | None,
     ) -> str:
+        """Long-running work path.
+
+        With ``WOLFPAW_WORKERS_ENABLED=true`` we create the task row,
+        enqueue ``run_task`` onto arq, and return an acknowledgement
+        immediately — the user follows up via ``/task <id>`` or gets a
+        proactive push when the work finishes (step 37 wires that).
+        With workers off, the task runs inline so a single-process dev
+        gets the synthesized answer in the same response (the v1
+        behaviour).
+        """
+        from wolfpaw.config import get_settings
+
+        settings = get_settings()
+        if settings.workers_enabled:
+            return await self._handle_task_deferred(
+                ctx=ctx, thread_id=thread_id, content=content,
+                complexity_hint=complexity_hint, emit=emit,
+            )
+        return await self._handle_task_inline(
+            ctx=ctx, thread_id=thread_id, content=content,
+            complexity_hint=complexity_hint, emit=emit,
+        )
+
+    async def _handle_task_inline(
+        self,
+        *,
+        ctx: ToolContext,
+        thread_id: UUID,
+        content: str,
+        complexity_hint: str,
+        emit: EmitFn | None,
+    ) -> str:
         outcome = await self.task_service.create_and_run(
             user_id=ctx.user_id,
             thread_id=thread_id,
@@ -177,6 +209,46 @@ class Router:
         except Exception:  # noqa: BLE001
             log.warning("router.task_persist_failed", exc_info=True)
         return outcome.final_answer
+
+    async def _handle_task_deferred(
+        self,
+        *,
+        ctx: ToolContext,
+        thread_id: UUID,
+        content: str,
+        complexity_hint: str,
+        emit: EmitFn | None,
+    ) -> str:
+        from wolfpaw.workers.queue import enqueue_run_task
+
+        task = await self.task_service.create(
+            user_id=ctx.user_id,
+            thread_id=thread_id,
+            content=content,
+            title=_title_from_content(content),
+            description=content,
+            channel_for_completion="web",
+            complexity_hint=complexity_hint,
+        )
+        await _maybe_emit(emit, "task", str(task.id))
+        await enqueue_run_task(task.id)
+
+        ack = (
+            f"Started Task {task.id} in the background — "
+            f"check `/task {task.id}` for progress, or wait for the push"
+            " when it finishes."
+        )
+        try:
+            async with acquire() as conn:
+                await conv.append(
+                    conn, thread_id=thread_id, role="user", content=content,
+                )
+                await conv.append(
+                    conn, thread_id=thread_id, role="assistant", content=ack,
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("router.task_persist_failed", exc_info=True)
+        return ack
 
     async def _handle_plan(
         self,

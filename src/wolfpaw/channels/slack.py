@@ -44,7 +44,6 @@ the process dies mid-task the user never sees a reply.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 from urllib.parse import parse_qs
@@ -411,11 +410,11 @@ async def commands(
             "This workspace's Wolfpaw install was revoked. Re-install from the web app."
         )
 
-    asyncio.create_task(
-        _handle_freeform(
-            user_id=user_id, workspace_bot_token=workspace.bot_token,
-            channel_id=channel_id, content=text,
-        )
+    from wolfpaw.workers.queue import enqueue_slack_dispatch
+
+    await enqueue_slack_dispatch(
+        user_id=user_id, workspace_bot_token=workspace.bot_token,
+        channel_id=channel_id, content=text,
     )
     return _ephemeral("Working on it…")
 
@@ -469,11 +468,11 @@ async def _handle_message_event(*, team_id: str, event: dict) -> None:
                 pass
         return
 
-    asyncio.create_task(
-        _handle_freeform(
-            user_id=user_id, workspace_bot_token=workspace.bot_token,
-            channel_id=channel_id, content=text,
-        )
+    from wolfpaw.workers.queue import enqueue_slack_dispatch
+
+    await enqueue_slack_dispatch(
+        user_id=user_id, workspace_bot_token=workspace.bot_token,
+        channel_id=channel_id, content=text,
     )
 
 

@@ -18,19 +18,20 @@ Inbound message flow (linked user):
     2. Validate `X-Telegram-Bot-Api-Secret-Token` matches our config
     3. Look up the user via channel_links by the Telegram user_id
     4. Dispatch slash commands through the shared dispatcher (no model call)
-    5. For free-form text: fire-and-forget asyncio.create_task that runs
+    5. For free-form text: defer to the workers queue (arq when enabled,
+       asyncio.create_task fallback otherwise) that runs
        the Router and sends the final answer back via the Telegram client
     6. Return 200 OK to Telegram immediately (their timeout is short)
 
-The fire-and-forget pattern is the same v1 trade the web channel makes:
-if the process dies before the background task completes, the user
-never sees a reply. arq (deferred) would move the background work to a
-proper queue.
+Step 23 wires the workers queue: when ``WOLFPAW_WORKERS_ENABLED=true``
+the dispatch runs on the arq worker (durable across restart). When
+off, the queue layer falls back to ``asyncio.create_task`` inside this
+process — the v1 trade where a server restart mid-reply leaves the
+user without a response.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 from uuid import UUID
@@ -207,11 +208,14 @@ async def webhook(
         )
         return Response(status_code=200)
 
-    # Fire-and-forget — Telegram needs a fast ack.
-    asyncio.create_task(
-        _handle_inbound(
-            user_id=user_id, tg_chat_id=tg_chat_id, content=text,
-        )
+    # Defer to the workers queue — Telegram needs a fast ack. With
+    # workers enabled the actual run happens on the arq worker; with
+    # workers off the queue layer falls back to asyncio.create_task in
+    # this process (same liveness contract as pre-step-23).
+    from wolfpaw.workers.queue import enqueue_telegram_dispatch
+
+    await enqueue_telegram_dispatch(
+        user_id=user_id, tg_chat_id=tg_chat_id, content=text,
     )
     return Response(status_code=200)
 

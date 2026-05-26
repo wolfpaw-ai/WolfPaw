@@ -15,6 +15,7 @@ from wolfpaw.channels.telegram import router as telegram_channel_router
 from wolfpaw.channels.web import router as web_channel_router
 from wolfpaw.config import get_settings
 from wolfpaw.memory.db import close_pool
+from wolfpaw.workers.queue import close_pool as close_queue_pool
 from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — registers /usage
 from wolfpaw.metering.routes import router as usage_router
 from wolfpaw import toolbox as _toolbox  # noqa: F401 — registers v1 tool set
@@ -62,6 +63,7 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     yield
+    await close_queue_pool()
     await close_pool()
 
 

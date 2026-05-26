@@ -39,15 +39,23 @@ losing context past the recent-window cap.
 - The summarizer is injectable via `set_summarizer_for_test` so unit tests cover the trigger + fold arithmetic without live Anthropic calls.
 - **Followups for step 23 (arq).** Today the embed + compaction triggers run as fire-and-forget `asyncio.create_task`. Once arq lands, both move onto the worker so they survive process restart, carry retry semantics, and stop leaking via abandoned tasks under high churn.
 
-### 23. arq worker — M
+### 23. arq worker — M ✅ **completed**
 
-Redis-backed background job runner. Substrate for #22 compaction, scheduled tasks, proactive notifications, and restart-safe long tasks.
+Redis-backed background job runner. Substrate for #22 compaction, the v2 Sleep Cycle (#26), proactive notifications, and restart-safe long Tasks.
 
-- Add `redis` to `docker-compose.yml`
-- New: `src/wolfpaw/workers/arq_app.py` (worker entrypoint), `workers/jobs/` (compaction, notifications, scheduled-task tick)
-- Refactor `TaskService.create_and_run` → split into `create()` + `run(task_id)`. Router enqueues; worker runs.
-- Channel fire-and-forget (`asyncio.create_task` in web + Telegram + Slack) moves to arq enqueue
-- New env: `WOLFPAW_REDIS_URL`, `WOLFPAW_WORKERS_ENABLED` (so single-process dev keeps working)
+- New `src/wolfpaw/workers/queue.py` — per-job typed enqueue helpers (`enqueue_compact_thread`, `enqueue_embed_message`, `enqueue_run_task`, `enqueue_telegram_dispatch`, `enqueue_slack_dispatch`). Each branches on `WOLFPAW_WORKERS_ENABLED`: ON → `get_pool().enqueue_job("<name>", ...)` against arq; OFF → `asyncio.create_task` in the caller's loop (dev default, no Redis needed). Module-global pool with a `close_pool` hook wired into the FastAPI lifespan in `api.py`.
+- New `src/wolfpaw/workers/arq_app.py` — `WorkerSettings` registering the five jobs above. Lifecycle hooks warm + drain the asyncpg pool on worker start/stop.
+- New `src/wolfpaw/workers/jobs/run_task.py` + `channel_dispatch.py` (Telegram + Slack), plus arq-shaped wrappers (`compact_thread_job`, `embed_message_job`) added to `compact_thread.py`. Each is a thin coroutine that unpacks string args back into UUIDs and delegates to the existing handler.
+- `TaskService` refactored — `create()` writes the `pending` row + stamps a `status.pending` event carrying the run inputs (content, thread_id, complexity_hint) so `run(task_id)` can recover them without a side table. `create_and_run` is preserved for the subagent path (parent waits for child output, so workers-deferred execution doesn't apply).
+- Router's task path branches on `workers_enabled`: ON → `create()` + `enqueue_run_task` + immediate "Started Task <id>" ack (the user follows up via `/task <id>` or waits for the v2 step-37 push); OFF → existing `create_and_run` inline so single-process dev produces the synthesized answer in the same response.
+- Telegram + Slack channels replaced their `asyncio.create_task(_handle_*)` calls with `enqueue_telegram_dispatch` / `enqueue_slack_dispatch`. Same liveness contract in dev (no Redis required); arq picks it up in compose.
+- `conv.append`'s post-append work moved onto the queue — `embed_and_store` exposed (renamed from `_embed_and_store`); the inline `_post_append_work` + `_trigger_compaction` wrappers are gone.
+- New config: `WOLFPAW_WORKERS_ENABLED` (default `false`), `workers_redis_max_connections`, `workers_sleep_cycle_cron`. `WOLFPAW_REDIS_URL` already existed.
+- docker-compose adds `redis` (with appendonly persistence) + `worker` (runs `arq wolfpaw.workers.arq_app.WorkerSettings`); both `app` and `worker` set `WOLFPAW_WORKERS_ENABLED=true` by default. `.env.example` documents the new toggle.
+- `arq>=0.26` added to base deps.
+- Tests: 13 new `test_workers_queue` (inline-fallback + arq-pool branch per job + pool lifecycle), 2 new `test_agent_router_task` (workers-on/off branching), 4 new DB-gated `test_tasks_service_db` (`create` does no planning, `run` recovers from pending event, error paths). Suite: **320 passing / 121 DB-gated skipped** (the existing weasyprint e2e test is unrelated and was failing before this step on macOS without system libs).
+- **Web SSE stays in-process.** SSE event streaming is tied to the HTTP connection; routing the agent to arq would require a Redis pub-sub bridge — deferred until a real driver shows up. Telegram + Slack are the durable wins because their webhook flow already detaches the reply.
+- **Follow-up before step 24/25/26:** proactive task-completion push (v2 step 37) becomes available once a caller is wired — substrate is now here. Worker → channel send is currently caller-less, so a worker-run Task quietly finishes in the DB; users have to poll `/tasks`.
 
 ---
 

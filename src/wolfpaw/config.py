@@ -36,6 +36,19 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://localhost/wolfpaw"
     redis_url: str = "redis://localhost:6379/0"
 
+    # Background workers (step 23). When enabled, fire-and-forget work
+    # (thread compaction, Tasks, Telegram + Slack inbound dispatch) goes
+    # to a Redis-backed arq queue and is run by the worker process from
+    # `wolfpaw.workers.arq_app`. When disabled (the dev default), the
+    # same code paths fall back to `asyncio.create_task` inside the
+    # caller's event loop — so a fresh checkout works without Redis.
+    # The web channel always runs in-process (SSE streams require it).
+    workers_enabled: bool = False
+    workers_redis_max_connections: int = 20
+    # Cadence for the (future v2 step 26) Sleep Cycle cron — surfaced
+    # here so deployments can tune the schedule without code changes.
+    workers_sleep_cycle_cron: str = "0 3 * * 0"  # 03:00 UTC every Sunday
+
     # Auth
     secret_key: str = "dev-only-secret-CHANGE-ME-in-non-dev-envs"
     magic_link_ttl_minutes: int = 15
