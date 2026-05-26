@@ -9,6 +9,7 @@ once per connection via the asyncpg `init` callback so we can pass/receive
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from contextlib import asynccontextmanager
@@ -29,6 +30,17 @@ _pool_lock = asyncio.Lock()
 
 async def _setup_connection(conn: asyncpg.Connection) -> None:
     await register_vector(conn)
+    # asyncpg requires explicit type codecs for jsonb / json — otherwise
+    # passing a Python dict into a jsonb column fails with
+    # "expected str, got dict". DAOs that already json.dumps() explicitly
+    # are unaffected; this just makes the bare-dict case work too.
+    for typename in ("jsonb", "json"):
+        await conn.set_type_codec(
+            typename,
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
 
 
 def _redact_dsn(dsn: str) -> str:
