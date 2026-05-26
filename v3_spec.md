@@ -88,5 +88,4 @@ Loose backlog — likely-v3 items pulled from `implementation_plan.md`'s
 
 Same exclusions as v1 + v2:
 - SaaS deployment infra — [`saas.md`](saas.md) (private)
-- Wolf-Pi hardware product — [`wolf-pi.md`](wolf-pi.md) (private)
 - OS-level browser-driving, native sync helpers, cloud-side Playwright — explicitly off the roadmap (architecture commitment in [`implementation_plan.md`](implementation_plan.md))

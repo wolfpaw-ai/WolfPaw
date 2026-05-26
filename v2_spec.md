@@ -25,7 +25,6 @@ Three themes drive v2:
 | Tool Creator agent | Agent proposes new tools when it hits a gap; human approves; tool registers and becomes available |
 | Entity / Summary / KB memory | Cross-thread memory types beyond the per-thread tier |
 | Frontend polish | Usage charts, file upload UI, theming, vitest setup, PWA |
-| Voice substrate | `STTClient` + `TTSClient` ABCs land in OSS (Wolf-Pi product is the first consumer; web client could opt in later) |
 | Proactive push | Task-completed notifications via Telegram (substrate exists, no caller wired) + email-out (when SMTP/SES backend is added) |
 | Slack channel-mentions | `@wolfpaw` in a channel works, not just DMs. `thread_ts` ↔ `thread_id` mapping |
 | OpenTelemetry tracing | Cross-service tracing when the system grows past one runtime |
@@ -33,16 +32,15 @@ Three themes drive v2:
 ## Out of scope for v2
 
 - **SaaS deployment** — separate plan in `saas.md` (private).
-- **Wolf-Pi hardware product** — separate plan in `wolf-pi.md` (private).
 - **Gmail write / Outlook mail / Plaid / OneDrive / iCloud / Mobile-native app / Skills marketplace ("Pawhub")** — all v3+.
 - **Browser extension** — v3 at the earliest; the kind of work Wolfpaw is designed for doesn't need it.
+- **Voice (STT/TTS) in OSS**
 
 ## Open questions
 
 - **Skills auto-emission threshold.** What score qualifies a plan for promotion? Start at 90+, refine after dogfooding.
 - **Sleep Cycle cadence.** Nightly? Weekly? Per-user opt-in? Default off until we see what it costs.
 - **Plan Pre-Evaluator model tier.** Haiku to keep it cheap, or Sonnet for quality? Run both, A/B on plan-success-rate.
-- **Voice in the OSS web app.** Wolf-Pi consumes the abstractions. Does the OSS web client expose a mic button too, or stay text-only? Probably text-only — voice is the Wolf-Pi product's hook.
 - **Entity / KB memory shape.** Tables exist in the diagram but the retrieval/write semantics are undecided. Defer the design until skills auto-emission is shipped and we know what *isn't* covered by skills + tiered conversational memory.
 
 ## What's not changing

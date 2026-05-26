@@ -14,7 +14,7 @@ Cost: **S** = under a day, **M** = 1-3 days, **L** = a week or more.
 - **A. Substrate** (steps 22-23): unblocks everything else
 - **B. Self-improving agent** (24-28): compounding agent quality
 - **C. Real-world integrations** (29-33): first OAuth wave
-- **D. Channel polish** (34-37): unfinished v1 bullets + voice substrate
+- **D. Channel polish** (34-37): unfinished v1 bullets + proactive push
 - **E. Frontend + UX polish** (38-42)
 - **F. Observability + scale** (43-44)
 
@@ -193,15 +193,9 @@ Read only. Drafts still flow via Wolfpaw → owner-email pattern (never via Gmai
 
 ---
 
-## Phase D — Channel polish + voice substrate
+## Phase D — Channel polish
 
-### 34. STT/TTS client abstractions in OSS — S
-
-Net-new client ABCs so Wolf-Pi (private product) + future OSS channels can share the same interface.
-
-- New: `src/wolfpaw/audio/__init__.py` — `STTClient` ABC + `TTSClient` ABC
-- New: `RemoteSTT` / `RemoteTTS` defaults that POST to a configurable endpoint
-- No tools / channels consume them in OSS today — that's Wolf-Pi's job
+### 34. Voice (STT + TTS) (cancelled)
 
 ### 35. Slack `app_mention` events + `thread_ts` mapping — S
 
@@ -216,7 +210,7 @@ Round out the Telegram channel.
 
 - File upload: handle `message.document` / `message.photo` → download via Telegram API → register in `workspace_files`
 - Inline keyboards for `ask_user` options (replaces free-text answer where the question has multiple-choice)
-- Voice messages → STT (uses #34's abstractions)
+- Voice messages: NOT handled server-side. Telegram's compose box has built-in voice-to-text on mobile; users who want dictation use that and the bot sees normal text.
 
 ### 37. Proactive task-completion push — S
 
@@ -298,7 +292,6 @@ Pushed to v3+:
 
 Separate tracks (own private docs):
 - SaaS deployment — [`saas.md`](saas.md)
-- Wolf-Pi hardware product — [`wolf-pi.md`](wolf-pi.md)
 
 ---
 
