@@ -146,3 +146,33 @@ class PostEvalVerdict:
             "what_went_wrong": self.what_went_wrong,
             "improvements": self.improvements,
         }
+
+
+@dataclass(frozen=True)
+class PreEvalVerdict:
+    """Plan Pre-Evaluator's pre-execution check (step 24).
+
+    Three boolean checks plus an aggregate ``approved`` flag. A plan
+    passes only if it achieves the objective, isn't gratuitously
+    complex, and is at least as good as the highest-scoring matching
+    past plan in procedural memory.
+
+    `diagnosis` is the prose explanation the Planner gets when
+    ``approved=False`` so the second-pass plan can address the
+    specific concerns rather than guessing at what the previous draft
+    got wrong."""
+
+    approved: bool
+    achieves_objective: bool
+    simplifiable: bool
+    better_than_past_plans: bool
+    diagnosis: str
+
+    def to_jsonb(self) -> dict[str, Any]:
+        return {
+            "approved": self.approved,
+            "achieves_objective": self.achieves_objective,
+            "simplifiable": self.simplifiable,
+            "better_than_past_plans": self.better_than_past_plans,
+            "diagnosis": self.diagnosis,
+        }

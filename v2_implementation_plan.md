@@ -61,14 +61,19 @@ Redis-backed background job runner. Substrate for #22 compaction, the v2 Sleep C
 
 ## Phase B — Self-improving agent
 
-### 24. Plan Pre-Evaluator — S
+### 24. Plan Pre-Evaluator — S ✅ **completed**
 
-New agent between Planner and Executor. Three forced-tool checks: (1) plan achieves objective? (2) simplifiable? (3) better than past plans found in procedural memory? On fail → back to Planner with diagnosis.
+New agent between Planner and Executor that catches obviously-broken or gratuitously-complex plans before we burn Executor tokens on them.
 
-- New: `agents/plan_pre_evaluator.py` (Haiku, forced `evaluate_plan` tool)
-- Router wires it into the plan/task path
-- One retry max per request, then ship whatever the Planner produces with a warning
-- SSE event: `pre_eval` (verdict + diagnosis)
+- New `agents/plan_pre_evaluator.py` — `PlanPreEvaluatorAgent` (Haiku via `model_post_evaluator` slot) with a forced `evaluate_plan` tool_use returning three booleans: `achieves_objective`, `simplifiable`, `better_than_past_plans`. A plan is approved iff `achieves_objective AND NOT simplifiable AND better_than_past_plans`. The `diagnosis` string is the prose feedback the Planner receives on a retry. Surfaces high-scoring (≥80) past plans in the eval prompt so the third check has something to compare against.
+- New `plan_with_pre_evaluation(planner, pre_evaluator, ...)` helper in the same module — runs the Planner, evaluates, retries once with `revision_diagnosis` on rejection, ships the second draft unconditionally. Both passes emit a `pre_eval` SSE event so the UI can show the verdict.
+- `PlannerAgent.plan` gained `revision_diagnosis: str | None = None`. When set, a "you are revising a rejected draft" preamble goes at the front of the system prompt so the model treats the diagnosis as the top-line directive rather than another piece of context.
+- `Router` + `TaskService` both gained a `pre_evaluator` field (singleton fallback via `get_pre_evaluator_agent`) and call the helper in place of the direct `planner.plan(...)` invocation.
+- New `PreEvalVerdict` dataclass in `schemas.py` with `to_jsonb()` matching the Post-Evaluator's shape.
+- Failure posture: the Pre-Evaluator approves-by-default on any internal failure (model call exception, no tool_use returned). Reasoning in the module docstring — the cost of an unreviewed plan is worse output; the cost of blocking on a misbehaving evaluator is no output at all.
+- SSE: one `pre_eval` event on approve ("approved (attempt 1): <diagnosis>"); two on retry ("rejected (attempt 1): <failed-checks> — <diagnosis>" + "retry (attempt 2): shipping Planner's revised draft unchecked").
+- Tests: 11 new unit tests in `test_agent_plan_pre_evaluator.py` (forced-tool parsing + each rejection axis + past-plan filtering + approve-by-default + retry helper), 4 new integration tests in `test_agent_router_plan.py` (approve path, reject+retry, single SSE event on approve, two SSE events on retry), 2 new planner tests for the revision-diagnosis prompt block. Suite: **337 passing / 121 DB-gated skipped** (was 320/121).
+- Threshold for `_HIGH_SCORE_THRESHOLD` is 80 — open question in the spec was the score that qualifies a "past plan worth beating". 80 keeps it conservative; tune after dogfooding.
 
 ### 25. Skills auto-emission — M
 

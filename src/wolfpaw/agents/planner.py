@@ -204,10 +204,16 @@ class PlannerAgent:
         thread_id: UUID | None,
         content: str,
         complexity_hint: str = "moderate",
+        revision_diagnosis: str | None = None,
     ) -> tuple[Plan, PlanContext]:
         """Generate a Plan. `thread_id=None` means no conversational history
         to load — used by subagent tasks (step 16) which run with a fresh
-        context derived only from the subagent step's `inputs.query`."""
+        context derived only from the subagent step's `inputs.query`.
+
+        `revision_diagnosis` is set by the Pre-Evaluator's retry path
+        (step 24): when a first-pass plan is rejected, the diagnosis
+        gets folded into the system prompt as concrete feedback so the
+        second pass can address it directly rather than re-deriving."""
         await self._ensure_prompt_version()
 
         # 1. Embed query — cost recorded as a token_usage row.
@@ -280,16 +286,23 @@ class PlannerAgent:
         # planner's role + the retrieved context block (past plans +
         # skills + thread summaries + vector recall). build_for_agent
         # assembles the first three; we append the dynamic context
-        # block after.
+        # block after. When the Pre-Evaluator rejected a first-pass
+        # draft, the diagnosis goes in front so the retry attends to
+        # it before reading the rest.
         context_block = _format_context_block(
             past_plans=past_plans,
             relevant_skills=relevant_skills,
             summaries=summaries,
             vector_recall=vector_recall,
         )
-        role_with_context = _AGENT_ROLE + (
-            "\n\n" + context_block if context_block else ""
-        )
+        role_with_context = _AGENT_ROLE
+        if revision_diagnosis:
+            role_with_context = (
+                _format_revision_block(revision_diagnosis) + "\n\n"
+                + role_with_context
+            )
+        if context_block:
+            role_with_context = role_with_context + "\n\n" + context_block
         system = await build_for_agent(
             user_id=ctx.user_id, agent_role=role_with_context,
         )
@@ -358,6 +371,22 @@ def _price_voyage(input_tokens: int) -> int:
 
     cents = (input_tokens * _VOYAGE_MICROCENTS_PER_MTOK) / 1_000_000
     return max(0, ceil(cents))
+
+
+def _format_revision_block(diagnosis: str) -> str:
+    """Pre-Evaluator retry preamble — sits at the front of the system
+    prompt so the model treats the diagnosis as a top-line directive
+    rather than another piece of context."""
+    return (
+        "## You are revising a rejected draft\n"
+        "Your previous plan for this same user request was rejected by"
+        " the Pre-Evaluator with this diagnosis:\n\n"
+        f"> {diagnosis.strip()}\n\n"
+        "Address the diagnosis concretely. Don't repeat the rejected"
+        " approach. If the diagnosis says a step is redundant, drop it."
+        " If it says a step doesn't achieve the objective, replace it."
+        " If it says a past plan would do better, adapt that past plan."
+    )
 
 
 def _format_context_block(

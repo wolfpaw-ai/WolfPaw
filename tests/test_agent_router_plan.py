@@ -26,7 +26,9 @@ async def _fake_acquire():
 @pytest.fixture(autouse=True)
 def _stub_persistence(monkeypatch):
     """Stub conv.append + the scoring-side DB calls so plan-route tests
-    don't need Postgres."""
+    don't need Postgres. Also injects a default-approving Pre-Evaluator
+    so the Router doesn't fall back to the real singleton (which would
+    try to make an Anthropic call)."""
     appended: list[dict] = []
     scored: list[dict] = []
     events: list[dict] = []
@@ -50,6 +52,16 @@ def _stub_persistence(monkeypatch):
     )
     monkeypatch.setattr(
         "wolfpaw.agents.router.task_events.append_event", fake_append_event,
+    )
+    # Pre-Evaluator default — approve unless the test overrides it.
+    # Patch both the source module + the name bound into Router.
+    monkeypatch.setattr(
+        "wolfpaw.agents.plan_pre_evaluator.get_pre_evaluator_agent",
+        lambda: FakePreEvaluator(),
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.router.get_pre_evaluator_agent",
+        lambda: FakePreEvaluator(),
     )
     yield {"appended": appended, "scored": scored, "events": events}
 
@@ -103,6 +115,31 @@ class FakePostEvaluator:
         if self._raises:
             raise self._raises
         return self._verdict
+
+
+class FakePreEvaluator:
+    """Default-approving pre-evaluator. Tests that exercise the retry
+    path override `verdicts` to push a reject-then-approve sequence."""
+
+    def __init__(self, verdicts=None):
+        from wolfpaw.schemas import PreEvalVerdict as _V
+        self._verdicts = list(verdicts) if verdicts else [
+            _V(
+                approved=True, achieves_objective=True,
+                simplifiable=False, better_than_past_plans=True,
+                diagnosis="(test default)",
+            ),
+        ]
+        self.calls: list[dict] = []
+
+    async def evaluate(self, *, ctx, content, plan, past_plans=None):
+        self.calls.append({
+            "content": content, "plan_id": plan.id,
+            "past_plans_count": len(past_plans or []),
+        })
+        if len(self._verdicts) == 1:
+            return self._verdicts[0]
+        return self._verdicts.pop(0)
 
 
 def _empty_plan_ctx():
@@ -366,3 +403,165 @@ async def test_plan_route_skips_score_persistence_when_plan_id_missing():
     )
     await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x")
     assert len(evaluator.calls) == 1  # still evaluated
+
+
+# --- step 24: Plan Pre-Evaluator -----------------------------------------
+
+
+async def test_pre_eval_approves_first_pass_no_retry():
+    """Default-approving pre-evaluator → Planner runs once, Executor
+    sees the first draft."""
+    from wolfpaw.schemas import PreEvalVerdict
+
+    plan = _plan()
+    planner = FakePlanner(plan=plan)
+    executor = FakeExecutor(_execution(plan, final_answer="done"))
+    pre = FakePreEvaluator()
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=planner, executor=executor,
+        pre_evaluator=pre, post_evaluator=FakePostEvaluator(),
+    )
+    text = await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x")
+    assert text == "done"
+    assert len(planner.calls) == 1
+    assert len(pre.calls) == 1
+    # No revision_diagnosis was forwarded on the (only) planner call.
+    # FakePlanner doesn't record it, but a second call would imply a
+    # retry — assert absence directly.
+
+
+async def test_pre_eval_rejects_then_planner_runs_second_pass():
+    """Rejected first-pass → Planner gets a second call with
+    revision_diagnosis, Executor runs against the second draft."""
+    from wolfpaw.schemas import PreEvalVerdict
+
+    plan_v1 = _plan(summary="first draft")
+    plan_v2 = _plan(summary="revised draft")
+
+    class _TwoShotPlanner:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._plans = [plan_v1, plan_v2]
+
+        async def plan(self, *, ctx, thread_id, content,
+                       complexity_hint="moderate",
+                       revision_diagnosis=None):
+            self.calls.append({
+                "content": content,
+                "revision_diagnosis": revision_diagnosis,
+            })
+            return self._plans.pop(0), _empty_plan_ctx()
+
+    planner = _TwoShotPlanner()
+    executor = FakeExecutor(_execution(plan_v2, final_answer="second-pass result"))
+    pre = FakePreEvaluator(verdicts=[
+        PreEvalVerdict(
+            approved=False, achieves_objective=True,
+            simplifiable=True, better_than_past_plans=True,
+            diagnosis="step s1 is redundant — drop it",
+        ),
+        # second verdict isn't consulted; helper ships the second
+        # plan unchecked.
+    ])
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=planner, executor=executor,
+        pre_evaluator=pre, post_evaluator=FakePostEvaluator(),
+    )
+    text = await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x")
+    assert text == "second-pass result"
+    assert len(planner.calls) == 2
+    # First-pass had no diagnosis; second-pass carries the rejection text.
+    assert planner.calls[0]["revision_diagnosis"] is None
+    assert "redundant" in (planner.calls[1]["revision_diagnosis"] or "")
+    # Pre-eval was called once (against the first draft only).
+    assert len(pre.calls) == 1
+    # Executor saw the second plan.
+    assert executor.calls[0]["plan_id"] == plan_v2.id
+
+
+async def test_pre_eval_emits_pre_eval_sse_event():
+    """The helper emits a `pre_eval` SSE event with the verdict
+    summary so the UI can show what happened."""
+    from wolfpaw.schemas import PreEvalVerdict
+
+    emitted: list[tuple[str, str]] = []
+
+    async def emit(event, data):
+        emitted.append((event, data))
+
+    plan = _plan()
+    planner = FakePlanner(plan=plan)
+    executor = FakeExecutor(_execution(plan, final_answer="x"))
+    pre = FakePreEvaluator(verdicts=[
+        PreEvalVerdict(
+            approved=True, achieves_objective=True,
+            simplifiable=False, better_than_past_plans=True,
+            diagnosis="looks clean",
+        ),
+    ])
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=planner, executor=executor,
+        pre_evaluator=pre, post_evaluator=FakePostEvaluator(),
+    )
+    await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x", emit=emit)
+    pre_eval_events = [e for e in emitted if e[0] == "pre_eval"]
+    assert len(pre_eval_events) == 1
+    assert "approved" in pre_eval_events[0][1]
+    assert "looks clean" in pre_eval_events[0][1]
+
+
+async def test_pre_eval_retry_emits_two_pre_eval_events():
+    """Reject + retry path emits one event for the rejection and a
+    second when the helper ships the unchecked second draft."""
+    from wolfpaw.schemas import PreEvalVerdict
+
+    emitted: list[tuple[str, str]] = []
+
+    async def emit(event, data):
+        emitted.append((event, data))
+
+    plan_v1 = _plan()
+    plan_v2 = _plan(summary="revised")
+
+    class _Two:
+        def __init__(self):
+            self.calls = []
+            self._plans = [plan_v1, plan_v2]
+
+        async def plan(self, *, ctx, thread_id, content,
+                       complexity_hint="moderate",
+                       revision_diagnosis=None):
+            self.calls.append({"diag": revision_diagnosis})
+            return self._plans.pop(0), _empty_plan_ctx()
+
+    planner = _Two()
+    executor = FakeExecutor(_execution(plan_v2, final_answer="ok"))
+    pre = FakePreEvaluator(verdicts=[
+        PreEvalVerdict(
+            approved=False, achieves_objective=False,
+            simplifiable=False, better_than_past_plans=True,
+            diagnosis="doesn't actually answer the user's question",
+        ),
+    ])
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=planner, executor=executor,
+        pre_evaluator=pre, post_evaluator=FakePostEvaluator(),
+    )
+    await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x", emit=emit)
+    pre_eval_events = [e for e in emitted if e[0] == "pre_eval"]
+    assert len(pre_eval_events) == 2
+    assert "rejected" in pre_eval_events[0][1]
+    assert "doesn't-achieve-objective" in pre_eval_events[0][1]
+    assert "retry" in pre_eval_events[1][1]

@@ -33,6 +33,11 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from wolfpaw.agents.executor import ExecutorAgent, get_executor_agent
+from wolfpaw.agents.plan_pre_evaluator import (
+    PlanPreEvaluatorAgent,
+    get_pre_evaluator_agent,
+    plan_with_pre_evaluation,
+)
 from wolfpaw.agents.planner import PlannerAgent, get_planner_agent
 from wolfpaw.agents.post_evaluator import (
     PostEvaluatorAgent,
@@ -65,11 +70,13 @@ class TaskService:
         *,
         planner: PlannerAgent | None = None,
         executor: ExecutorAgent | None = None,
+        pre_evaluator: PlanPreEvaluatorAgent | None = None,
         post_evaluator: PostEvaluatorAgent | None = None,
         registry: AskUserRegistry | None = None,
     ) -> None:
         self._planner = planner
         self._executor = executor
+        self._pre_evaluator = pre_evaluator
         self._post_evaluator = post_evaluator
         self._registry = registry
 
@@ -80,6 +87,10 @@ class TaskService:
     @property
     def executor(self) -> ExecutorAgent:
         return self._executor or get_executor_agent()
+
+    @property
+    def pre_evaluator(self) -> PlanPreEvaluatorAgent:
+        return self._pre_evaluator or get_pre_evaluator_agent()
 
     @property
     def post_evaluator(self) -> PostEvaluatorAgent:
@@ -255,12 +266,17 @@ class TaskService:
             lambda c: tasks_dao.mark_started(c, task_id=task_id),
         )
 
-        # Plan. Subagents have no thread context — the Planner skips
-        # fetch_recent when thread_id is None (added in step 16).
+        # Plan + Pre-Evaluate. Subagents have no thread context — the
+        # Planner skips fetch_recent when thread_id is None (added in
+        # step 16). The Pre-Evaluator may bounce the first draft back
+        # to the Planner once before we commit (step 24).
         try:
-            plan, _plan_ctx = await self.planner.plan(
+            plan, _verdict, _retried = await plan_with_pre_evaluation(
+                planner=self.planner,
+                pre_evaluator=self.pre_evaluator,
                 ctx=ctx, thread_id=thread_id,
                 content=content, complexity_hint=complexity_hint,
+                emit=emit,
             )
             if plan.id is not None:
                 async with acquire() as conn:

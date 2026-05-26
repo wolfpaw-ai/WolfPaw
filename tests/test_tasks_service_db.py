@@ -20,7 +20,8 @@ import pytest
 from wolfpaw.memory import tasks as tasks_dao
 from wolfpaw.memory.db import apply_sql_file, close_pool, migrations_dir
 from wolfpaw.schemas import (
-    ExecutionPlan, Plan, PostEvalVerdict, Step, StepResult, StepStatus,
+    ExecutionPlan, Plan, PostEvalVerdict, PreEvalVerdict,
+    Step, StepResult, StepStatus,
 )
 from wolfpaw.tasks.service import TaskService
 
@@ -72,19 +73,41 @@ async def _seed_user(dsn: str) -> UUID:
 class FakePlanner:
     calls: list[dict] = field(default_factory=list)
 
-    async def plan(self, *, ctx, thread_id, content, complexity_hint):
+    async def plan(self, *, ctx, thread_id, content, complexity_hint,
+                   revision_diagnosis=None):
         self.calls.append({
             "user_id": ctx.user_id, "task_id": ctx.task_id,
             "thread_id": thread_id, "content": content,
             "complexity_hint": complexity_hint,
+            "revision_diagnosis": revision_diagnosis,
         })
+        from wolfpaw.agents.planner import PlanContext
+
         return (
             Plan(
                 query=content, summary="fake plan", is_task=True,
                 model_used="claude-sonnet-4-6",
                 steps=[Step(id="s1", kind="reasoning", description="t")],
             ),
-            None,
+            PlanContext(
+                past_plans=[], relevant_skills=[],
+                summaries=[], vector_recall=[],
+            ),
+        )
+
+
+@dataclass
+class FakePreEvaluator:
+    """Approves every first-pass draft."""
+
+    calls: list[dict] = field(default_factory=list)
+
+    async def evaluate(self, *, ctx, content, plan, past_plans=None):
+        self.calls.append({"plan_summary": plan.summary})
+        return PreEvalVerdict(
+            approved=True, achieves_objective=True,
+            simplifiable=False, better_than_past_plans=True,
+            diagnosis="(test default)",
         )
 
 
@@ -121,6 +144,7 @@ def _service() -> TaskService:
     return TaskService(
         planner=FakePlanner(),  # type: ignore[arg-type]
         executor=FakeExecutor(),  # type: ignore[arg-type]
+        pre_evaluator=FakePreEvaluator(),  # type: ignore[arg-type]
         post_evaluator=FakePostEvaluator(),  # type: ignore[arg-type]
     )
 
@@ -139,6 +163,7 @@ async def test_create_returns_pending_task_without_running_pipeline():
     svc = TaskService(
         planner=planner,  # type: ignore[arg-type]
         executor=FakeExecutor(),  # type: ignore[arg-type]
+        pre_evaluator=FakePreEvaluator(),  # type: ignore[arg-type]
         post_evaluator=FakePostEvaluator(),  # type: ignore[arg-type]
     )
 
@@ -179,6 +204,7 @@ async def test_run_recovers_inputs_from_pending_event_and_drives_pipeline():
     svc = TaskService(
         planner=planner,  # type: ignore[arg-type]
         executor=FakeExecutor(success=True, final_answer="all good"),  # type: ignore[arg-type]
+        pre_evaluator=FakePreEvaluator(),  # type: ignore[arg-type]
         post_evaluator=FakePostEvaluator(),  # type: ignore[arg-type]
     )
     task = await svc.create(
@@ -191,7 +217,8 @@ async def test_run_recovers_inputs_from_pending_event_and_drives_pipeline():
     assert outcome.task.status == "completed"
     assert planner.calls == [
         {"user_id": uid, "task_id": task.id, "thread_id": None,
-         "content": "do the thing", "complexity_hint": "moderate"}
+         "content": "do the thing", "complexity_hint": "moderate",
+         "revision_diagnosis": None}
     ]
 
 

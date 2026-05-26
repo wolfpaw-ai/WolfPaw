@@ -1,6 +1,6 @@
 # agents/
 
-Agent implementations + the Router that composes them. Step 10 shipped the Quick Agent; step 11 added the Triage Agent and the Router; step 12 added the Planning Agent; step 13 added the Executor; step 14 added the Post-Evaluator; step 16 added the `subagent` step kind to the Executor (parent tasks spawn child tasks for parallel investigations). That closes the loop on plan-path quality: Planner → Executor (functional / reasoning / evaluation / subagent) → Post-Evaluator → score back to procedural memory.
+Agent implementations + the Router that composes them. Step 10 shipped the Quick Agent; step 11 added the Triage Agent and the Router; step 12 added the Planning Agent; step 13 added the Executor; step 14 added the Post-Evaluator; step 16 added the `subagent` step kind to the Executor (parent tasks spawn child tasks for parallel investigations). v2 step 24 added the Plan Pre-Evaluator (sanity-check between Planner and Executor with a one-retry loop). The full plan-path now reads: Planner → Pre-Evaluator → (retry once if rejected) → Executor (functional / reasoning / evaluation / subagent) → Post-Evaluator → score back to procedural memory.
 
 ## Files
 
@@ -10,6 +10,7 @@ Agent implementations + the Router that composes them. Step 10 shipped the Quick
 - **`planner.py`** — `PlannerAgent`: Sonnet 4.6 (Opus 4.7 for ambitious-complexity verdicts) with a *forced* `generate_plan` tool_use. Embeds the query via Voyage, retrieves similar past plans + matching seeded skills, inlines them into the system prompt, then asks Sonnet for a structured `Plan` (`schemas.Plan` with a list of `Step`s + `is_task` flag). Persists every generated plan into procedural memory (success/score=None until the Executor and Post-Evaluator run). Singleton accessor `get_planner_agent()`.
 - **`executor.py`** — `ExecutorAgent`: runs a `Plan`. Walks steps in execution order, batches contiguous parallel-group steps via `asyncio.gather`. Four step kinds: functional dispatches through the tool registry; reasoning + evaluation make Sonnet calls with the plan + prior step results in context; **subagent** spawns a child Task via `TaskService.create_and_run` (step 16 — depth capped at 3, parent_task_id propagated, budget passed through). On step failure: marks remaining steps `SKIPPED`, returns an error summary as the final answer. Tears down the task's sandbox in `finally`. Persists `final_answer` + `success` + `error` to procedural memory (Post-Evaluator follows up with `score`). Synthesis is skipped when the last completed step is reasoning (the planner already produced the final text). Singleton accessor `get_executor_agent()`.
 - **`post_evaluator.py`** — `PostEvaluatorAgent`: Haiku 4.5 with a *forced* `record_score` tool_use returning `PostEvalVerdict(score, summary, what_went_well, what_went_wrong, improvements)` on a 0-100 scale. Score is clamped server-side. Runs synchronously in the Router after the Executor; failures are swallowed so scoring never blocks the user response. Singleton accessor `get_post_evaluator_agent()`.
+- **`plan_pre_evaluator.py`** — `PlanPreEvaluatorAgent` (v2 step 24): Haiku with a *forced* `evaluate_plan` tool_use returning three booleans (`achieves_objective`, `simplifiable`, `better_than_past_plans`) + a prose `diagnosis`. A plan is approved iff `achieves_objective AND NOT simplifiable AND better_than_past_plans`. The `plan_with_pre_evaluation(...)` helper in the same module runs Planner → Pre-Evaluator → (one retry with `revision_diagnosis` on rejection) and is what the Router + TaskService now call instead of `planner.plan(...)` directly. Approves by default on any internal failure — the cost of an unreviewed plan is worse output, the cost of a misbehaving evaluator blocking the chain is no output at all. Singleton accessor `get_pre_evaluator_agent()`.
 - **`router.py`** — `Router`: orchestrates Triage → downstream dispatch for every channel. Calls `TriageAgent.classify`, emits a `triage` event, then dispatches to Quick (one-shot) or Planner+Executor+Post-Evaluator (plan path) or `TaskService.create_and_run` (task path, ships in step 15 — wraps the same agents in a persistent Task row so `ask_user` works and ctx.task_id flows everywhere). The plan/task path emits a `plan` event with a step summary, propagates the executor's `step.start` / `step.end` / `step.error` events, then emits a `score` event with the verdict before returning the final answer; the task path also emits a `task` event with the new task id.
 
 ## Flow
@@ -20,7 +21,13 @@ channel /chat → Router.handle(content) →
     2. emit("triage", verdict.route + reasoning)
     3. switch on verdict.route:
         - quick → QuickAgent.handle(content) → final text
-        - plan  → PlannerAgent.plan(content, complexity_hint=verdict.complexity)
+        - plan  → plan_with_pre_evaluation(planner, pre_evaluator, ...)
+                      → PlannerAgent.plan(content, complexity_hint)
+                      → PlanPreEvaluatorAgent.evaluate(content, plan, past_plans)
+                      → emit("pre_eval", verdict)
+                      → if approved: ship plan
+                        else: PlannerAgent.plan(..., revision_diagnosis=verdict.diagnosis)
+                              emit("pre_eval", "retry") — second draft ships unchecked
                   → emit("plan", summary)
                   → ExecutorAgent.execute(plan)
                       → emit("step.start" / "step.end" / "step.error") per step

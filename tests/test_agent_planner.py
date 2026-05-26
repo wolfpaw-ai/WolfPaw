@@ -281,6 +281,39 @@ async def test_plan_forces_generate_plan_tool_use(planner_env):
     assert any(t["name"] == "generate_plan" for t in call["tools"])
 
 
+async def test_plan_includes_revision_diagnosis_in_system_prompt(planner_env):
+    """When `revision_diagnosis` is set (Pre-Evaluator retry path),
+    the planner prepends a revise-this preamble to the system prompt
+    so the model treats it as the top-line instruction."""
+    fake_anthropic = FakeAnthropic([_plan_tool_response(summary="revised")])
+    planner = PlannerAgent(
+        model_client=ModelClient(anthropic=fake_anthropic),
+        embedder=FakeEmbedder(),
+    )
+    await planner.plan(
+        ctx=ToolContext(user_id=uuid4()), thread_id=uuid4(),
+        content="x",
+        revision_diagnosis="drop step s3 — its output duplicates s2",
+    )
+    system = fake_anthropic.calls[0]["system"]
+    assert "revising a rejected draft" in system
+    assert "drop step s3" in system
+
+
+async def test_plan_omits_revision_block_on_first_pass(planner_env):
+    """No revision_diagnosis → no revise-this preamble in the prompt."""
+    fake_anthropic = FakeAnthropic([_plan_tool_response()])
+    planner = PlannerAgent(
+        model_client=ModelClient(anthropic=fake_anthropic),
+        embedder=FakeEmbedder(),
+    )
+    await planner.plan(
+        ctx=ToolContext(user_id=uuid4()), thread_id=uuid4(), content="x",
+    )
+    system = fake_anthropic.calls[0]["system"]
+    assert "revising a rejected draft" not in system
+
+
 async def test_plan_inlines_retrieved_context_into_system_prompt(monkeypatch, planner_env):
     """When procedural + skills retrieval return matches, those rows
     should appear in the system prompt the planner sends."""
