@@ -78,7 +78,8 @@ async def search_by_task(
 ) -> list[Skill]:
     """Top-k skills for this user OR seeded (user_id IS NULL), ranked by
     cosine similarity. Rows without embeddings (haven't been embedded yet)
-    are excluded."""
+    are excluded, as are skills the Sleep Cycle has retired into a
+    surviving duplicate (``superseded_by_skill_id IS NOT NULL``)."""
     rows = await conn.fetch(
         """
         SELECT id, user_id, name, description, ingredients, steps,
@@ -87,12 +88,92 @@ async def search_by_task(
           FROM skills
          WHERE (user_id = $1 OR user_id IS NULL)
            AND embedding IS NOT NULL
+           AND superseded_by_skill_id IS NULL
          ORDER BY embedding <=> $2
          LIMIT $3
         """,
         user_id, query_embedding, k,
     )
     return [_row_to_skill(r, similarity=float(r["similarity"])) for r in rows]
+
+
+async def list_active_for_user(
+    conn: asyncpg.Connection, *, user_id: UUID,
+) -> list[Skill]:
+    """All user-owned, non-superseded skills with embeddings — what the
+    Sleep Cycle iterates over when looking for near-duplicate pairs.
+    Excludes seeded shared skills (`user_id IS NULL`); we only
+    consolidate within a user's emitted set."""
+    rows = await conn.fetch(
+        """
+        SELECT id, user_id, name, description, ingredients, steps,
+               source_plan_id, score, created_at
+          FROM skills
+         WHERE user_id = $1
+           AND embedding IS NOT NULL
+           AND superseded_by_skill_id IS NULL
+         ORDER BY created_at ASC
+        """,
+        user_id,
+    )
+    return [_row_to_skill(r) for r in rows]
+
+
+async def neighbours(
+    conn: asyncpg.Connection,
+    *,
+    skill_id: UUID,
+    user_id: UUID,
+    k: int = 3,
+) -> list[Skill]:
+    """Find the k nearest other skills for ``skill_id`` in the same
+    user's active set, ranked by cosine similarity on the embedding
+    stored on the row itself. Excludes the skill itself, superseded
+    rows, and the seeded shared library — consolidation is intra-user.
+    Returns ``Skill`` rows with ``similarity`` populated."""
+    rows = await conn.fetch(
+        """
+        WITH target AS (
+            SELECT embedding FROM skills WHERE id = $1
+        )
+        SELECT id, user_id, name, description, ingredients, steps,
+               source_plan_id, score, created_at,
+               1 - (embedding <=> (SELECT embedding FROM target)) AS similarity
+          FROM skills
+         WHERE user_id = $2
+           AND id <> $1
+           AND embedding IS NOT NULL
+           AND superseded_by_skill_id IS NULL
+         ORDER BY embedding <=> (SELECT embedding FROM target)
+         LIMIT $3
+        """,
+        skill_id, user_id, k,
+    )
+    return [_row_to_skill(r, similarity=float(r["similarity"])) for r in rows]
+
+
+async def mark_superseded(
+    conn: asyncpg.Connection,
+    *,
+    skill_id: UUID,
+    superseded_by: UUID,
+) -> bool:
+    """Soft-delete ``skill_id`` by pointing it at ``superseded_by``.
+    Returns True iff a row was updated (False if either id doesn't
+    exist or the skill was already superseded). Idempotent — calling
+    twice with the same args is a no-op the second time."""
+    result = await conn.execute(
+        """
+        UPDATE skills
+           SET superseded_by_skill_id = $2,
+               superseded_at = NOW()
+         WHERE id = $1
+           AND superseded_by_skill_id IS NULL
+        """,
+        skill_id, superseded_by,
+    )
+    # asyncpg returns 'UPDATE <count>' from .execute().
+    return result.endswith(" 1")
 
 
 # --- runtime emission (step 25) -------------------------------------------

@@ -16,6 +16,11 @@ Job registration:
 - ``run_task_job`` — drive a queued Task end-to-end.
 - ``telegram_dispatch_job`` — handle a Telegram free-form inbound.
 - ``slack_dispatch_job`` — handle a Slack DM or slash command inbound.
+- ``sleep_cycle_job`` — periodic memory maintenance (re-score plans,
+  consolidate skills, GC orphan threads). Registered as both a function
+  (manual enqueue for ad-hoc runs) AND a cron job firing Sunday 03:00
+  UTC. The job itself no-ops unless ``WOLFPAW_SLEEP_CYCLE_ENABLED=true``,
+  so the cron schedule is safe to keep registered on every deployment.
 
 Adding a new job: define it in ``workers/jobs/`` (taking ``_ctx, ...``
 as the arq signature), import it here, and append to
@@ -25,6 +30,7 @@ as the arq signature), import it here, and append to
 
 from __future__ import annotations
 
+from arq import cron
 from arq.connections import RedisSettings
 
 from wolfpaw.config import get_settings
@@ -39,6 +45,7 @@ from wolfpaw.workers.jobs.compact_thread import (
     embed_message_job,
 )
 from wolfpaw.workers.jobs.run_task import run_task_job
+from wolfpaw.workers.jobs.sleep_cycle import sleep_cycle_job
 
 log = get_logger()
 
@@ -66,6 +73,20 @@ class WorkerSettings:
         run_task_job,
         telegram_dispatch_job,
         slack_dispatch_job,
+        sleep_cycle_job,
+    ]
+    cron_jobs = [
+        # Weekly Sleep Cycle — Sunday 03:00 UTC. The job itself gates on
+        # WOLFPAW_SLEEP_CYCLE_ENABLED so this entry is safe on every
+        # deployment; flipping the env var enables the work without
+        # changing the worker config.
+        cron(
+            sleep_cycle_job,
+            name="sleep_cycle",
+            weekday="sun",
+            hour=3,
+            minute=0,
+        ),
     ]
     on_startup = _on_startup
     on_shutdown = _on_shutdown

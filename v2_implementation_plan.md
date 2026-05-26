@@ -90,13 +90,22 @@ The compounding-quality move: high-scoring reusable plans get distilled into nam
 - **Open question deliberately answered**: the v2 spec asked "what score qualifies a plan for promotion?" — answered 90, conservative, tunable. Same kind of threshold as the Pre-Evaluator's `_HIGH_SCORE_THRESHOLD=80` from step 24; both should be revisited after dogfooding produces real plan-distribution data.
 - **Followup before step 26 (Sleep Cycle)**: skill consolidation (merging near-duplicate user-emitted skills across plans) is on the Sleep Cycle's agenda; this step's dedup is single-shot at emit time, so a slow drift of "almost-same skills" is still possible. The Sleep Cycle will sweep these.
 
-### 26. Sleep Cycle cron — M
+### 26. Sleep Cycle cron — M ✅ **completed**
 
-Periodic background job (arq scheduled task). Re-scores old plans against current Post-Evaluator prompts, consolidates near-duplicate skills, garbage-collects orphan threads.
+Weekly maintenance job that re-checks the memory subsystems against current standards.
 
-- New: `workers/jobs/sleep_cycle.py`
-- Default: opt-in (`WOLFPAW_SLEEP_CYCLE_ENABLED=false`); cadence weekly
-- Operations: re-score N oldest plans; merge skills with high cosine similarity; mark threads with zero messages > 30 days for cleanup
+- New `workers/jobs/sleep_cycle.py` with three independent + bounded operations:
+  - **Re-score N oldest plans** — pulls the `sleep_cycle_rescore_batch` (default 20) oldest scored plans with a persisted `final_answer`, reconstructs a degenerate `ExecutionPlan` (intermediate step results aren't persisted, so the re-score reads on plan shape + final answer), runs it through `PostEvaluatorAgent.evaluate`, writes the new score via `procedural.update_outcome`. Catches prompt drift: a 90 from six months ago may now be a 60.
+  - **Consolidate near-duplicate skills** — per user, walks `list_active_for_user` and finds pairs whose cosine similarity ≥ `sleep_cycle_dedup_threshold` (default 0.92, higher than the emit-time 0.85 since post-hoc merging is destructive). Picks survivor by score (newer wins on score tie), soft-deletes the loser via `superseded_by_skill_id`. Repeats until no pair crosses the threshold.
+  - **GC orphan threads** — `DELETE FROM threads WHERE created_at < NOW() - 30 days AND NOT EXISTS (messages)`. These come from `/reset`-then-leave flows and channel-link mishaps.
+- New `workers/queue.enqueue_sleep_cycle()` — manual / ad-hoc trigger that follows the same arq-or-inline routing as the other enqueue helpers.
+- New `cron_jobs` registration on `WorkerSettings` in `arq_app.py` — Sunday 03:00 UTC. The job no-ops when `WOLFPAW_SLEEP_CYCLE_ENABLED=false`, so the cron is safe to keep registered on every deployment; flipping the env flag enables work without a worker restart.
+- New `memory.skills` functions: `mark_superseded`, `list_active_for_user`, `neighbours`. `search_by_task` now filters out superseded rows so the Planner only ever retrieves the survivor.
+- New migration `010_skill_supersession.sql` — adds `superseded_by_skill_id UUID NULL` + `superseded_at TIMESTAMPTZ NULL` to `skills` with `ON DELETE SET NULL` so deleting a survivor restores its absorbed duplicates rather than chain-deleting them.
+- New config: `sleep_cycle_enabled` (default `false`), `sleep_cycle_rescore_batch=20`, `sleep_cycle_dedup_threshold=0.92`, `sleep_cycle_orphan_thread_age_days=30`. Removed the unused `workers_sleep_cycle_cron` string (the cron lives in `arq_app.py` as proper arq kwargs now).
+- Returns a `SleepCycleResult` dataclass with per-op counters; the arq wrapper surfaces it as a dict so arq's job history (`Job.info()`) carries the last run's stats.
+- Failure posture: per-plan re-score errors don't stop the batch; per-pair supersession errors don't stop the user; thread-GC errors log + bail without touching plans/skills. The whole job is idempotent + best-effort.
+- Tests: 14 new in `test_workers_sleep_cycle.py` — 7 unit (survivor-pick, gating on the flag, orchestrator + arq wrapper) and 7 DB-gated (skill consolidation, threshold-cutoff no-op, `search_by_task` superseded filter, `mark_superseded` idempotency, plan re-score via mocked evaluator, re-score skips plans without `final_answer`, orphan-thread GC). 2 new in `test_workers_queue.py` for the new enqueue helper. Suite: **368 passing / 130 DB-gated skipped** (was 359/123).
 
 ### 27. Structured subagent failure policies — S
 

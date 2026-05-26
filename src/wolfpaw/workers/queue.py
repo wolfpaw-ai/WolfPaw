@@ -166,6 +166,21 @@ async def enqueue_telegram_dispatch(
     )
 
 
+async def enqueue_sleep_cycle() -> None:
+    """Manually trigger the Sleep Cycle (step 26). The weekly cron in
+    ``arq_app.py`` is what normally fires this; this helper is for
+    operators who want an ad-hoc run (e.g. after a Post-Evaluator
+    prompt change) or for tests."""
+    from wolfpaw.workers.jobs.sleep_cycle import sleep_cycle
+
+    settings = get_settings()
+    if not settings.workers_enabled:
+        _spawn_inline(sleep_cycle())
+        return
+    pool = await get_pool()
+    await pool.enqueue_job("sleep_cycle_job")
+
+
 async def enqueue_slack_dispatch(
     *,
     user_id: UUID,

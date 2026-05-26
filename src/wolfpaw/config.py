@@ -45,9 +45,28 @@ class Settings(BaseSettings):
     # The web channel always runs in-process (SSE streams require it).
     workers_enabled: bool = False
     workers_redis_max_connections: int = 20
-    # Cadence for the (future v2 step 26) Sleep Cycle cron — surfaced
-    # here so deployments can tune the schedule without code changes.
-    workers_sleep_cycle_cron: str = "0 3 * * 0"  # 03:00 UTC every Sunday
+
+    # Sleep Cycle (step 26). Periodic maintenance: re-score old plans
+    # against current Post-Evaluator prompts, consolidate near-duplicate
+    # emitted skills, garbage-collect threads that never accumulated any
+    # messages. Opt-in (default off) because each operation costs tokens
+    # (re-scoring) or makes user-visible changes (skill supersession).
+    # The cron fires only when the worker is running AND this flag is
+    # true, on Sunday 03:00 UTC (tune the cron schedule in arq_app.py).
+    # Manual / one-shot runs go through `enqueue_sleep_cycle()`.
+    sleep_cycle_enabled: bool = False
+    # How many of the oldest scored plans to re-evaluate per run.
+    # Bounded so a single cycle's Haiku spend is predictable.
+    sleep_cycle_rescore_batch: int = 20
+    # Cosine threshold for merging two user-emitted skills. Higher than
+    # the emit-time dedup threshold (0.85) because post-hoc consolidation
+    # is destructive (soft-delete via superseded_by_skill_id); we want
+    # high confidence the two skills really cover the same task.
+    sleep_cycle_dedup_threshold: float = 0.92
+    # Threads with zero messages older than this many days get
+    # garbage-collected. Empty threads come from `/reset` followed by
+    # the user never returning, or a channel-link mishap.
+    sleep_cycle_orphan_thread_age_days: int = 30
 
     # Auth
     secret_key: str = "dev-only-secret-CHANGE-ME-in-non-dev-envs"

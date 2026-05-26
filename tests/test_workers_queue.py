@@ -165,6 +165,34 @@ async def test_enqueue_run_task_uses_arq_when_workers_on(monkeypatch):
     ]
 
 
+# --- sleep cycle ----------------------------------------------------------
+
+
+async def test_enqueue_sleep_cycle_inline_when_workers_off(monkeypatch):
+    _disable_workers(monkeypatch)
+    called: list = []
+
+    async def fake_run():
+        called.append("ran")
+
+    monkeypatch.setattr(
+        "wolfpaw.workers.jobs.sleep_cycle.sleep_cycle", fake_run,
+    )
+
+    await queue_mod.enqueue_sleep_cycle()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert called == ["ran"]
+
+
+async def test_enqueue_sleep_cycle_uses_arq_when_workers_on(monkeypatch):
+    pool = _enable_workers(monkeypatch)
+    await queue_mod.enqueue_sleep_cycle()
+    assert pool.calls == [
+        {"function_name": "sleep_cycle_job", "args": [], "kwargs": {}}
+    ]
+
+
 # --- telegram + slack -----------------------------------------------------
 
 
