@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     voyage_model: str = "voyage-3"
     voyage_dimensions: int = 1024
 
+    # Tiered conversational memory (step 22). Together: messages newer
+    # than `recent_window_size` stay verbatim; older messages get folded
+    # into L1 summaries of `compaction_window_size` each once a thread
+    # crosses `compaction_trigger_threshold`; once `l2_fold_threshold`
+    # un-folded L1s accumulate, the oldest fold into an L2. The Planner
+    # additionally pulls `vector_recall_k` semantically-matching older
+    # messages from `message_embeddings` on every plan request.
+    recent_window_size: int = 20
+    compaction_window_size: int = 20
+    compaction_trigger_threshold: int = 40  # recent_window + compaction_window
+    l2_fold_threshold: int = 10
+    vector_recall_k: int = 5
+
     # Persona (step 17). Soul file path; empty → fall back to the
     # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
     soul_path: str = ""

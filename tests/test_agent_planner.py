@@ -97,6 +97,14 @@ def planner_env(monkeypatch):
     async def fake_fetch_recent(_conn, *, thread_id, n=20):
         return []
 
+    async def fake_fetch_summaries(_conn, *, thread_id):
+        return []
+
+    async def fake_search_relevant(
+        _conn, *, thread_id, query_embedding, k=5, exclude_recent_n=20,
+    ):
+        return []
+
     async def fake_search_similar(
         _conn, *, user_id, query_embedding, k=5, min_score=None,
     ):
@@ -137,6 +145,12 @@ def planner_env(monkeypatch):
     )
     monkeypatch.setattr(
         "wolfpaw.agents.planner.conv.fetch_recent", fake_fetch_recent,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.planner.conv.fetch_summaries", fake_fetch_summaries,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.planner.conv.search_relevant", fake_search_relevant,
     )
     monkeypatch.setattr(
         "wolfpaw.agents.planner.procedural.search_similar", fake_search_similar,

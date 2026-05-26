@@ -24,17 +24,20 @@ Phases A→B are sequential; C/D/E/F can run in parallel once A is done.
 
 ## Phase A — Substrate
 
-### 22. Tiered conversational memory (was v1 step 12.5) — M
+### 22. Tiered conversational memory (was v1 step 12.5) — M ✅ **completed**
 
 Closes the only unbuilt v1 step. Long threads degrade gracefully instead of
 losing context past the recent-window cap.
 
-- New: writes to `message_embeddings` on every `conv.append`
-- New: `workers/jobs/compact_thread.py` — when a thread crosses N messages, summarize the oldest unsummarized window → `thread_summaries` (level 1); when level-1 count crosses M, fold into level 2
-- New: `conv.fetch_summaries(thread_id)` + `conv.search_relevant(thread_id, query_embedding, k)`
-- Wire: Triage + Quick see verbatim window + summaries; Planner additionally sees vector recall hits
-- Tables already exist (`message_embeddings`, `thread_summaries` from `001_init.sql`)
-- Depends on: step 23 (arq) for the worker, OR shipped synchronously first with arq taking over later
+- `conv.append` now fires the post-append follow-ups (embed + compaction trigger) as `asyncio.create_task` background work; gated by an in-process flag (`disable_post_append_for_test`) for clean test isolation.
+- New `workers/jobs/compact_thread.py` job — drains in a loop. L1: when a thread crosses `compaction_trigger_threshold` (default 40) messages, batch the oldest 20 messages older than the recent window into a Haiku summary → `thread_summaries(level=1)`. L2: when 10 un-folded L1s accumulate, fold the oldest 10 into one L2 row and stamp `folded_into_summary_id` on each child.
+- New `conv.fetch_summaries(thread_id)` returns L2 + un-folded L1 in chronological order; `conv.search_relevant(thread_id, query_embedding, k, exclude_recent_n)` does per-thread cosine search over `message_embeddings`, deliberately excluding the recent window so the Planner doesn't see duplicates of what `fetch_recent` already returned.
+- New `conv.format_summaries_block(...)` + `conv.format_vector_recall_block(...)` shape the reads into Markdown blocks the agents inline into their system prompts.
+- Wired: Triage + Quick read `fetch_summaries`; Planner additionally reads `search_relevant`; subagent runs (`thread_id=None`) skip both.
+- New migration `008_conv_compaction.sql` — adds `'compactor'` to the `agent_kind` enum (so summarization `token_usage` rows attribute cleanly) + a `folded_into_summary_id` column on `thread_summaries` for explicit L1→L2 fold tracking.
+- New config knobs: `recent_window_size=20`, `compaction_window_size=20`, `compaction_trigger_threshold=40`, `l2_fold_threshold=10`, `vector_recall_k=5`.
+- The summarizer is injectable via `set_summarizer_for_test` so unit tests cover the trigger + fold arithmetic without live Anthropic calls.
+- **Followups for step 23 (arq).** Today the embed + compaction triggers run as fire-and-forget `asyncio.create_task`. Once arq lands, both move onto the worker so they survive process restart, carry retry semantics, and stop leaking via abandoned tasks under high churn.
 
 ### 23. arq worker — M
 

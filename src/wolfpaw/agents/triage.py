@@ -12,10 +12,13 @@ tool exactly once with route + complexity + reasoning.
 Triage is read-only — it never writes to `messages`. Persistence is the
 downstream handler's responsibility (Quick today; Plan/Task later).
 
-`fetch_summaries` is referenced in the build-order spec but isn't read
-here yet — it returns nothing until step 12.5 lands the compaction worker.
-The verbatim window from `fetch_recent` is sufficient input for Haiku to
-classify the current turn.
+Triage reads the verbatim recent window (:func:`conv.fetch_recent`) and
+the tiered summaries (:func:`conv.fetch_summaries`) so a long-running
+thread's older context informs routing decisions — e.g. recognizing
+that a "follow up on yesterday's analysis" turn belongs in the plan
+route even when yesterday's messages have already compacted out of the
+verbatim window. Vector recall is the Planner's job, not Triage's
+(Haiku runs on every turn — keep its context light).
 """
 
 from __future__ import annotations
@@ -139,16 +142,22 @@ class TriageAgent:
         settings = get_settings()
 
         async with acquire() as conn:
-            past = await conv.fetch_recent(conn, thread_id=thread_id, n=20)
-            # fetch_summaries lands in step 12.5; nothing to read yet.
+            past = await conv.fetch_recent(
+                conn, thread_id=thread_id, n=settings.recent_window_size,
+            )
+            summaries = await conv.fetch_summaries(conn, thread_id=thread_id)
 
         messages: list[dict] = [
             {"role": m.role, "content": m.content} for m in past
         ]
         messages.append({"role": "user", "content": content})
 
+        role = _AGENT_ROLE
+        summary_block = conv.format_summaries_block(summaries)
+        if summary_block:
+            role = role + "\n\n" + summary_block
         system_prompt = await build_for_agent(
-            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+            user_id=ctx.user_id, agent_role=role,
         )
         result = await self.model_client.call(
             user_id=ctx.user_id,

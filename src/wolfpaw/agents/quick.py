@@ -136,7 +136,10 @@ class QuickAgent:
         settings = get_settings()
 
         async with acquire() as conn:
-            past = await conv.fetch_recent(conn, thread_id=thread_id, n=20)
+            past = await conv.fetch_recent(
+                conn, thread_id=thread_id, n=settings.recent_window_size,
+            )
+            summaries = await conv.fetch_summaries(conn, thread_id=thread_id)
             await conv.append(
                 conn, thread_id=thread_id, role="user", content=content
             )
@@ -152,6 +155,7 @@ class QuickAgent:
             model=settings.model_quick,
             messages=messages,
             tool_specs=tool_specs,
+            summaries=summaries,
             emit=emit,
         )
 
@@ -168,13 +172,19 @@ class QuickAgent:
         model: str,
         messages: list[dict[str, Any]],
         tool_specs: list[dict[str, Any]],
+        summaries: list[conv.ThreadSummary],
         emit: EmitFn | None,
     ) -> str:
         # Build the full system prompt once per turn (Soul + Profile +
-        # agent role). Stable across the tool loop, so we don't re-fetch
-        # the profile mid-loop even though it could in principle change.
+        # agent role + earlier-thread summaries). Stable across the
+        # tool loop, so we don't re-fetch mid-loop even though it could
+        # in principle change.
+        role = _AGENT_ROLE
+        summary_block = conv.format_summaries_block(summaries)
+        if summary_block:
+            role = role + "\n\n" + summary_block
         system_prompt = await build_for_agent(
-            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+            user_id=ctx.user_id, agent_role=role,
         )
         for iteration in range(self._max_iterations):
             result = await self.model_client.call(

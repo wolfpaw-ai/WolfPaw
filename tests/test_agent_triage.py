@@ -77,6 +77,9 @@ def triage_env(monkeypatch):
     async def fake_fetch_recent(_conn, *, thread_id, n=20):
         return []
 
+    async def fake_fetch_summaries(_conn, *, thread_id):
+        return []
+
     async def fake_bump(_conn, *, agent, version_label, content_template):
         return SimpleNamespace(
             id=uuid4(), agent=agent, version_label=version_label,
@@ -96,6 +99,9 @@ def triage_env(monkeypatch):
     )
     monkeypatch.setattr(
         "wolfpaw.agents.triage.conv.fetch_recent", fake_fetch_recent,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.triage.conv.fetch_summaries", fake_fetch_summaries,
     )
     monkeypatch.setattr(
         "wolfpaw.agents.triage.bump_prompt_version", fake_bump,

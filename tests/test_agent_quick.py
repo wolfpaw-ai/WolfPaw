@@ -103,6 +103,9 @@ def agent_env(monkeypatch):
             for m in msgs
         ]
 
+    async def fake_fetch_summaries(_conn, *, thread_id):
+        return []
+
     async def fake_append(_conn, *, thread_id, role, content, metadata=None):
         store.threads.setdefault(thread_id, []).append(
             {"role": role, "content": content}
@@ -127,6 +130,9 @@ def agent_env(monkeypatch):
     )
     monkeypatch.setattr(
         "wolfpaw.agents.quick.conv.fetch_recent", fake_fetch_recent,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.agents.quick.conv.fetch_summaries", fake_fetch_summaries,
     )
     monkeypatch.setattr("wolfpaw.agents.quick.conv.append", fake_append)
     monkeypatch.setattr(

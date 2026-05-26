@@ -107,7 +107,10 @@ class FakePostEvaluator:
 
 def _empty_plan_ctx():
     from wolfpaw.agents.planner import PlanContext
-    return PlanContext(past_plans=[], relevant_skills=[])
+    return PlanContext(
+        past_plans=[], relevant_skills=[],
+        summaries=[], vector_recall=[],
+    )
 
 
 def _plan(*, summary="Do it.", n_steps=2, is_task=False, skill=None) -> Plan:

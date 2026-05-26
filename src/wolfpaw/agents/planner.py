@@ -4,7 +4,9 @@ Flow on every planning request:
     1. Embed the user's query (Voyage)
     2. Search procedural memory for similar past plans (cosine on embedding)
     3. Search skills memory for matching seeded skills
-    4. (Step 12.5) Per-thread vector recall via conv.search_relevant
+    4. Per-thread vector recall via :func:`conv.search_relevant` — older
+       messages from this same thread that semantically match the new
+       query (surfaces context past the verbatim window).
     5. Call Sonnet with the retrieved context + the conversation history,
        forcing a single `generate_plan` tool_use so the output is a
        structured Plan (steps + summary + is_task flag).
@@ -54,6 +56,8 @@ class PlanContext:
 
     past_plans: list[procedural.StoredPlan]
     relevant_skills: list[skills_mem.Skill]
+    summaries: list[conv.ThreadSummary]
+    vector_recall: list[conv.Message]
 
 
 _GENERATE_PLAN_TOOL = {
@@ -223,11 +227,32 @@ class PlannerAgent:
             except Exception:  # noqa: BLE001 — metering must not break planning
                 log.warning("agents.planner.embed_record_failed", exc_info=True)
 
-        # 2-3. Retrieval.
+        # 2-4. Retrieval. Conversational memory is per-thread, so we
+        # skip those queries when running subagent (thread_id=None).
+        settings = get_settings()
         async with acquire() as conn:
             past = (
-                await conv.fetch_recent(conn, thread_id=thread_id, n=20)
+                await conv.fetch_recent(
+                    conn,
+                    thread_id=thread_id,
+                    n=settings.recent_window_size,
+                )
                 if thread_id is not None else []
+            )
+            summaries = (
+                await conv.fetch_summaries(conn, thread_id=thread_id)
+                if thread_id is not None else []
+            )
+            vector_recall = (
+                await conv.search_relevant(
+                    conn,
+                    thread_id=thread_id,
+                    query_embedding=query_embedding,
+                    k=settings.vector_recall_k,
+                    exclude_recent_n=settings.recent_window_size,
+                )
+                if thread_id is not None and query_embedding is not None
+                else []
             )
             past_plans = (
                 await procedural.search_similar(
@@ -244,13 +269,24 @@ class PlannerAgent:
                 if query_embedding is not None else []
             )
 
-        plan_ctx = PlanContext(past_plans=past_plans, relevant_skills=relevant_skills)
+        plan_ctx = PlanContext(
+            past_plans=past_plans,
+            relevant_skills=relevant_skills,
+            summaries=summaries,
+            vector_recall=vector_recall,
+        )
 
-        # 4. Build messages. The system prompt is Soul + User File + the
-        # planner's role + the retrieved context block (past plans + skills).
-        # build_for_agent assembles the first three; we append the dynamic
-        # context block after.
-        context_block = _format_context_block(past_plans, relevant_skills)
+        # 5. Build messages. The system prompt is Soul + User File + the
+        # planner's role + the retrieved context block (past plans +
+        # skills + thread summaries + vector recall). build_for_agent
+        # assembles the first three; we append the dynamic context
+        # block after.
+        context_block = _format_context_block(
+            past_plans=past_plans,
+            relevant_skills=relevant_skills,
+            summaries=summaries,
+            vector_recall=vector_recall,
+        )
         role_with_context = _AGENT_ROLE + (
             "\n\n" + context_block if context_block else ""
         )
@@ -325,10 +361,19 @@ def _price_voyage(input_tokens: int) -> int:
 
 
 def _format_context_block(
+    *,
     past_plans: list[procedural.StoredPlan],
     relevant_skills: list[skills_mem.Skill],
+    summaries: list[conv.ThreadSummary],
+    vector_recall: list[conv.Message],
 ) -> str:
     parts: list[str] = []
+    summary_block = conv.format_summaries_block(summaries)
+    if summary_block:
+        parts.append(summary_block)
+    recall_block = conv.format_vector_recall_block(vector_recall)
+    if recall_block:
+        parts.append(recall_block)
     if past_plans:
         lines = ["## Past plans you've run for this user (most-similar first)"]
         for p in past_plans:
