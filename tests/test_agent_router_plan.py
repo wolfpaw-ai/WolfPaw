@@ -519,6 +519,105 @@ async def test_pre_eval_emits_pre_eval_sse_event():
     assert "looks clean" in pre_eval_events[0][1]
 
 
+# --- step 25: skill auto-emission integration ----------------------------
+
+
+async def test_router_invokes_skill_distiller_after_high_score(monkeypatch):
+    """When the Post-Evaluator scores a plan highly, the Router calls
+    maybe_distill_skill. We stub the helper itself and assert on the
+    arguments — the helper's own behavior is unit-tested separately."""
+    from wolfpaw.schemas import PostEvalVerdict
+
+    distill_calls: list[dict] = []
+
+    async def fake_maybe(*, ctx, plan, execution, verdict, emit=None):
+        distill_calls.append({
+            "plan_id": plan.id,
+            "score": verdict.score,
+        })
+        return None
+
+    monkeypatch.setattr(
+        "wolfpaw.agents.router.maybe_distill_skill", fake_maybe,
+    )
+
+    plan = _plan(n_steps=3)
+    planner = FakePlanner(plan=plan)
+    executor = FakeExecutor(_execution(plan, final_answer="great"))
+    evaluator = FakePostEvaluator(
+        verdict=PostEvalVerdict(score=95, summary="excellent"),
+    )
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=planner, executor=executor, post_evaluator=evaluator,
+    )
+    await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x")
+    assert len(distill_calls) == 1
+    assert distill_calls[0]["plan_id"] == plan.id
+    assert distill_calls[0]["score"] == 95
+
+
+async def test_router_invokes_distiller_even_for_low_scores(monkeypatch):
+    """The Router *always* calls maybe_distill_skill — the threshold
+    gate lives inside the helper. This keeps the wiring uniform and
+    makes the threshold tunable via config without router changes."""
+    from wolfpaw.schemas import PostEvalVerdict
+
+    distill_calls: list[dict] = []
+
+    async def fake_maybe(*, ctx, plan, execution, verdict, emit=None):
+        distill_calls.append({"score": verdict.score})
+        return None
+
+    monkeypatch.setattr(
+        "wolfpaw.agents.router.maybe_distill_skill", fake_maybe,
+    )
+
+    plan = _plan()
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=FakePlanner(plan=plan),
+        executor=FakeExecutor(_execution(plan, final_answer="x")),
+        post_evaluator=FakePostEvaluator(
+            verdict=PostEvalVerdict(score=40, summary="mediocre"),
+        ),
+    )
+    await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x")
+    assert len(distill_calls) == 1
+    assert distill_calls[0]["score"] == 40
+
+
+async def test_router_swallows_distiller_failure(monkeypatch):
+    """A distiller exception must not propagate — the user still gets
+    the executor's answer and the score event."""
+    from wolfpaw.schemas import PostEvalVerdict
+
+    async def broken_maybe(**_kw):
+        raise RuntimeError("distiller crashed")
+
+    monkeypatch.setattr(
+        "wolfpaw.agents.router.maybe_distill_skill", broken_maybe,
+    )
+
+    plan = _plan()
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=FakePlanner(plan=plan),
+        executor=FakeExecutor(_execution(plan, final_answer="result")),
+        post_evaluator=FakePostEvaluator(
+            verdict=PostEvalVerdict(score=95, summary="ok"),
+        ),
+    )
+    text = await router.handle(ctx=_ctx(), thread_id=uuid4(), content="x")
+    assert text == "result"
+
+
 async def test_pre_eval_retry_emits_two_pre_eval_events():
     """Reject + retry path emits one event for the rejection and a
     second when the helper ships the unchecked second draft."""

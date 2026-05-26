@@ -6,6 +6,7 @@ Step 12: Planning Agent (Sonnet/Opus + procedural + skills retrieval).
 Step 13: Executor (runs a Plan, dispatches step kinds, parallel groups).
 Step 14: Post-Evaluator (scores completed executions, updates procedural memory).
 Step 24 (v2): Plan Pre-Evaluator (sanity-check between Planner and Executor).
+Step 25 (v2): Skill Distiller (auto-emit skills from high-scoring plans).
 """
 
 from wolfpaw.agents.executor import (
@@ -32,6 +33,12 @@ from wolfpaw.agents.post_evaluator import (
 )
 from wolfpaw.agents.quick import QuickAgent
 from wolfpaw.agents.router import Router, get_router, reset_router
+from wolfpaw.agents.skill_distiller import (
+    SkillDistillerAgent,
+    get_skill_distiller_agent,
+    maybe_distill_skill,
+    reset_skill_distiller_agent,
+)
 from wolfpaw.agents.triage import (
     Route,
     Complexity,
@@ -49,6 +56,7 @@ __all__ = [
     "QuickAgent",
     "Route",
     "Router",
+    "SkillDistillerAgent",
     "TriageAgent",
     "TriageVerdict",
     "get_executor_agent",
@@ -56,10 +64,13 @@ __all__ = [
     "get_post_evaluator_agent",
     "get_pre_evaluator_agent",
     "get_router",
+    "get_skill_distiller_agent",
+    "maybe_distill_skill",
     "plan_with_pre_evaluation",
     "reset_executor_agent",
     "reset_planner_agent",
     "reset_post_evaluator_agent",
     "reset_pre_evaluator_agent",
     "reset_router",
+    "reset_skill_distiller_agent",
 ]

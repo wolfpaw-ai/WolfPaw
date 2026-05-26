@@ -43,6 +43,7 @@ from wolfpaw.agents.post_evaluator import (
     PostEvaluatorAgent,
     get_post_evaluator_agent,
 )
+from wolfpaw.agents.skill_distiller import maybe_distill_skill
 from wolfpaw.memory import procedural, task_events, tasks as tasks_dao
 from wolfpaw.memory.db import acquire
 from wolfpaw.schemas import ExecutionPlan, Plan, PostEvalVerdict
@@ -329,6 +330,17 @@ class TaskService:
                     )
         except Exception:  # noqa: BLE001
             log.warning("tasks.service.scoring_failed", exc_info=True)
+
+        # Skill auto-emission (step 25). Self-gated by score + reusability +
+        # dedup; never blocks the task's terminal transition.
+        if verdict is not None:
+            try:
+                await maybe_distill_skill(
+                    ctx=ctx, plan=plan, execution=execution,
+                    verdict=verdict, emit=emit,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("tasks.service.skill_distiller_failed", exc_info=True)
 
         # Terminal status.
         if execution.success:

@@ -11,10 +11,14 @@ v1 ships:
   - A hand-written **seeded starter set** loaded once at boot via
     `seed_starter_skills(conn, embedder)`.
 
-v2 (deferred):
-  - Auto-emission by the Post-Evaluator when a plan scores highly + looks
-    reusable.
+v2 step 25 adds:
+  - `store_emitted(...)` — writes a user-scoped Skill produced by the
+    Skill Distiller after a high-scoring plan, with `source_plan_id`
+    pointing back at the originating plan.
+
+v3+ (deferred):
   - Per-user write-back from the agent ("save this approach as a skill").
+  - Skills marketplace (Pawhub) — share + import.
 """
 
 from __future__ import annotations
@@ -89,6 +93,43 @@ async def search_by_task(
         user_id, query_embedding, k,
     )
     return [_row_to_skill(r, similarity=float(r["similarity"])) for r in rows]
+
+
+# --- runtime emission (step 25) -------------------------------------------
+
+
+async def store_emitted(
+    conn: asyncpg.Connection,
+    *,
+    user_id: UUID,
+    name: str,
+    description: str,
+    embedding: list[float],
+    ingredients: dict[str, Any],
+    steps: list[dict[str, Any]],
+    source_plan_id: UUID,
+    score: int | None = None,
+) -> UUID:
+    """Insert one user-scoped Skill produced by the Skill Distiller.
+
+    Returns the new skill id. Unlike :func:`seed_starter_skills` (which
+    only inserts shared rows with ``user_id IS NULL``), this writes a
+    per-user row keyed on the originating plan via ``source_plan_id``.
+    The caller is responsible for dedup against existing skills — see
+    :func:`wolfpaw.agents.skill_distiller.maybe_distill_skill` for the
+    canonical flow.
+    """
+    return await conn.fetchval(
+        """
+        INSERT INTO skills (user_id, name, description, embedding,
+                            ingredients, steps, source_plan_id, score)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+        RETURNING id
+        """,
+        user_id, name, description, embedding,
+        json.dumps(ingredients), json.dumps(steps),
+        source_plan_id, score,
+    )
 
 
 # --- seeding ---------------------------------------------------------------

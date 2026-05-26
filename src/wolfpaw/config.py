@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     l2_fold_threshold: int = 10
     vector_recall_k: int = 5
 
+    # Skills auto-emission (step 25). When the Post-Evaluator scores a
+    # plan at or above `skill_emit_min_score` AND the plan looks
+    # reusable (multi-step + uses tools), the Skill Distiller runs to
+    # generalize it into a named skill. Dedup against existing skills
+    # is by cosine similarity on the plan's query embedding — anything
+    # with a hit above `skill_dedup_similarity_threshold` is dropped.
+    skill_emit_min_score: int = 90
+    skill_dedup_similarity_threshold: float = 0.85
+
     # Persona (step 17). Soul file path; empty → fall back to the
     # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
     soul_path: str = ""

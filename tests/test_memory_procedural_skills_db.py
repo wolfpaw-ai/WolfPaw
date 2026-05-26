@@ -296,3 +296,106 @@ async def test_skills_search_skips_rows_without_embedding():
     finally:
         await conn.close()
     assert all(s.name != "no_embed" for s in results)
+
+
+# --- step 25: store_emitted ----------------------------------------------
+
+
+async def test_store_emitted_inserts_user_scoped_skill_pointing_at_source_plan():
+    """The user-scoped emit path persists name + description + embedding
+    + ingredients + steps + source_plan_id + score and returns the
+    new id. Subsequent search_by_task surfaces it for the same user."""
+    from wolfpaw.memory import procedural
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    embedder = StubEmbedder(dimensions=1024)
+    desc = "Research N vendors and emit a comparison table."
+    desc_vec = (await embedder.embed_one(desc)).vectors[0]
+    query_vec = (await embedder.embed_one("compare vendors")).vectors[0]
+
+    conn = await _conn()
+    try:
+        plan_id = await procedural.store(
+            conn, user_id=uid, thread_id=None, task_id=None,
+            query="compare vendors", query_embedding=query_vec,
+            steps=[{"id": "s1", "kind": "functional", "tool": "web_search",
+                    "description": "find them"}],
+            score=95, success=True,
+        )
+
+        new_id = await skills_mem.store_emitted(
+            conn,
+            user_id=uid,
+            name="vendor_lookup_table_v2",
+            description=desc, embedding=desc_vec,
+            ingredients={"tools": ["web_search", "create_spreadsheet"]},
+            steps=[
+                {"id": "search", "kind": "functional", "tool": "web_search",
+                 "description": "find homepages"},
+            ],
+            source_plan_id=plan_id, score=95,
+        )
+
+        row = await conn.fetchrow(
+            "SELECT user_id, name, description, ingredients, steps,"
+            "       source_plan_id, score"
+            "  FROM skills WHERE id = $1",
+            new_id,
+        )
+        # And the emitted skill is retrievable for the same user.
+        hits = await skills_mem.search_by_task(
+            conn, user_id=uid, query_embedding=desc_vec, k=5,
+        )
+    finally:
+        await conn.close()
+
+    assert row["user_id"] == uid
+    assert row["name"] == "vendor_lookup_table_v2"
+    assert row["description"] == desc
+    assert row["source_plan_id"] == plan_id
+    assert row["score"] == 95
+    assert any(s.name == "vendor_lookup_table_v2" for s in hits)
+
+
+async def test_store_emitted_does_not_surface_for_other_users():
+    """A user's emitted skill stays scoped to their user_id — seeded
+    rows (user_id IS NULL) are shared, but emitted rows are not."""
+    from wolfpaw.memory import procedural
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    alice = await _seed_user(dsn)
+    bob = await _seed_user(dsn)
+    embedder = StubEmbedder(dimensions=1024)
+    desc = "Alice's private vendor table skill."
+    desc_vec = (await embedder.embed_one(desc)).vectors[0]
+
+    conn = await _conn()
+    try:
+        plan_id = await procedural.store(
+            conn, user_id=alice, thread_id=None, task_id=None,
+            query="alice-only", query_embedding=desc_vec,
+            steps=[{"id": "x", "kind": "reasoning", "description": "t"}],
+        )
+        await skills_mem.store_emitted(
+            conn,
+            user_id=alice,
+            name="alice_only_skill",
+            description=desc, embedding=desc_vec,
+            ingredients={}, steps=[
+                {"id": "a", "kind": "reasoning", "description": "t"},
+            ],
+            source_plan_id=plan_id, score=95,
+        )
+
+        alice_hits = await skills_mem.search_by_task(
+            conn, user_id=alice, query_embedding=desc_vec, k=5,
+        )
+        bob_hits = await skills_mem.search_by_task(
+            conn, user_id=bob, query_embedding=desc_vec, k=5,
+        )
+    finally:
+        await conn.close()
+
+    assert any(s.name == "alice_only_skill" for s in alice_hits)
+    assert all(s.name != "alice_only_skill" for s in bob_hits)

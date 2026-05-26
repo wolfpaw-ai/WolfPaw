@@ -36,6 +36,7 @@ from wolfpaw.agents.post_evaluator import (
     get_post_evaluator_agent,
 )
 from wolfpaw.agents.quick import QuickAgent, get_quick_agent
+from wolfpaw.agents.skill_distiller import maybe_distill_skill
 from wolfpaw.agents.triage import (
     Route,
     TriageAgent,
@@ -310,8 +311,10 @@ class Router:
         emit: EmitFn | None,
     ) -> None:
         """Run the Post-Evaluator, persist score to procedural memory,
-        write a `plan_scored` task_event. Failures are logged + swallowed
-        — scoring must never block returning the user's answer."""
+        write a `plan_scored` task_event, and (step 25) conditionally
+        distill a Skill from high-scoring reusable plans. Every step is
+        best-effort — scoring + emission must never block returning the
+        user's answer."""
         try:
             verdict = await self.post_evaluator.evaluate(
                 ctx=ctx, plan=plan, execution=execution,
@@ -323,6 +326,17 @@ class Router:
         await _maybe_emit(
             emit, "score", f"{verdict.score}/100 — {verdict.summary}",
         )
+
+        # Skill auto-emission (step 25). Self-gated by score threshold +
+        # reusability heuristic + dedup; runs to completion or silently
+        # returns None.
+        try:
+            await maybe_distill_skill(
+                ctx=ctx, plan=plan, execution=execution,
+                verdict=verdict, emit=emit,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("router.skill_distiller_failed", exc_info=True)
 
         if plan.id is None:
             # Planner didn't persist — nothing to score in procedural memory.

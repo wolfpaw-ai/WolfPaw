@@ -75,15 +75,20 @@ New agent between Planner and Executor that catches obviously-broken or gratuito
 - Tests: 11 new unit tests in `test_agent_plan_pre_evaluator.py` (forced-tool parsing + each rejection axis + past-plan filtering + approve-by-default + retry helper), 4 new integration tests in `test_agent_router_plan.py` (approve path, reject+retry, single SSE event on approve, two SSE events on retry), 2 new planner tests for the revision-diagnosis prompt block. Suite: **337 passing / 121 DB-gated skipped** (was 320/121).
 - Threshold for `_HIGH_SCORE_THRESHOLD` is 80 — open question in the spec was the score that qualifies a "past plan worth beating". 80 keeps it conservative; tune after dogfooding.
 
-### 25. Skills auto-emission — M
+### 25. Skills auto-emission — M ✅ **completed**
 
-Post-Evaluator promotes high-scoring reusable plans → distilled Skills.
+The compounding-quality move: high-scoring reusable plans get distilled into named Skills that the Planner pulls first on future similar requests.
 
-- New: `agents/skill_distiller.py` (Sonnet, forced `emit_skill` tool — produces `name`, `description`, `ingredients`, `generalized_steps`)
-- Trigger: Post-Evaluator score ≥ 90 AND plan looks reusable (heuristic — multi-step, uses tools, not a one-shot answer)
-- Persist via `memory.skills.store(...)` with `source_plan_id`
-- Open: dedup logic (don't emit Nth copy of "vendor research" skill — check `search_by_task` for near-duplicates first)
-- Threshold tunable via `WOLFPAW_SKILL_EMIT_MIN_SCORE`
+- New `agents/skill_distiller.py` — `SkillDistillerAgent` (Sonnet via `model_planner`) with a forced `emit_skill` tool_use returning `name` (snake_case), `description` (one paragraph, written abstractly so it embeds similarly to future user queries), `ingredients` (`{"tools": [...]}` hints), and `generalized_steps` (skeleton in the same shape as a Plan's steps but with placeholders for user-specific values). System prompt explicitly directs the model to strip user-specific details and write the description "to embed similarly to how a future user would phrase the same request."
+- New `maybe_distill_skill(...)` helper in the same module — full emission flow with five gates: (1) score ≥ `skill_emit_min_score` (default 90), (2) reusability heuristic (multi-step AND at least one functional or subagent step), (3) `plan.id is not None`, (4) dedup pass against existing skills via cosine on the plan's query embedding (drops on hit above `skill_dedup_similarity_threshold`, default 0.85), (5) distiller produces a structured payload. Re-embeds the distilled description (canonical retrieval text) before persisting.
+- New `memory.skills.store_emitted(...)` — user-scoped insert keyed on `source_plan_id` pointing back at the originating plan row.
+- New migration `009_skill_distiller.sql` — adds `'skill_distiller'` to the `agent_kind` enum so `token_usage` rows attribute cleanly.
+- New `PreEvalVerdict`-style flow: `Router._score_and_persist` + `TaskService._run_inner` both call `maybe_distill_skill` after Post-Evaluator scoring. Wrapped in try/except — skill emission is best-effort and must never block returning the user's answer.
+- New SSE event `skill_emitted` carrying the new skill's name so the UI can surface "I learned a new skill" moments.
+- New config: `skill_emit_min_score` (default 90, env `WOLFPAW_SKILL_EMIT_MIN_SCORE`), `skill_dedup_similarity_threshold` (default 0.85).
+- Tests: 19 new unit tests in `test_agent_skill_distiller.py` (forced-tool parsing, the reusability + threshold gates, dedup short-circuit, full happy path, persistence failure handling, threshold tunability), 3 new integration tests in `test_agent_router_plan.py` (router invokes the helper after scoring, even on low scores so threshold lives in one place, swallows distiller failures), 2 new DB-gated tests in `test_memory_procedural_skills_db.py` (`store_emitted` round-trip + user scoping). Suite: **359 passing / 123 DB-gated skipped** (was 337/121).
+- **Open question deliberately answered**: the v2 spec asked "what score qualifies a plan for promotion?" — answered 90, conservative, tunable. Same kind of threshold as the Pre-Evaluator's `_HIGH_SCORE_THRESHOLD=80` from step 24; both should be revisited after dogfooding produces real plan-distribution data.
+- **Followup before step 26 (Sleep Cycle)**: skill consolidation (merging near-duplicate user-emitted skills across plans) is on the Sleep Cycle's agenda; this step's dedup is single-shot at emit time, so a slow drift of "almost-same skills" is still possible. The Sleep Cycle will sweep these.
 
 ### 26. Sleep Cycle cron — M
 
