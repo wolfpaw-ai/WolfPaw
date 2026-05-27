@@ -28,6 +28,7 @@ states).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import UUID
@@ -188,7 +189,13 @@ class TaskService:
                 f"Task {task_id} has no status.pending event;"
                 " cannot recover run inputs"
             )
-        ev = dict(event_row["content"] or {})
+        # JSONB column normally arrives as a dict (asyncpg codec) but
+        # has been seen as a raw JSON string in production — match
+        # the defensive pattern used by skills/procedural/tools DAOs.
+        raw_content = event_row["content"]
+        if isinstance(raw_content, str):
+            raw_content = json.loads(raw_content) if raw_content else {}
+        ev = dict(raw_content or {})
         content = ev.get("content") or ""
         thread_id_raw = ev.get("thread_id")
         thread_id = UUID(thread_id_raw) if thread_id_raw else None
