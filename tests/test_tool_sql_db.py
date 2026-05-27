@@ -114,6 +114,168 @@ async def test_create_table_rejects_bad_identifier():
         )
 
 
+async def test_sql_insert_then_query_round_trip():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+    query = get_registry().get("sql_query")
+
+    await create.run(
+        ctx,
+        table_name="receipts",
+        columns=[
+            {"name": "id", "type": "integer", "not_null": True},
+            {"name": "vendor", "type": "text"},
+            {"name": "amount", "type": "numeric"},
+        ],
+    )
+    out = await insert.run(
+        ctx,
+        table_name="receipts",
+        rows=[
+            {"id": 1, "vendor": "Acme", "amount": 9.99},
+            {"id": 2, "vendor": "Globex", "amount": 42.5},
+        ],
+    )
+    assert out["inserted"] == 2
+
+    result = await query.run(
+        ctx, query="SELECT vendor FROM receipts ORDER BY id",
+    )
+    assert [r["vendor"] for r in result["rows"]] == ["Acme", "Globex"]
+
+
+async def test_sql_update_with_where():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+    update = get_registry().get("sql_update")
+    query = get_registry().get("sql_query")
+
+    await create.run(
+        ctx,
+        table_name="t",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "label", "type": "text"},
+        ],
+    )
+    await insert.run(
+        ctx, table_name="t",
+        rows=[{"id": 1, "label": "old"}, {"id": 2, "label": "old"}],
+    )
+
+    out = await update.run(
+        ctx, table_name="t",
+        set={"label": "new"}, where={"id": 1},
+    )
+    assert out["updated"] == 1
+
+    result = await query.run(
+        ctx, query="SELECT id, label FROM t ORDER BY id",
+    )
+    assert result["rows"] == [
+        {"id": 1, "label": "new"},
+        {"id": 2, "label": "old"},
+    ]
+
+
+async def test_sql_delete_with_where():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+    delete = get_registry().get("sql_delete")
+    query = get_registry().get("sql_query")
+
+    await create.run(
+        ctx, table_name="t",
+        columns=[{"name": "id", "type": "integer"}],
+    )
+    await insert.run(
+        ctx, table_name="t",
+        rows=[{"id": 1}, {"id": 2}, {"id": 3}],
+    )
+
+    out = await delete.run(ctx, table_name="t", where={"id": 2})
+    assert out["deleted"] == 1
+
+    result = await query.run(ctx, query="SELECT id FROM t ORDER BY id")
+    assert [r["id"] for r in result["rows"]] == [1, 3]
+
+
+async def test_sql_delete_where_all_clears_table():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+    delete = get_registry().get("sql_delete")
+    query = get_registry().get("sql_query")
+
+    await create.run(
+        ctx, table_name="t",
+        columns=[{"name": "id", "type": "integer"}],
+    )
+    await insert.run(
+        ctx, table_name="t",
+        rows=[{"id": 1}, {"id": 2}],
+    )
+
+    out = await delete.run(ctx, table_name="t", where_all=True)
+    assert out["deleted"] == 2
+
+    result = await query.run(ctx, query="SELECT id FROM t")
+    assert result["row_count"] == 0
+
+
+async def test_sql_insert_handles_jsonb_values():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+    query = get_registry().get("sql_query")
+
+    await create.run(
+        ctx, table_name="payloads",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "data", "type": "jsonb"},
+        ],
+    )
+    await insert.run(
+        ctx, table_name="payloads",
+        rows=[{"id": 1, "data": {"nested": [1, 2, 3], "ok": True}}],
+    )
+
+    result = await query.run(ctx, query="SELECT data FROM payloads")
+    assert result["rows"][0]["data"] == {"nested": [1, 2, 3], "ok": True}
+
+
+async def test_sql_crud_blocks_injection_via_value():
+    """Quoted identifiers + parameterized values mean SQL fragments in
+    values are inert. A payload that 'looks like' a DROP must end up as
+    a literal string column value, not executed."""
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+    query = get_registry().get("sql_query")
+
+    await create.run(
+        ctx, table_name="canary",
+        columns=[{"name": "note", "type": "text"}],
+    )
+    payload = "'); DROP TABLE canary; --"
+    await insert.run(
+        ctx, table_name="canary", rows=[{"note": payload}],
+    )
+    # Table still exists, payload stored verbatim.
+    result = await query.run(ctx, query="SELECT note FROM canary")
+    assert result["rows"][0]["note"] == payload
+
+
 async def test_per_user_isolation():
     """User B cannot see user A's table via the search_path-scoped query."""
     a, b = uuid4(), uuid4()

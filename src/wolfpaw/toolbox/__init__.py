@@ -23,7 +23,10 @@ from wolfpaw.toolbox.tools import (  # noqa: F401
     run_python,
     sandbox_read_file,
     sandbox_write_file,
+    sql_delete,
+    sql_insert,
     sql_query,
+    sql_update,
     web_search,
     write_doc,
 )
