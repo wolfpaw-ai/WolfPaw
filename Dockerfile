@@ -50,7 +50,9 @@ RUN groupadd --system --gid 1000 wolfpaw \
 
 # Pull the installed packages from the builder.
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
+# Copy every console script pip installed (uvicorn, arq, etc.) so new
+# dependencies that ship CLI entry points don't need Dockerfile patches.
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 WORKDIR /app
 
