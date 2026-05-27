@@ -471,6 +471,96 @@ async def test_evaluate_ignores_non_functional_steps():
     assert _validate_functional_step_inputs(plan) is None
 
 
+async def test_missing_tool_diagnosis_steers_toward_tool_creator():
+    """The bug from the 'save recipe to DB' report: the model emitted
+    a functional step with no tool, the diagnosis just said 'pick a
+    tool', the retry came back in the same broken shape. The new
+    diagnosis must explicitly mention `tool_creator` as the right
+    answer for capability gaps."""
+    from wolfpaw.agents.plan_pre_evaluator import _validate_functional_step_inputs
+
+    plan = Plan(
+        query="save the recipe to a SQL table",
+        summary="x",
+        steps=[
+            Step(
+                id="create_write_tool", kind="functional",
+                description="Propose a new sql_write tool",
+                # No tool, no inputs — the bug.
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    diagnosis = _validate_functional_step_inputs(plan)
+    assert diagnosis is not None
+    assert "tool_creator" in diagnosis
+    assert "intent" in diagnosis
+    assert "DO NOT" in diagnosis  # explicit don't-invent-tool warning
+
+
+async def test_tool_creator_step_requires_inputs_intent():
+    """tool_creator steps need `inputs.intent` — the validator should
+    catch a tool_creator step without an intent before the Executor
+    crashes on it."""
+    from wolfpaw.agents.plan_pre_evaluator import _validate_functional_step_inputs
+
+    plan = Plan(
+        query="x", summary="x",
+        steps=[
+            Step(
+                id="propose", kind="tool_creator",
+                description="propose a tool",
+                inputs={},  # missing intent
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    diagnosis = _validate_functional_step_inputs(plan)
+    assert diagnosis is not None
+    assert "tool_creator" in diagnosis
+    assert "intent" in diagnosis
+
+
+async def test_tool_creator_step_with_intent_passes_validation():
+    from wolfpaw.agents.plan_pre_evaluator import _validate_functional_step_inputs
+
+    plan = Plan(
+        query="x", summary="x",
+        steps=[
+            Step(
+                id="propose", kind="tool_creator",
+                description="propose a tool",
+                inputs={
+                    "intent": "Execute INSERT/UPDATE/DELETE SQL.",
+                    "required_inputs": ["statement"],
+                },
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    assert _validate_functional_step_inputs(plan) is None
+
+
+async def test_tool_creator_step_with_empty_intent_string_rejected():
+    """Blank-string intent counts as missing — same posture as the
+    `read_doc(filename="")` case for functional steps."""
+    from wolfpaw.agents.plan_pre_evaluator import _validate_functional_step_inputs
+
+    plan = Plan(
+        query="x", summary="x",
+        steps=[
+            Step(
+                id="p", kind="tool_creator", description="x",
+                inputs={"intent": "   "},
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    diagnosis = _validate_functional_step_inputs(plan)
+    assert diagnosis is not None
+    assert "intent" in diagnosis
+
+
 async def test_plan_with_pre_evaluation_ships_second_plan_unconditionally():
     """Spec: one retry max. The helper must NOT re-evaluate the
     second plan — it ships unconditionally even if rejection would

@@ -249,9 +249,15 @@ def _validate_functional_step_inputs(plan: Plan) -> str | None:
     fields the tool's JSON-schema declares. Returns a diagnosis string
     on the first failure, or None when the plan is structurally sound.
 
-    Unknown tool names are skipped (they may be approved user-tools
-    that the DAO resolves at dispatch time). Validation only catches
-    *required* fields — optional fields are the Planner's call. Empty
+    Also validates `tool_creator` steps require `inputs.intent`, and
+    catches the common "model meant to use tool_creator but emitted
+    functional with a missing/invented tool" mistake — the diagnosis
+    in that case explicitly steers the retry toward `kind="tool_creator"`
+    rather than just "pick a tool from the catalog" (which steers the
+    Planner back into the same broken shape on retry).
+
+    Unknown tool names on functional steps are skipped (they may be
+    approved user-tools that the DAO resolves at dispatch time). Empty
     strings count as missing so we don't ship a plan that calls
     `read_doc(filename="")`.
     """
@@ -259,12 +265,36 @@ def _validate_functional_step_inputs(plan: Plan) -> str | None:
 
     registry = get_registry()
     for step in plan.steps:
+        if step.kind == "tool_creator":
+            inputs = step.inputs or {}
+            intent = inputs.get("intent")
+            if not isinstance(intent, str) or not intent.strip():
+                return (
+                    f"Step {step.id!r} is a `tool_creator` step but is"
+                    f" missing required `inputs.intent`. Add a"
+                    f" one-paragraph description of what the new tool"
+                    f" should do; the Tool Creator agent will turn"
+                    f" that into a concrete spec."
+                )
+            continue
+
         if step.kind != "functional":
             continue
+
         if not step.tool:
+            # The model probably meant to use tool_creator for a gap
+            # but reached for `functional` with no tool. Steer it
+            # explicitly — saying "pick a tool from the catalog" sends
+            # the retry right back into the same shape (or into an
+            # invented tool name).
             return (
-                f"Step {step.id!r} is functional but has no `tool`. "
-                f"Pick a tool from the catalog and set the `tool` field."
+                f"Step {step.id!r} is a `functional` step with no `tool`. "
+                f"If you need an operation that NO tool in the catalog"
+                f" covers, change this step's `kind` to `\"tool_creator\"`"
+                f" and set `inputs: {{\"intent\": \"...\"}}` — DO NOT"
+                f" leave `tool` blank or invent a tool name. Otherwise,"
+                f" pick the matching tool from the catalog and populate"
+                f" its required `inputs`."
             )
         try:
             tool = registry.get(step.tool)

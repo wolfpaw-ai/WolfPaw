@@ -161,6 +161,28 @@ Step kinds:
                        into a structured spec).
                      * `required_inputs`: optional array of input field names
                        (e.g. `["url", "max_pages"]`) — hints, not a contract.
+
+                   **CRITICAL distinction.** If you spot a capability gap, the
+                   step kind is `tool_creator`. It is NEVER a `functional`
+                   step with a missing or invented `tool`. Examples:
+
+                     WRONG — functional with no tool (model meant tool_creator):
+                       {"id": "create_x", "kind": "functional",
+                        "description": "Propose a new sql_write tool"}
+
+                     WRONG — functional with an invented tool name:
+                       {"id": "save_row", "kind": "functional",
+                        "tool": "sql_write",
+                        "inputs": {"query": "INSERT INTO ..."}}
+
+                     RIGHT — tool_creator for the gap:
+                       {"id": "propose_sql_write", "kind": "tool_creator",
+                        "description": "Need a write-capable SQL tool",
+                        "inputs": {"intent": "Execute INSERT/UPDATE/DELETE
+                          statements against the user's per-user SQL
+                          workspace. `sql_query` is read-only and there is
+                          no write counterpart yet.",
+                          "required_inputs": ["statement", "params"]}}
   - "subagent"   — delegate a chunk of work to a child task that runs its own full
                    Planner→Executor→Post-Evaluator pipeline. Use this when:
                      * the work splits into independent investigations that benefit
