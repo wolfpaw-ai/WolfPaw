@@ -51,7 +51,7 @@ A longer feature-by-feature comparison lives in [`spec.md`](spec.md).
 
 ## Deploying Wolfpaw
 
-This repo is the Wolfpaw app — agents, channels, memory, tools, sandbox, metering, REST + SSE API, React web client, arq worker, OAuth integrations. Deployable to your own server, laptop, or homelab. Bring your own model + embedding + (optional) sandbox API keys. Operate your own Telegram / Slack bots. You own everything. License TBD.
+This repo is the Wolfpaw app — agents, channels, memory, tools, sandbox, metering, REST + SSE API, React web client, arq worker, OAuth integrations. Deployable to your own server, laptop, or homelab. Bring your own model + embedding + (optional) sandbox API keys. Operate your own Telegram / Slack bots. You own everything. Released under the [MIT License](LICENSE).
 
 Wolfpaw ships everything it needs to run on a single host or be wrapped behind a multi-tenant service. The deployment story — reverse proxy, log shipper, secrets management, infra-as-code — is intentionally left to the operator so this repo stays vendor-neutral.
 
@@ -308,4 +308,4 @@ The v1 build order ran 21 steps and is shipped end-to-end. v2 extends with self-
 
 ## License
 
-TBD. Will be open-source-friendly; specific license decided later.
+Wolfpaw is released under the [MIT License](LICENSE). You may use, modify, distribute, and self-host it freely, including in commercial settings, as long as the copyright notice and license text travel with substantial portions of the code.

@@ -9,7 +9,7 @@ Wolfpaw learns from resources you give it (links, uploaded documents, forwarded 
 
 **Wolfpaw Cloud (paid, hosted).** Sign up at wolfpaw.ai, pick a plan, talk to your agent in minutes. No API keys, no installation, no developer setup. Inference is included up to your tier's allowance. Pay-as-you-go is opt-in, never automatic.
 
-**Wolfpaw Open Source (self-hosted, free).** Same code, deployable to your own server, laptop, or homelab. Bring your own API keys. Operate your own Telegram bot. You own everything. License TBD.
+**Wolfpaw Open Source (self-hosted, free).** Same code, deployable to your own server, laptop, or homelab. Bring your own API keys. Operate your own Telegram bot. You own everything. MIT licensed.
 
 This is the WordPress.org / WordPress.com model: one project, two distributions. The hosted version exists so non-developers can use Wolfpaw without setup; the OSS version exists so developers can hack on it, run it privately, and verify what it does with their data.
 
@@ -142,7 +142,7 @@ Both Cowork and Wolfpaw bundle inference. Where Wolfpaw is differentiated is the
 
 | Feature | OpenClaw | Cowork | Wolfpaw |
 |---|:---:|:---:|:---:|
-| Open source | ✅ | ❌ | 🚧 v1 (license TBD) |
+| Open source | ✅ | ❌ | ✅ MIT |
 | Hosted SaaS option | ❌ | partial — desktop app + Anthropic accounts | 🚧 v1 |
 | Self-host option | ✅ | ❌ | 🚧 v1.5 |
 | Same codebase serves both distributions | n/a | n/a | 🚧 v1 |
@@ -218,4 +218,4 @@ Token usage is metered per request, per model, per channel from day one — visi
 
 ## License
 
-TBD. Will be open-source-friendly; specific license decided later.
+MIT — see [LICENSE](LICENSE).
