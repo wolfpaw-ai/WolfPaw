@@ -125,6 +125,24 @@ class ExecutionPlan:
 
 
 @dataclass(frozen=True)
+class ReplanContext:
+    """Runtime handoff from Executor → Planner when a step fails after
+    step-level retry exhausted. Lets the Planner write a continuation
+    plan that finishes the user's original request without redoing the
+    work that already succeeded.
+
+    Not persisted — lives only on the call stack of one execute() →
+    plan() chain. The fields it carries are also what the post-evaluator
+    and task_events already record after the fact, so there's nothing
+    new to durably store for this feature."""
+
+    original_query: str
+    completed_results: list[StepResult]
+    failed_step: Step
+    failed_step_error: str
+
+
+@dataclass(frozen=True)
 class PostEvalVerdict:
     """Post-Evaluator's scoring output (step 14).
 

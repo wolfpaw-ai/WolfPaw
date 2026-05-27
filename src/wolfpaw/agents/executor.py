@@ -31,7 +31,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
 from uuid import UUID
 
 from wolfpaw.config import get_settings
@@ -44,13 +44,27 @@ from wolfpaw.sandbox import get_manager as get_sandbox_manager
 from wolfpaw.schemas import (
     ExecutionPlan,
     Plan,
+    ReplanContext,
     Step,
     StepResult,
     StepStatus,
 )
-from wolfpaw.toolbox.registry import Registry, ToolContext, get_registry
+from wolfpaw.toolbox.registry import (
+    Registry,
+    Tool,
+    ToolContext,
+    ToolError,
+    get_registry,
+)
 from wolfpaw.tracing import get_logger
 from wolfpaw.workspace.files import WorkspaceCollision
+
+if TYPE_CHECKING:
+    # Lazy reference: the Executor calls Planner.plan() on replan, but
+    # Planner doesn't import Executor — no real cycle, just keeping the
+    # import out of module-load order so test fakes can stub the Planner
+    # via the `planner=` constructor argument.
+    from wolfpaw.agents.planner import PlannerAgent
 
 # Affirmative answers to the "overwrite?" prompt. Anything not in here is
 # treated as a decline (which is the safer default — the executor will
@@ -68,6 +82,16 @@ MAX_SUBAGENT_DEPTH = 3
 # can't overwhelm the model provider or sandbox capacity. Per-root keeps
 # unrelated user tasks independent.
 MAX_CONCURRENT_SUBAGENTS_PER_ROOT = 5
+
+# Step-level recovery (1): if a functional step's tool raises ToolError,
+# call a cheap model to repair the inputs once and re-run. _MAX_TOOL_ATTEMPTS
+# counts the initial call + every retry, so 2 = "one repair attempt."
+_MAX_TOOL_ATTEMPTS = 2
+
+# Mid-plan replan (3): if a step still fails after step-level retry, ask
+# the Planner for a continuation. Capped at 1 per execution so a hostile
+# query can't pin the system in a replan loop.
+_MAX_REPLANS = 1
 
 # Process-local registry of root-task → semaphore. Refcounted so an entry
 # is dropped once its last in-flight subagent releases — keeps the dict
@@ -134,9 +158,11 @@ class ExecutorAgent:
         *,
         model_client: ModelClient | None = None,
         registry: Registry | None = None,
+        planner: "PlannerAgent | None" = None,
     ) -> None:
         self._model_client = model_client
         self._registry = registry
+        self._planner = planner
         self._prompt_version_id: UUID | None = None
         self._prompt_seeded = False
 
@@ -147,6 +173,14 @@ class ExecutorAgent:
     @property
     def registry(self) -> Registry:
         return self._registry or get_registry()
+
+    @property
+    def planner(self) -> "PlannerAgent":
+        if self._planner is not None:
+            return self._planner
+        from wolfpaw.agents.planner import get_planner_agent
+
+        return get_planner_agent()
 
     async def _ensure_prompt_version(self) -> None:
         if self._prompt_seeded:
@@ -189,6 +223,11 @@ class ExecutorAgent:
             )
 
         results: list[StepResult] = []
+        # Replan budget lives in the function scope — explicit local
+        # variable, not stateful on the agent. Capped at _MAX_REPLANS
+        # so a query that keeps tripping the same failure can't pin the
+        # system in a planner loop.
+        replan_budget = _MAX_REPLANS
         try:
             i = 0
             while i < len(steps):
@@ -222,6 +261,26 @@ class ExecutorAgent:
 
                 results.extend(batch_results)
                 if any(r.status == StepStatus.FAILED for r in batch_results):
+                    failed_result = next(
+                        r for r in batch_results
+                        if r.status == StepStatus.FAILED
+                    )
+                    # Try to recover by asking the Planner for a
+                    # continuation. If that returns a plan, splice its
+                    # steps in at i (which already points past the
+                    # failed batch) and continue. Otherwise mark the
+                    # remainder skipped and stop, matching the prior
+                    # v1 behavior.
+                    if replan_budget > 0:
+                        continuation = await self._replan_after_failure(
+                            ctx=ctx, original_plan=plan,
+                            completed=results, failed_result=failed_result,
+                            emit=emit,
+                        )
+                        if continuation is not None:
+                            replan_budget -= 1
+                            steps = steps[:i] + list(continuation.steps)
+                            continue
                     for skipped in steps[i:]:
                         results.append(
                             StepResult(
@@ -232,7 +291,21 @@ class ExecutorAgent:
                         )
                     break
 
-            success = all(r.status == StepStatus.COMPLETED for r in results) and bool(results)
+            # Success allows for replan recovery: a FAILED step buried
+            # mid-stream is fine if the continuation finished the work.
+            # The rule is "nothing was abandoned (no SKIPPED) and the
+            # final step ran to completion." A failure that was never
+            # recovered ends with SKIPPED entries, which fails this
+            # check. An execution with no results (e.g. step cap hit
+            # earlier) also fails.
+            has_results = bool(results)
+            no_skipped = not any(
+                r.status == StepStatus.SKIPPED for r in results
+            )
+            last_completed = (
+                has_results and results[-1].status == StepStatus.COMPLETED
+            )
+            success = has_results and no_skipped and last_completed
             error_msg: str | None = None
             if not success:
                 failed = next(
@@ -293,7 +366,7 @@ class ExecutorAgent:
         start = time.monotonic()
         try:
             if step.kind == "functional":
-                output: Any = await self._run_functional(ctx, step)
+                output: Any = await self._run_functional(ctx, step, emit=emit)
             elif step.kind == "reasoning":
                 output = await self._run_reasoning(ctx, step, plan, snapshot)
             elif step.kind == "evaluation":
@@ -328,16 +401,212 @@ class ExecutorAgent:
             elapsed_seconds=elapsed,
         )
 
-    async def _run_functional(self, ctx: ToolContext, step: Step) -> Any:
+    async def _run_functional(
+        self, ctx: ToolContext, step: Step, *, emit: EmitFn | None,
+    ) -> Any:
         if not step.tool:
             raise ValueError(f"functional step {step.id!r} has no `tool`")
         tool = await self._resolve_tool(ctx, step.tool)
+        return await self._call_tool_with_recovery(
+            ctx=ctx, step=step, tool=tool,
+            inputs=step.inputs, emit=emit, attempt=1,
+        )
+
+    async def _call_tool_with_recovery(
+        self,
+        *,
+        ctx: ToolContext,
+        step: Step,
+        tool: Tool,
+        inputs: dict[str, Any],
+        emit: EmitFn | None,
+        attempt: int,
+    ) -> Any:
+        """Run the tool. On ToolError, ask a model to repair the inputs
+        once and recurse. The `attempt` counter bounds the recursion via
+        ``_MAX_TOOL_ATTEMPTS`` — no hidden state, no flag."""
         try:
-            return await tool.run(ctx, **step.inputs)
+            return await tool.run(ctx, **inputs)
         except WorkspaceCollision as collision:
             return await self._handle_workspace_collision(
                 ctx=ctx, step=step, tool=tool, collision=collision,
             )
+        except ToolError as e:
+            if attempt >= _MAX_TOOL_ATTEMPTS:
+                raise
+            corrected = await self._propose_corrected_inputs(
+                ctx=ctx, step=step, tool=tool,
+                original_inputs=inputs, error=e,
+            )
+            if corrected is None:
+                raise
+            await _maybe_emit(
+                emit, "step.recover",
+                f"{step.id} retrying with corrected inputs",
+            )
+            return await self._call_tool_with_recovery(
+                ctx=ctx, step=step, tool=tool, inputs=corrected,
+                emit=emit, attempt=attempt + 1,
+            )
+
+    async def _propose_corrected_inputs(
+        self,
+        *,
+        ctx: ToolContext,
+        step: Step,
+        tool: Tool,
+        original_inputs: dict[str, Any],
+        error: ToolError,
+    ) -> dict[str, Any] | None:
+        """One Haiku call with a forced ``propose_inputs`` tool_use that
+        returns a corrected inputs dict (or None if the model declines).
+        Stateless — no conversational context, no thread linkage."""
+        settings = get_settings()
+        system_prompt = (
+            "You repair tool inputs after a recoverable failure. You"
+            " will be given: a step description, the tool's name +"
+            " input_schema, the inputs that just failed, and the"
+            " error message. Propose corrected inputs that address"
+            " the error. Do not change the tool. Do not change"
+            " unrelated fields. If the error names the actual valid"
+            " columns / files / options, use that hint directly."
+            " If the inputs can't be fixed without more information,"
+            " set ``give_up: true`` and explain briefly."
+        )
+        user_payload = {
+            "step_description": step.description,
+            "tool": tool.name,
+            "tool_input_schema": tool.input_schema,
+            "failed_inputs": original_inputs,
+            "error_message": str(error),
+        }
+        propose_tool = {
+            "name": "propose_inputs",
+            "description": (
+                "Return corrected inputs for the failed tool call, or"
+                " set give_up=true if you can't fix them."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "corrected_inputs": {
+                        "type": "object",
+                        "description": (
+                            "A new inputs dict to pass to the same tool."
+                            " Required when give_up is false."
+                        ),
+                    },
+                    "give_up": {"type": "boolean", "default": False},
+                    "reasoning": {"type": "string"},
+                },
+                "required": ["reasoning"],
+            },
+        }
+        try:
+            result = await self.model_client.call(
+                user_id=ctx.user_id,
+                agent="executor_recover",
+                model=settings.model_triage,
+                messages=[{
+                    "role": "user",
+                    "content": json.dumps(user_payload, default=str),
+                }],
+                system=system_prompt,
+                prompt_version_id=self._prompt_version_id,
+                task_id=ctx.task_id,
+                tools=[propose_tool],
+                tool_choice={"type": "tool", "name": "propose_inputs"},
+            )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "agents.executor.recover.call_failed",
+                step_id=step.id, exc_info=True,
+            )
+            return None
+
+        for block in getattr(result.raw, "content", []) or []:
+            if (
+                _block_type(block) == "tool_use"
+                and _block_name(block) == "propose_inputs"
+            ):
+                payload = _block_input(block) or {}
+                if payload.get("give_up"):
+                    log.info(
+                        "agents.executor.recover.give_up",
+                        step_id=step.id,
+                        reasoning=payload.get("reasoning"),
+                    )
+                    return None
+                corrected = payload.get("corrected_inputs")
+                if not isinstance(corrected, dict) or not corrected:
+                    return None
+                log.info(
+                    "agents.executor.recover.proposed",
+                    step_id=step.id,
+                    reasoning=payload.get("reasoning"),
+                )
+                return corrected
+
+        return None
+
+    async def _replan_after_failure(
+        self,
+        *,
+        ctx: ToolContext,
+        original_plan: Plan,
+        completed: list[StepResult],
+        failed_result: StepResult,
+        emit: EmitFn | None,
+    ) -> Plan | None:
+        """Build a ReplanContext from the failure and ask the Planner for
+        a continuation. Returns the new plan or None on planner error.
+
+        Uses ``thread_id=None`` so the Planner doesn't reload chat
+        history — the replan block already carries focused context
+        (original query + completed steps + failure). Past-plan and
+        skill retrieval still fires because the embedding still runs."""
+        failed_step = next(
+            (s for s in original_plan.steps if s.id == failed_result.step_id),
+            None,
+        )
+        if failed_step is None:
+            log.warning(
+                "agents.executor.replan.missing_failed_step",
+                step_id=failed_result.step_id,
+            )
+            return None
+
+        replan_ctx = ReplanContext(
+            original_query=original_plan.query,
+            completed_results=list(completed),
+            failed_step=failed_step,
+            failed_step_error=failed_result.error or "(no error message)",
+        )
+        try:
+            new_plan, _ = await self.planner.plan(
+                ctx=ctx,
+                thread_id=None,
+                content=original_plan.query,
+                replan_from=replan_ctx,
+            )
+        except Exception:  # noqa: BLE001 — replan is best-effort
+            log.warning(
+                "agents.executor.replan.failed",
+                failed_step_id=failed_step.id, exc_info=True,
+            )
+            return None
+
+        await _maybe_emit(
+            emit, "plan.replan",
+            f"continuation: {len(new_plan.steps)} step(s) after"
+            f" {failed_step.id} failed",
+        )
+        log.info(
+            "agents.executor.replan.success",
+            failed_step_id=failed_step.id,
+            continuation_step_count=len(new_plan.steps),
+        )
+        return new_plan
 
     async def _resolve_tool(self, ctx: ToolContext, name: str) -> Any:
         """Resolve a tool name to a Tool instance, falling through to
@@ -749,6 +1018,30 @@ def _augment_query_with_failure(original: str, exc: Exception) -> str:
         f"A prior attempt at this task failed with: {exc}\n"
         f"Try a different approach — don't repeat the failing strategy."
     )
+
+
+# --- anthropic block helpers ----------------------------------------------
+#
+# Same shape as triage.py's helpers; duplicated here to avoid a
+# top-level import dependency between agents.
+
+
+def _block_type(block: Any) -> str | None:
+    if isinstance(block, dict):
+        return block.get("type")
+    return getattr(block, "type", None)
+
+
+def _block_name(block: Any) -> str | None:
+    if isinstance(block, dict):
+        return block.get("name")
+    return getattr(block, "name", None)
+
+
+def _block_input(block: Any) -> dict | None:
+    if isinstance(block, dict):
+        return block.get("input")
+    return getattr(block, "input", None)
 
 
 _agent: ExecutorAgent | None = None
