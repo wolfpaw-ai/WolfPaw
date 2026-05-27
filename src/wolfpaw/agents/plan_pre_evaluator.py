@@ -174,6 +174,25 @@ class PlanPreEvaluatorAgent:
         await self._ensure_prompt_version()
         settings = get_settings()
 
+        # Mechanical check first: every functional step's `inputs`
+        # must satisfy the tool's required-fields schema. This catches
+        # plans like `{tool: "read_doc", inputs: {}}` that would die
+        # at execution with `"filename" must be a non-empty string`.
+        # Failing here saves a Haiku call AND gives the Planner a
+        # concrete retry diagnosis. We only check builtin tools — the
+        # user-tool path is async (DB lookup) and we want this
+        # validator synchronous so a failure short-circuits before
+        # the model call.
+        structural_diagnosis = _validate_functional_step_inputs(plan)
+        if structural_diagnosis is not None:
+            return PreEvalVerdict(
+                approved=False,
+                achieves_objective=False,
+                simplifiable=False,
+                better_than_past_plans=True,
+                diagnosis=structural_diagnosis,
+            )
+
         try:
             prompt = _build_eval_prompt(content, plan, past_plans or [])
             system = await build_for_agent(
@@ -220,6 +239,53 @@ class PlanPreEvaluatorAgent:
             user_id=str(ctx.user_id),
         )
         return _approve_by_default("(pre-evaluator returned no tool_use)")
+
+
+# --- mechanical input validation -------------------------------------------
+
+
+def _validate_functional_step_inputs(plan: Plan) -> str | None:
+    """Verify every functional step's `inputs` carries the required
+    fields the tool's JSON-schema declares. Returns a diagnosis string
+    on the first failure, or None when the plan is structurally sound.
+
+    Unknown tool names are skipped (they may be approved user-tools
+    that the DAO resolves at dispatch time). Validation only catches
+    *required* fields — optional fields are the Planner's call. Empty
+    strings count as missing so we don't ship a plan that calls
+    `read_doc(filename="")`.
+    """
+    from wolfpaw.toolbox.registry import get_registry
+
+    registry = get_registry()
+    for step in plan.steps:
+        if step.kind != "functional":
+            continue
+        if not step.tool:
+            return (
+                f"Step {step.id!r} is functional but has no `tool`. "
+                f"Pick a tool from the catalog and set the `tool` field."
+            )
+        try:
+            tool = registry.get(step.tool)
+        except KeyError:
+            # User-tool or hallucinated name; let the executor handle
+            # the lookup. The model call below can still catch
+            # hallucinated names by reading the catalog.
+            continue
+        schema = tool.input_schema or {}
+        required = schema.get("required") or []
+        inputs = step.inputs or {}
+        for field_name in required:
+            value = inputs.get(field_name)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return (
+                    f"Step {step.id!r} calls `{step.tool}` but is missing"
+                    f" required input `{field_name}`. Read the value out"
+                    f" of the user's request and add it to `inputs`"
+                    f" (e.g. `inputs: {{\"{field_name}\": ...}}`)."
+                )
+    return None
 
 
 # --- plan-and-pre-evaluate helper ------------------------------------------

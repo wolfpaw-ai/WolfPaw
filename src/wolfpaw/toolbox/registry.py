@@ -85,6 +85,55 @@ class Registry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
+    def catalog_block(self) -> str:
+        """Markdown summary of every registered tool, suitable for
+        inlining into the Planner's system prompt (step 28+ fix to
+        the planner-doesn't-know-inputs problem).
+
+        Format per tool::
+
+            - `tool_name(req_arg: type, opt_arg?: type)` — description
+              [continued indented line if the description is long]
+
+        Required vs optional is read from each tool's ``input_schema``.
+        Type is the JSON-schema ``type`` value; complex types collapse
+        to ``object`` / ``array``. The Planner uses this to choose
+        correct tool names AND populate ``inputs`` correctly on
+        functional steps."""
+        lines: list[str] = ["## Available builtin tools"]
+        for tool in self.all():
+            sig = _format_tool_signature(tool)
+            desc = (tool.description or "").strip().split("\n", 1)[0]
+            lines.append(f"- `{tool.name}({sig})` — {desc}")
+        return "\n".join(lines)
+
+
+def _format_tool_signature(tool: Tool) -> str:
+    """Produce a `(arg1: type, arg2?: type)` signature string from the
+    tool's JSON-schema input_schema. Required args first, optionals
+    last; optionals are suffixed with `?`."""
+    schema = tool.input_schema or {}
+    props: dict[str, Any] = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    parts: list[str] = []
+    # Required first.
+    for name in sorted(required):
+        if name in props:
+            parts.append(f"{name}: {_type_name(props[name])}")
+    # Optionals after, alphabetical.
+    for name in sorted(set(props.keys()) - required):
+        parts.append(f"{name}?: {_type_name(props[name])}")
+    return ", ".join(parts)
+
+
+def _type_name(prop: dict[str, Any]) -> str:
+    """Collapse a JSON-schema property to a short type name."""
+    t = prop.get("type", "any")
+    if isinstance(t, list):
+        # JSON schema allows ["string", "null"] etc.
+        t = next((x for x in t if x != "null"), "any")
+    return str(t)
+
 
 _registry = Registry()
 

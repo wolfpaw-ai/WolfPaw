@@ -132,10 +132,19 @@ ALWAYS consult retrieved context first:
 
 Step kinds:
   - "functional" — invoke a specific tool with structured inputs (set `tool` + `inputs`).
-                   The tool must exist (either a builtin OR an approved user-tool
-                   from the "User tools" section, if present). If you need an
+                   The tool must exist (either a builtin from the "Available
+                   builtin tools" catalog below OR an approved user-tool from
+                   the "User tools" section, if present). If you need an
                    operation that no available tool covers, use "tool_creator"
                    instead — DON'T invent a tool name and hope it exists.
+
+                   **CRITICAL:** for every functional step, populate `inputs`
+                   with EVERY required argument the tool's signature lists. The
+                   catalog shows `tool_name(arg1: type, arg2?: type)` — args
+                   without `?` are required. A step with empty `inputs` when
+                   the tool requires fields will fail at execution. Read the
+                   filename / query / path / etc. out of the user's request
+                   and pass it through.
   - "reasoning"  — a model call you'll handle inline (no tool); describe what to think through.
   - "evaluation" — a model-graded check; describe what to validate.
   - "tool_creator" — propose a brand-new user-tool for an operation no existing
@@ -490,6 +499,15 @@ def _format_context_block(
     connected_integrations: list[str],
 ) -> str:
     parts: list[str] = []
+    # Tool catalog FIRST — the Planner needs to know which tools
+    # exist + what inputs they require before deciding step kinds.
+    # Without this block the model would emit `{tool: "read_doc",
+    # inputs: {}}` because it has no schema visibility (the bug found
+    # in the recipes.md → DB write attempt).
+    from wolfpaw.toolbox.registry import get_registry
+
+    parts.append(get_registry().catalog_block())
+
     summary_block = conv.format_summaries_block(summaries)
     if summary_block:
         parts.append(summary_block)

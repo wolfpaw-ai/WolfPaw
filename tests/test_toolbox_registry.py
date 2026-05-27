@@ -58,3 +58,61 @@ def test_register_rejects_empty_name():
 def test_unknown_tool_raises():
     with pytest.raises(KeyError):
         get_registry().get("not-a-real-tool")
+
+
+# --- catalog_block (planner-prompt fix) ----------------------------------
+
+
+def test_catalog_block_marks_required_vs_optional_inputs():
+    """`required` schema fields appear without `?`, optionals get `?`.
+    Required ones come first in the signature."""
+    r = Registry()
+
+    class _T(Tool):
+        name = "x"
+        description = "demo"
+        input_schema = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["filename"],
+        }
+
+        async def run(self, ctx, **inputs):
+            return {}
+
+    r.register(_T())
+    block = r.catalog_block()
+    assert "## Available builtin tools" in block
+    # Required first, no `?`. Optional with `?`.
+    assert "`x(filename: string, limit?: integer)`" in block
+    assert "demo" in block
+
+
+def test_catalog_block_renders_every_registered_tool():
+    """The full builtin registry should be coverable via the catalog."""
+    names = set(get_registry().names())
+    block = get_registry().catalog_block()
+    for name in names:
+        assert f"`{name}(" in block, f"missing {name!r} in catalog"
+
+
+def test_catalog_block_truncates_multiline_description():
+    """If a tool's description spans multiple lines, only the first
+    line should land in the catalog (keep the prompt compact)."""
+    r = Registry()
+
+    class _T(Tool):
+        name = "multi"
+        description = "first line\nlonger explanation\nthird line"
+        input_schema = {"type": "object", "properties": {}}
+
+        async def run(self, ctx, **inputs):
+            return {}
+
+    r.register(_T())
+    block = r.catalog_block()
+    assert "first line" in block
+    assert "longer explanation" not in block

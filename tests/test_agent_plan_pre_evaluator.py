@@ -73,7 +73,13 @@ def _plan() -> Plan:
         query="research vendors",
         summary="research five vendors and emit a table",
         steps=[
-            Step(id="s1", kind="functional", description="fetch", tool="web_search"),
+            # Schema-valid by construction so the new mechanical
+            # validator passes — these tests are about the *model*
+            # side of pre-eval, not the structural check.
+            Step(
+                id="s1", kind="functional", description="fetch",
+                tool="web_search", inputs={"query": "vendor research"},
+            ),
             Step(id="s2", kind="reasoning", description="summarize"),
         ],
         is_task=False,
@@ -367,6 +373,102 @@ async def test_plan_with_pre_evaluation_rejected_then_retried():
     assert "too many steps" in verdict.diagnosis
     assert len(planner.calls) == 2
     assert planner.calls[1]["revision_diagnosis"] == "too many steps"
+
+
+async def test_evaluate_short_circuits_on_missing_required_input():
+    """A plan with a functional step calling read_doc without
+    `filename` (the bug from the recipes.md report) must be rejected
+    BEFORE the model is called — saves Haiku tokens AND gives the
+    Planner a concrete retry diagnosis."""
+    from wolfpaw.agents.plan_pre_evaluator import (
+        PlanPreEvaluatorAgent, _validate_functional_step_inputs,
+    )
+
+    bad_plan = Plan(
+        query="read my recipes file",
+        summary="read recipes.md",
+        steps=[
+            Step(
+                id="read_recipes", kind="functional",
+                tool="read_doc",
+                description="Read recipes.md",
+                inputs={},  # ← the bug
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    diagnosis = _validate_functional_step_inputs(bad_plan)
+    assert diagnosis is not None
+    assert "filename" in diagnosis
+    assert "read_doc" in diagnosis
+
+
+async def test_evaluate_returns_rejection_verdict_without_calling_model(
+    eval_env,
+):
+    """When the mechanical check fails the model must not be called.
+    Verify by passing a FakeAnthropic with NO canned turns — if the
+    model fires, FakeAnthropic raises IndexError."""
+    fake_anthropic = FakeAnthropic([])  # no canned response
+    agent = PlanPreEvaluatorAgent(
+        model_client=ModelClient(anthropic=fake_anthropic),
+    )
+    bad_plan = Plan(
+        query="x", summary="x",
+        steps=[
+            Step(
+                id="s", kind="functional", tool="read_doc",
+                description="read x", inputs={"filename": ""},
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    verdict = await agent.evaluate(
+        ctx=ToolContext(user_id=uuid4()),
+        content="x", plan=bad_plan,
+    )
+    assert verdict.approved is False
+    assert verdict.achieves_objective is False
+    assert "filename" in verdict.diagnosis
+    # Model was not invoked.
+    assert fake_anthropic.calls == []
+
+
+async def test_evaluate_skips_unknown_tool_names():
+    """Unknown tool names are user-tools or hallucinated — the
+    mechanical check defers to the model (which sees the catalog and
+    can flag a hallucination)."""
+    from wolfpaw.agents.plan_pre_evaluator import _validate_functional_step_inputs
+
+    plan = Plan(
+        query="x", summary="x",
+        steps=[
+            Step(
+                id="s", kind="functional",
+                tool="possibly_a_user_tool",
+                description="x",
+                inputs={"some_arg": "yes"},
+            ),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    assert _validate_functional_step_inputs(plan) is None
+
+
+async def test_evaluate_ignores_non_functional_steps():
+    """Reasoning + evaluation + subagent steps don't need `tool` /
+    `inputs` validation."""
+    from wolfpaw.agents.plan_pre_evaluator import _validate_functional_step_inputs
+
+    plan = Plan(
+        query="x", summary="x",
+        steps=[
+            Step(id="r", kind="reasoning", description="think"),
+            Step(id="e", kind="evaluation", description="check"),
+        ],
+        is_task=False, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+    assert _validate_functional_step_inputs(plan) is None
 
 
 async def test_plan_with_pre_evaluation_ships_second_plan_unconditionally():
