@@ -49,7 +49,7 @@ from wolfpaw.metering.prompt_versions import bump_prompt_version
 from wolfpaw.metering.recorder import record_usage
 from wolfpaw.metering.types import TokenCounts
 from wolfpaw.persona.builder import build_for_agent
-from wolfpaw.schemas import Plan, Step
+from wolfpaw.schemas import Plan, ReplanContext, Step, StepResult
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -239,6 +239,7 @@ class PlannerAgent:
         content: str,
         complexity_hint: str = "moderate",
         revision_diagnosis: str | None = None,
+        replan_from: ReplanContext | None = None,
     ) -> tuple[Plan, PlanContext]:
         """Generate a Plan. `thread_id=None` means no conversational history
         to load — used by subagent tasks (step 16) which run with a fresh
@@ -247,7 +248,13 @@ class PlannerAgent:
         `revision_diagnosis` is set by the Pre-Evaluator's retry path
         (step 24): when a first-pass plan is rejected, the diagnosis
         gets folded into the system prompt as concrete feedback so the
-        second pass can address it directly rather than re-deriving."""
+        second pass can address it directly rather than re-deriving.
+
+        `replan_from` is set by the Executor when a step has failed after
+        step-level retry exhausted. The Planner sees what's already been
+        done + the failure and emits a continuation plan that finishes
+        the original request. Pass ``thread_id=None`` for replans — the
+        replan block already carries the focused context."""
         await self._ensure_prompt_version()
 
         # 1. Embed query — cost recorded as a token_usage row.
@@ -354,6 +361,11 @@ class PlannerAgent:
                 _format_revision_block(revision_diagnosis) + "\n\n"
                 + role_with_context
             )
+        if replan_from is not None:
+            role_with_context = (
+                _format_replan_block(replan_from) + "\n\n"
+                + role_with_context
+            )
         if context_block:
             role_with_context = role_with_context + "\n\n" + context_block
         system = await build_for_agent(
@@ -440,6 +452,46 @@ def _format_revision_block(diagnosis: str) -> str:
         " If it says a step doesn't achieve the objective, replace it."
         " If it says a past plan would do better, adapt that past plan."
     )
+
+
+def _format_replan_block(ctx: ReplanContext) -> str:
+    """Executor replan preamble — sits at the front of the system prompt
+    so the model treats the failure context as a top-line directive.
+    The Planner writes a *continuation* plan that finishes the original
+    query without redoing the steps that already succeeded."""
+    completed_lines = [_format_completed_step(r) for r in ctx.completed_results]
+    completed_block = (
+        "\n".join(completed_lines) if completed_lines else "(none)"
+    )
+    failed = ctx.failed_step
+    return (
+        "## You are writing a continuation plan after a failure\n"
+        f"Original user request:\n> {ctx.original_query.strip()}\n\n"
+        "Steps already attempted (do NOT redo work that completed):\n"
+        f"{completed_block}\n\n"
+        "The failing step was:\n"
+        f"- `{failed.id}` [{failed.kind}] {failed.description}\n"
+        f"  tool: {failed.tool!r}, inputs: {failed.inputs!r}\n"
+        f"  error: {ctx.failed_step_error.strip()}\n\n"
+        "Plan ONLY what's still needed to finish the original request."
+        " The error message often names a real obstacle (a missing"
+        " column, an unknown table, a stale assumption) — work around"
+        " it, don't retry the failed step verbatim. If introspection"
+        " would unblock you, include a `list_tables` / `describe_table`"
+        " / `list_docs` / `search_docs` step first."
+    )
+
+
+def _format_completed_step(r: StepResult) -> str:
+    head = f"- `{r.step_id}` [{r.kind}] → {r.status.value}"
+    if r.status.value == "completed" and r.output is not None:
+        snippet = str(r.output)
+        if len(snippet) > 240:
+            snippet = snippet[:237] + "..."
+        return f"{head}\n  output: {snippet}"
+    if r.error:
+        return f"{head}\n  error: {r.error}"
+    return head
 
 
 async def _resolve_connected_integrations(
