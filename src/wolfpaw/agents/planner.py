@@ -105,7 +105,16 @@ _GENERATE_PLAN_TOOL = {
                             ],
                         },
                         "description": {"type": "string"},
-                        "tool": {"type": "string"},
+                        "tool": {
+                            "type": "string",
+                            "description": (
+                                "REQUIRED when kind='functional'."
+                                " Must match a tool from the catalog."
+                                " If no catalog tool fits, use"
+                                " kind='tool_creator' instead — NEVER"
+                                " leave this blank."
+                            ),
+                        },
                         "inputs": {"type": "object"},
                         "parallel_group": {"type": "integer"},
                     },
@@ -133,58 +142,10 @@ ALWAYS consult retrieved context first:
   - **Relevant skills**: the v1 starter skill set has hand-written exemplars (vendor comparisons, research one-pagers, newsletter digests, etc). If one fits, adapt its step skeleton; cite the skill name.
 
 Step kinds:
+  - "functional" — invoke a tool from the catalog. Set `tool` to the name and `inputs` to every required argument the tool's signature lists.
   - "reasoning"  — a model call you'll handle inline (no tool); describe what to think through.
   - "evaluation" — a model-graded check; describe what to validate.
-  - "tool_creator" — propose a brand-new user-tool for an operation no existing
-                   tool covers. The user gets to approve the proposal via
-                   ask_user before the tool is registered. Use sparingly:
-                     * prefer composing existing tools when possible
-                     * one tool_creator step per genuine gap (never speculative)
-                     * follow with a functional step that uses the new tool by
-                       its proposed name, OR end the plan and let a future
-                       request use the new tool
-                   `inputs` carries `{intent, required_inputs?}`:
-                     * `intent`: one-paragraph description of what the tool
-                       should do (the Tool Creator agent will translate this
-                       into a structured spec).
-                     * `required_inputs`: optional array of input field names
-                       (e.g. `["url", "max_pages"]`) — hints, not a contract.
-
-                   **CRITICAL distinction.** If you spot a capability gap, the
-                   step kind is `tool_creator`. It is NEVER a `functional`
-                   step with a missing or invented `tool`. Examples:
-
-                     WRONG — functional with no tool (model meant tool_creator):
-                       {"id": "create_x", "kind": "functional",
-                        "description": "Propose a new sql_write tool"}
-
-                     WRONG — functional with an invented tool name:
-                       {"id": "save_row", "kind": "functional",
-                        "tool": "sql_write",
-                        "inputs": {"query": "INSERT INTO ..."}}
-
-                     RIGHT — tool_creator for the gap:
-                       {"id": "propose_sql_write", "kind": "tool_creator",
-                        "description": "Need a write-capable SQL tool",
-                        "inputs": {"intent": "Execute INSERT/UPDATE/DELETE
-                          statements against the user's per-user SQL
-                          workspace. `sql_query` is read-only and there is
-                          no write counterpart yet.",
-                          "required_inputs": ["statement", "params"]}}
-  - "functional" — invoke a specific tool with structured inputs (set `tool` + `inputs`).
-                   The tool must exist (either a builtin from the "Available
-                   builtin tools" catalog below OR an approved user-tool from
-                   the "User tools" section, if present). If you need an
-                   operation that no available tool covers, use "tool_creator"
-                   instead — DON'T invent a tool name and hope it exists.
-
-                   **CRITICAL:** for every functional step, populate `inputs`
-                   with EVERY required argument the tool's signature lists. The
-                   catalog shows `tool_name(arg1: type, arg2?: type)` — args
-                   without `?` are required. A step with empty `inputs` when
-                   the tool requires fields will fail at execution. Read the
-                   filename / query / path / etc. out of the user's request
-                   and pass it through.
+  - "tool_creator" — propose a NEW tool for capability gaps (no catalog tool fits). Sets `inputs: {intent: "one-paragraph spec", required_inputs?: [...]}`. The user approves via ask_user before the tool is registered.
   - "subagent"   — delegate a chunk of work to a child task that runs its own full
                    Planner→Executor→Post-Evaluator pipeline. Use this when:
                      * the work splits into independent investigations that benefit
