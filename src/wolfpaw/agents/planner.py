@@ -82,9 +82,11 @@ _GENERATE_PLAN_TOOL = {
             "is_task": {
                 "type": "boolean",
                 "description": (
-                    "True iff this should be tracked as a long-running"
-                    " Task (multi-day, scheduled, or needs external"
-                    " waits). False for single-session plans."
+                    "Routes the plan. True wraps execution in a Task"
+                    " lifecycle (persistent, resumable, push when"
+                    " complete) — pick for work that outlives the"
+                    " current request. False executes inline — pick"
+                    " when the user is waiting now."
                 ),
             },
             "steps": {
@@ -211,7 +213,7 @@ Step kinds:
 
 Use `parallel_group: <int>` on steps that may run concurrently (e.g. fetching N URLs at once, or N subagent investigations). Omit `parallel_group` for sequential steps. Keep parallelism conservative — only when steps are genuinely independent.
 
-Set `is_task=true` ONLY if the work is long-running (hours/days), needs scheduling, or requires external waits. Most "research X and write Y" requests are single-session — leave `is_task=false`.
+Set `is_task=true` for plans that should outlive the current chat turn: long-running work, external waits, monitoring/recurring jobs, plans containing a `tool_creator` step (it needs `ask_user`, which needs a task lifecycle). Default `false` for plans the user is waiting on now.
 
 Tread lightly: prefer fewer, broader steps over many tiny ones. Don't over-engineer.
 

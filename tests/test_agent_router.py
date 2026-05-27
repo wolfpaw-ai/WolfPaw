@@ -54,9 +54,10 @@ async def test_quick_verdict_dispatches_to_quick_unchanged():
 # test_agent_router_plan.py — see the FakePlanner there.
 
 
-# Note: the "task" verdict now invokes the TaskService (Planner →
-# Executor → Post-Eval wrapped in a Task lifecycle). That path is
-# covered by test_agent_router_task.py — see the FakeTaskService there.
+# Note: the "task" verdict is gone. Triage now emits only quick or
+# plan; the Planner decides whether plans wrap in a Task lifecycle
+# via `plan.is_task`. The plan-driven task path is covered in
+# test_agent_router_task.py.
 
 
 async def test_emits_triage_event_before_dispatch():

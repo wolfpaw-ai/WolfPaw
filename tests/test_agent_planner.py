@@ -288,6 +288,25 @@ async def test_plan_forces_generate_plan_tool_use(planner_env):
     assert any(t["name"] == "generate_plan" for t in call["tools"])
 
 
+async def test_plan_is_task_field_round_trips_from_tool_use(planner_env):
+    """is_task is now a load-bearing routing decision — verify the
+    Planner's forced-tool parser picks it up correctly from both
+    true and false values."""
+    for emitted in (True, False):
+        fake_anthropic = FakeAnthropic([
+            _plan_tool_response(is_task=emitted),
+        ])
+        planner = PlannerAgent(
+            model_client=ModelClient(anthropic=fake_anthropic),
+            embedder=FakeEmbedder(),
+        )
+        plan, _ctx = await planner.plan(
+            ctx=ToolContext(user_id=uuid4()), thread_id=uuid4(),
+            content="x",
+        )
+        assert plan.is_task is emitted
+
+
 async def test_plan_includes_revision_diagnosis_in_system_prompt(planner_env):
     """When `revision_diagnosis` is set (Pre-Evaluator retry path),
     the planner prepends a revise-this preamble to the system prompt

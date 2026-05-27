@@ -145,122 +145,14 @@ class Router:
                 complexity_hint=verdict.complexity, emit=emit,
             )
 
-        if verdict.route == "task":
-            return await self._handle_task(
-                ctx=ctx, thread_id=thread_id, content=content,
-                complexity_hint=verdict.complexity, emit=emit,
-            )
-
-        # Defensive: an unknown route would already have been normalized in
+        # Defensive: Triage only emits {quick, plan} now (the "task"
+        # decision moved to the Planner — see _handle_plan). An
+        # unknown route would already have been normalized in
         # TriageAgent.classify, but if it ever escapes, treat as quick.
         log.warning("router.unknown_route", route=verdict.route)
         return await self.quick.handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=emit,
         )
-
-    async def _handle_task(
-        self,
-        *,
-        ctx: ToolContext,
-        thread_id: UUID,
-        content: str,
-        complexity_hint: str,
-        emit: EmitFn | None,
-    ) -> str:
-        """Long-running work path.
-
-        With ``WOLFPAW_WORKERS_ENABLED=true`` we create the task row,
-        enqueue ``run_task`` onto arq, and return an acknowledgement
-        immediately — the user follows up via ``/task <id>`` or gets a
-        proactive push when the work finishes (step 37 wires that).
-        With workers off, the task runs inline so a single-process dev
-        gets the synthesized answer in the same response (the v1
-        behaviour).
-        """
-        from wolfpaw.config import get_settings
-
-        settings = get_settings()
-        if settings.workers_enabled:
-            return await self._handle_task_deferred(
-                ctx=ctx, thread_id=thread_id, content=content,
-                complexity_hint=complexity_hint, emit=emit,
-            )
-        return await self._handle_task_inline(
-            ctx=ctx, thread_id=thread_id, content=content,
-            complexity_hint=complexity_hint, emit=emit,
-        )
-
-    async def _handle_task_inline(
-        self,
-        *,
-        ctx: ToolContext,
-        thread_id: UUID,
-        content: str,
-        complexity_hint: str,
-        emit: EmitFn | None,
-    ) -> str:
-        outcome = await self.task_service.create_and_run(
-            user_id=ctx.user_id,
-            thread_id=thread_id,
-            content=content,
-            title=_title_from_content(content),
-            description=content,
-            channel_for_completion="web",
-            complexity_hint=complexity_hint,
-            emit=emit,
-        )
-        try:
-            async with acquire() as conn:
-                await conv.append(
-                    conn, thread_id=thread_id, role="user", content=content,
-                )
-                await conv.append(
-                    conn, thread_id=thread_id, role="assistant",
-                    content=outcome.final_answer,
-                )
-        except Exception:  # noqa: BLE001
-            log.warning("router.task_persist_failed", exc_info=True)
-        return outcome.final_answer
-
-    async def _handle_task_deferred(
-        self,
-        *,
-        ctx: ToolContext,
-        thread_id: UUID,
-        content: str,
-        complexity_hint: str,
-        emit: EmitFn | None,
-    ) -> str:
-        from wolfpaw.workers.queue import enqueue_run_task
-
-        task = await self.task_service.create(
-            user_id=ctx.user_id,
-            thread_id=thread_id,
-            content=content,
-            title=_title_from_content(content),
-            description=content,
-            channel_for_completion="web",
-            complexity_hint=complexity_hint,
-        )
-        await _maybe_emit(emit, "task", str(task.id))
-        await enqueue_run_task(task.id)
-
-        ack = (
-            f"Started Task {task.id} in the background — "
-            f"check `/task {task.id}` for progress, or wait for the push"
-            " when it finishes."
-        )
-        try:
-            async with acquire() as conn:
-                await conv.append(
-                    conn, thread_id=thread_id, role="user", content=content,
-                )
-                await conv.append(
-                    conn, thread_id=thread_id, role="assistant", content=ack,
-                )
-        except Exception:  # noqa: BLE001
-            log.warning("router.task_persist_failed", exc_info=True)
-        return ack
 
     async def _handle_plan(
         self,
@@ -271,6 +163,8 @@ class Router:
         complexity_hint: str,
         emit: EmitFn | None,
     ) -> str:
+        """Runs Planner + Pre-Eval, then routes inline or as a Task
+        based on `plan.is_task`."""
         plan, _verdict, _retried = await plan_with_pre_evaluation(
             planner=self.planner,
             pre_evaluator=self.pre_evaluator,
@@ -278,6 +172,12 @@ class Router:
             complexity_hint=complexity_hint, emit=emit,
         )
         await _maybe_emit(emit, "plan", _summarize_plan_for_event(plan))
+
+        if plan.is_task:
+            return await self._run_plan_as_task(
+                ctx=ctx, thread_id=thread_id, content=content,
+                complexity_hint=complexity_hint, plan=plan, emit=emit,
+            )
 
         execution = await self.executor.execute(
             ctx=ctx, plan=plan, emit=emit,
@@ -300,6 +200,68 @@ class Router:
         except Exception:  # noqa: BLE001 — degraded mode
             log.warning("router.plan_persist_failed", exc_info=True)
 
+        return final
+
+    async def _run_plan_as_task(
+        self,
+        *,
+        ctx: ToolContext,
+        thread_id: UUID,
+        content: str,
+        complexity_hint: str,
+        plan: Plan,
+        emit: EmitFn | None,
+    ) -> str:
+        """Wrap the already-planned work in a Task lifecycle. With
+        workers on: create + enqueue + return an ack. With workers
+        off: create_and_run with the precomputed plan (no re-plan)."""
+        from wolfpaw.config import get_settings
+
+        settings = get_settings()
+        title = _title_from_content(content)
+        if settings.workers_enabled:
+            from wolfpaw.workers.queue import enqueue_run_task
+
+            task = await self.task_service.create(
+                user_id=ctx.user_id,
+                thread_id=thread_id,
+                content=content,
+                title=title,
+                description=content,
+                channel_for_completion="web",
+                complexity_hint=complexity_hint,
+            )
+            await _maybe_emit(emit, "task", str(task.id))
+            await enqueue_run_task(task.id)
+            final = (
+                f"Started Task {task.id} in the background — "
+                f"check `/task {task.id}` for progress, or wait for the"
+                " push when it finishes."
+            )
+        else:
+            outcome = await self.task_service.create_and_run(
+                user_id=ctx.user_id,
+                thread_id=thread_id,
+                content=content,
+                title=title,
+                description=content,
+                channel_for_completion="web",
+                complexity_hint=complexity_hint,
+                emit=emit,
+                precomputed_plan=plan,
+            )
+            final = outcome.final_answer
+
+        try:
+            async with acquire() as conn:
+                await conv.append(
+                    conn, thread_id=thread_id, role="user", content=content,
+                )
+                await conv.append(
+                    conn, thread_id=thread_id, role="assistant", content=final,
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("router.task_persist_failed", exc_info=True)
         return final
 
     async def _score_and_persist(

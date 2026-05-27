@@ -216,6 +216,7 @@ class TaskService:
         emit: EmitFn | None = None,
         parent_task_id: UUID | None = None,
         budget_cents: int | None = None,
+        precomputed_plan: Plan | None = None,
     ) -> TaskOutcome:
         """Create + immediately run, in the same process. The Router
         uses this when workers are disabled; subagents (step 16) use it
@@ -225,7 +226,13 @@ class TaskService:
         ``parent_task_id`` set → this is a sub-task spawned by a
         parent's subagent step. Budget is informational for now;
         ``spent_cents`` rollup against ``budget_cents`` is a future
-        enforcement hook."""
+        enforcement hook.
+
+        ``precomputed_plan`` set → the task executes the supplied
+        Plan directly and skips its internal planning step. The
+        Router uses this when its plan-path Planner emitted
+        ``is_task=true``, so we don't re-plan inside the task.
+        Subagents omit this and re-plan fresh."""
         task = await self.create(
             user_id=user_id,
             thread_id=thread_id,
@@ -245,6 +252,7 @@ class TaskService:
             content=content,
             complexity_hint=complexity_hint,
             emit=emit,
+            precomputed_plan=precomputed_plan,
         )
 
     # --- internal pipeline ---------------------------------------------------
@@ -258,6 +266,7 @@ class TaskService:
         content: str,
         complexity_hint: str,
         emit: EmitFn | None,
+        precomputed_plan: Plan | None = None,
     ) -> TaskOutcome:
         ctx = ToolContext(user_id=user_id, task_id=task_id)
 
@@ -267,18 +276,19 @@ class TaskService:
             lambda c: tasks_dao.mark_started(c, task_id=task_id),
         )
 
-        # Plan + Pre-Evaluate. Subagents have no thread context — the
-        # Planner skips fetch_recent when thread_id is None (added in
-        # step 16). The Pre-Evaluator may bounce the first draft back
-        # to the Planner once before we commit (step 24).
+        # Plan + Pre-Evaluate. Skipped when the Router pre-planned
+        # and handed us the Plan (precomputed_plan).
         try:
-            plan, _verdict, _retried = await plan_with_pre_evaluation(
-                planner=self.planner,
-                pre_evaluator=self.pre_evaluator,
-                ctx=ctx, thread_id=thread_id,
-                content=content, complexity_hint=complexity_hint,
-                emit=emit,
-            )
+            if precomputed_plan is not None:
+                plan = precomputed_plan
+            else:
+                plan, _verdict, _retried = await plan_with_pre_evaluation(
+                    planner=self.planner,
+                    pre_evaluator=self.pre_evaluator,
+                    ctx=ctx, thread_id=thread_id,
+                    content=content, complexity_hint=complexity_hint,
+                    emit=emit,
+                )
             if plan.id is not None:
                 async with acquire() as conn:
                     await tasks_dao.attach_plan(

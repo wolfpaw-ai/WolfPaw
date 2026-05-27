@@ -19,7 +19,7 @@ Agent implementations + the Router that composes them. Step 10 shipped the Quick
 
 ```
 channel /chat → Router.handle(content) →
-    1. TriageAgent.classify(content) → TriageVerdict
+    1. TriageAgent.classify(content) → TriageVerdict (route ∈ {quick, plan})
     2. emit("triage", verdict.route + reasoning)
     3. switch on verdict.route:
         - quick → QuickAgent.handle(content) → final text
@@ -31,27 +31,34 @@ channel /chat → Router.handle(content) →
                         else: PlannerAgent.plan(..., revision_diagnosis=verdict.diagnosis)
                               emit("pre_eval", "retry") — second draft ships unchecked
                   → emit("plan", summary)
-                  → ExecutorAgent.execute(plan)
-                      → emit("step.start" / "step.end" / "step.error") per step
-                      → returns ExecutionPlan(final_answer, success, results)
-                  → PostEvaluatorAgent.evaluate(plan, execution)
-                      → emit("score", verdict)
-                      → maybe_distill_skill(plan, execution, verdict)  # step 25
-                          → if score ≥ 90, multi-step+tools, no near-duplicate:
-                              SkillDistillerAgent.distill(...) → Sonnet
-                              skills.store_emitted(...)
-                              emit("skill_emitted", name)
-                      → procedural.update_outcome(plan_id, score=...)
-                      → task_events.append_event("plan_scored", verdict)
-                  → persist user + final_answer to messages
-                  → return final_answer
-        - task  → TaskService.create_and_run(...)
-                  → emit("task", task_id)
-                  → planner + executor + post-eval all run inside a Task row
-                    so ctx.task_id flows through (ask_user requires it,
-                    sandbox keys on it, token_usage records it)
-                  → returns the executor's final_answer
+                  → if plan.is_task:
+                      _run_plan_as_task (workers-on: create + enqueue + ack;
+                                         workers-off: create_and_run with
+                                         precomputed_plan, no re-planning)
+                  → else (inline path):
+                      ExecutorAgent.execute(plan)
+                          → emit("step.start" / "step.end" / "step.error") per step
+                          → returns ExecutionPlan(final_answer, success, results)
+                      PostEvaluatorAgent.evaluate(plan, execution)
+                          → emit("score", verdict)
+                          → maybe_distill_skill(plan, execution, verdict)  # step 25
+                              → if score ≥ 90, multi-step+tools, no near-duplicate:
+                                  SkillDistillerAgent.distill(...) → Sonnet
+                                  skills.store_emitted(...)
+                                  emit("skill_emitted", name)
+                          → procedural.update_outcome(plan_id, score=...)
+                          → task_events.append_event("plan_scored", verdict)
+                      persist user + final_answer to messages
+                      return final_answer
 ```
+
+**Why is_task lives on the Planner, not Triage.** The Planner has
+the full retrieved context — tool catalog, past plans, skills,
+user profile — to judge whether work needs a Task lifecycle.
+Triage (Haiku, every-turn) just decides "is the Planner needed?"
+Letting Sonnet make the routing call avoids the prior bug where
+Triage's narrow context routed normal "save this to a file"
+requests into a long-running task and then the worker sat idle.
 
 The Router is the only thing channels ever call. Adding a new channel (Telegram in step 18) means wiring it through `Router.handle(...)` exactly the same way the web channel does.
 

@@ -1,16 +1,18 @@
 """Triage Agent — first hop on every non-slash inbound message.
 
-Classifies the user's message into one of three routes:
+Classifies the user's message into one of two routes:
     - "quick" : one-shot answer / lookup, no plan needed
-    - "plan"  : multi-step but session-bounded, produces a deliverable
-    - "task"  : long-running, spans hours/days, needs persistence + scheduling
+    - "plan"  : anything that needs the Planning Agent
 
 Uses Haiku with a *forced* `classify` tool_use so the output is structured
 JSON, not parsed text. The model can't reply with prose — it must call the
 tool exactly once with route + complexity + reasoning.
 
 Triage is read-only — it never writes to `messages`. Persistence is the
-downstream handler's responsibility (Quick today; Plan/Task later).
+downstream handler's responsibility. Triage doesn't decide whether work
+becomes a long-running Task; that judgment lives on the Planner, which
+has the full tool catalog + retrieved context to make the call. Triage
+just routes between "quick reply" and "needs the Planner."
 
 Triage reads the verbatim recent window (:func:`conv.fetch_recent`) and
 the tiered summaries (:func:`conv.fetch_summaries`) so a long-running
@@ -38,7 +40,7 @@ from wolfpaw.tracing import get_logger
 
 log = get_logger()
 
-Route = Literal["quick", "plan", "task"]
+Route = Literal["quick", "plan"]
 Complexity = Literal["simple", "moderate", "ambitious"]
 
 
@@ -57,11 +59,12 @@ _CLASSIFY_TOOL = {
         "properties": {
             "route": {
                 "type": "string",
-                "enum": ["quick", "plan", "task"],
+                "enum": ["quick", "plan"],
                 "description": (
                     "Routing target. 'quick' = single-response answer."
-                    " 'plan' = multi-step but session-bounded, produces"
-                    " a deliverable. 'task' = long-running, persistent."
+                    " 'plan' = anything that needs the Planning Agent"
+                    " (multi-step work, deliverables, ongoing"
+                    " monitoring, etc.)."
                 ),
             },
             "complexity": {
@@ -82,23 +85,15 @@ _CLASSIFY_TOOL = {
 }
 
 
-_AGENT_ROLE = """You are the **Triage Agent**. You classify each user message into one of three routes.
+_AGENT_ROLE = """You are the **Triage Agent**. Classify each user message into one of two routes:
 
-Use what you know about the user (from the User File above) to inform tone + routing:
-- If the user's profile signals a preference for direct answers, lean toward "quick".
-- If they've indicated they want detailed deliverables or long-running work, favor "plan" or "task" when applicable.
-- Their stated timezone + structured preferences may also be relevant.
+- "quick": a one-shot answer — lookup, definition, casual reply, anything resolvable in a single response with no deliverable. The default.
 
+- "plan": anything that needs the Planning Agent — multi-step work, real deliverables (spreadsheets, PDFs, code), monitoring/recurring jobs.
 
-- "quick": a one-shot answer, simple lookup, casual conversation, or anything you can answer in a single response with no real deliverable. Examples: arithmetic, definitions, "what is X", summarizing a short pasted snippet, small clarifications. This is the *default*.
+Default to "quick" when uncertain. Lean toward "plan" if the user profile (above) signals a preference for detailed deliverables.
 
-- "plan": a multi-step request that's session-bounded and produces a real deliverable. Examples: "research these 5 vendors and compare them in a table", "read this paper and write me a one-page summary as PDF", "build me a spreadsheet of all my expenses from these receipts".
-
-- "task": a long-running unit of work that may span hours or days, that should be tracked persistently and be able to pause/resume. Examples: "watch this stock and alert me when X", "prepare my Monday presentation", anything with a deadline or recurring schedule, anything that requires waiting on external events.
-
-Tread lightly: default to "quick" when uncertain. Don't escalate just because a question sounds long — only escalate when there's actual multi-step work or scheduling involved.
-
-Also classify complexity (simple / moderate / ambitious). This is a hint for downstream agents on which model tier to use; it's informational, not a routing input.
+Also classify complexity (simple / moderate / ambitious) — informational hint for downstream model tier choice, not a routing input.
 
 You MUST call the `classify` tool exactly once. Do not respond with prose."""
 
@@ -180,7 +175,7 @@ class TriageAgent:
                 route = payload.get("route", "quick")
                 complexity = payload.get("complexity", "simple")
                 reasoning = payload.get("reasoning", "")
-                if route not in ("quick", "plan", "task"):
+                if route not in ("quick", "plan"):
                     log.warning("agents.triage.unknown_route", route=route)
                     route = "quick"
                 if complexity not in ("simple", "moderate", "ambitious"):

@@ -17,17 +17,28 @@ parent's plan waits on the child.
 
 ## Flow — task verdict end to end
 
-With `WOLFPAW_WORKERS_ENABLED=true` the Router calls `create()` + enqueues
-`run_task` onto arq + returns "Started Task <id>" immediately; the worker
-process invokes `TaskService.run(task_id)` later. With workers off (or
-inside a subagent), the full chain runs in the calling process via
-`create_and_run`. Both paths go through the same internal pipeline below.
+The task-vs-plan decision now lives on the **Planner**, not Triage.
+Triage only emits `quick` or `plan`; if `plan`, the Planner runs and
+emits `plan.is_task: bool`. The Router reads that flag to decide
+whether to wrap execution in a Task lifecycle.
+
+When `plan.is_task=true`:
+* `WOLFPAW_WORKERS_ENABLED=true` → Router calls `TaskService.create()`,
+  enqueues `run_task` onto arq, returns "Started Task <id>" immediately;
+  the worker process invokes `TaskService.run(task_id)` later (which
+  re-runs the Planner inside the task).
+* workers off → Router calls `TaskService.create_and_run(precomputed_plan=plan, ...)`
+  with the plan it already built, skipping the wasted re-plan.
+
+Subagents always use `create_and_run` without a precomputed plan
+(they plan fresh inside their own task). Both paths converge on the
+same internal pipeline below.
 
 ```
-Router gets "task" verdict
-  → TaskService.create_and_run(user_id, content, ...)   ← workers off / subagent
+Triage → "plan" → Planner emits plan with is_task=true
+  → TaskService.create_and_run(precomputed_plan=plan, ...)   ← workers off
     (or)
-  → TaskService.create(...)                              ← workers on, then enqueue
+  → TaskService.create(...) + enqueue_run_task                ← workers on
   → arq worker → TaskService.run(task_id)
       1. tasks_dao.create()            → row in `pending`, event `status.pending`
                                           (the event's content JSONB carries
