@@ -1,39 +1,55 @@
 # memory/
 
-Postgres access + the agent-facing memory subsystems. Step 10 added the verbatim recent window over `messages`; step 12 added procedural + skills retrieval via pgvector. Step 22 lands tiered summaries + per-thread vector recall.
+Postgres access + the agent-facing memory subsystems. Every DAO in here is consumed by [`agents/`](../agents/README.md) (for reading context and writing outcomes) and by [`toolbox/`](../toolbox/README.md) (for read-only retrieval inside tools). Top-level placement is in the [root README](../../../README.md).
 
 ## Files
 
-- **`db.py`** — process-wide asyncpg pool. `get_pool()` lazily creates it from `WOLFPAW_DATABASE_URL`; `acquire()` is the standard `async with acquire() as conn` context manager every DAO uses. Registers pgvector types on each connection so callers can pass/receive `numpy`-shaped vectors. Also provides `migrations_dir()` + `apply_sql_file(conn, path)` for tests and dev bootstrap.
-- **`conversational.py`** — `threads` + `messages` access for the agent loop, plus the three-tier read API. `Message` + `ThreadSummary` dataclasses; `MessageRole` / `ChannelName` literal types. `get_or_create_thread(conn, *, user_id, channel, thread_id=None)` validates ownership before reuse and silently mints a fresh thread if the supplied id belongs to another user (don't leak existence). New threads are stamped with the active `soul_version` (12-char SHA-256 prefix of `soul.md`) + the user's `user_profile.version` so plan/procedural-memory retrieval can later filter to "same persona snapshot" (step 17). `append(conn, *, thread_id, role, content, metadata=None)` writes one row and fires the post-append follow-ups (embed + compact-trigger) as `asyncio.create_task` so a Voyage hiccup or a Haiku summarization call never blocks the chat response path. `fetch_recent(conn, *, thread_id, n=20)` returns the most recent messages in chronological order. `fetch_summaries(conn, *, thread_id)` returns every L2 summary plus the L1 summaries not yet folded into one — chronological, oldest first. `search_relevant(conn, *, thread_id, query_embedding, k=5, exclude_recent_n=20)` does per-thread cosine search over `message_embeddings`, deliberately excluding the recent window so the Planner doesn't see duplicate context. `format_summaries_block(...)` + `format_vector_recall_block(...)` shape those reads into Markdown blocks every agent inlines into its system prompt. Persistence policy: agents store visible user turns + final assistant text only; intermediate tool calls/results live in-process.
-- **`procedural.py`** — the "recipe-box" over `plans`. `StoredPlan` dataclass. `search_similar(conn, *, user_id, query_embedding, k=5, min_score=None)` does cosine pgvector lookup; rows without embeddings are skipped. `store(...)` inserts a generated plan (success/score=None initially). `update_outcome(...)` is partial-write — pass only the columns you want to set, untouched fields aren't overwritten. The Executor (step 13) writes `final_answer` + `success` + `error`; the Post-Evaluator (step 14) follows up with `score`. Scoped per `user_id`.
-- **`skills.py`** — generalized reusable procedures over `skills`. `Skill` dataclass; `search_by_task(conn, *, user_id, query_embedding, k=5)` returns user-owned + seeded (`user_id IS NULL`) matches ordered by cosine distance, filtering out superseded rows. `STARTER_SKILLS` is the v1 hand-written exemplar set (vendor comparison, research one-pager, newsletter digest, receipt-to-ledger, inventory snapshot). `seed_starter_skills(conn, embedder)` is idempotent — call once at boot (or via a one-off task) to insert + embed the seed set; subsequent calls are no-ops. `store_emitted(conn, *, user_id, name, description, embedding, ingredients, steps, source_plan_id, score)` (v2 step 25) inserts a user-scoped skill auto-emitted by the Skill Distiller; caller dedups via cosine before invoking. v2 step 26 adds `list_active_for_user`, `neighbours`, and `mark_superseded` for the Sleep Cycle's consolidation pass — a superseded skill points at its survivor via `superseded_by_skill_id` and drops out of `search_by_task`.
-- **`task_events.py`** — append-only DAO over `task_events`. `append_event(conn, *, task_id, event_type, content)` writes one row; `fetch_for_task(conn, *, task_id, limit)` reads chronologically (oldest first). Migration `005_post_evaluator.sql` made `task_id` nullable so the Post-Evaluator can emit `plan_scored` events for plans that aren't wrapped in a Task; the originating plan id is carried in `content`.
-- **`tasks.py`** — DAO for `tasks` with the full state machine: `create` (accepts `parent_task_id` + `budget_cents` for subagent tasks), `get_by_id` (user-scoped), `list_for_user` (newest first, optional status filter), `mark_started` / `mark_awaiting_user` / `mark_blocked` / `mark_completed` / `mark_failed` / `cancel`, `attach_plan`, `get_depth` (walks `parent_task_id` chain — step 16's subagent depth cap relies on this), `get_root` (walks to the top of the chain — the executor scopes its per-root subagent concurrency semaphore on this), `rollup_spent_cents` (sums `token_usage.cost_cents + compute_usage.cost_cents` for the task and writes back to `tasks.spent_cents` — called by TaskService on terminal transitions + by the cancel paths). Terminal status (completed/failed/cancelled) is sticky — subsequent transition attempts no-op rather than corrupting state. `cancel` and `get_by_id` are user-scoped so one user can't kill or inspect another's task.
-- **`channel_links.py`** — DAO for `channel_links` (per-user mapping from Wolfpaw user_id to a channel-side identity, e.g. Telegram user id, or Slack `<team_id>:<user_id>`). `create`, `find_user(channel, external_id)` (the webhook's hot path), `list_for_user`, `delete`. Unique on `(channel, external_id)` so the same Telegram account or same `(workspace, slack user)` pair can't link to two Wolfpaw users.
-- **`slack_workspaces.py`** — DAO for `slack_workspaces` (per-Slack-workspace bot token + installer). `upsert` is idempotent and clears `revoked_at` so a re-install reactivates; `get(team_id)` is the webhook's hot path (returns None for revoked / unknown workspaces); `revoke` soft-deletes. The bot token is stored verbatim in v1 — operators can encrypt the column at the application layer in a fork if their threat model requires it.
+- **`db.py`** — process-wide asyncpg pool. `get_pool()` lazily creates it from `WOLFPAW_DATABASE_URL`; `acquire()` is the standard `async with acquire() as conn` context manager every DAO uses. Registers pgvector types and a JSONB codec (`json.dumps`/`json.loads`) on each connection so callers can pass dicts directly. Provides `migrations_dir()` + `apply_sql_file(conn, path)` for tests and dev bootstrap.
+- **`conversational.py`** — `threads` + `messages` access + tiered summaries. `get_or_create_thread(...)` validates ownership before reuse and silently mints a fresh thread if the supplied id belongs to another user (don't leak existence). New threads are stamped with the active `soul_version` + the user's `user_profile.version` so plan/procedural-memory retrieval can later filter to "same persona snapshot". `append(...)` writes one row and enqueues embed via [`workers/queue.enqueue_embed_message`](../workers/README.md). `fetch_recent(thread_id, n=20)` returns the verbatim window. `fetch_summaries(thread_id)` returns every L2 summary plus the L1s not yet folded into one. `search_relevant(thread_id, query_embedding, k, exclude_recent_n)` is per-thread cosine search over `message_embeddings`, deliberately excluding the recent window so the Planner doesn't see duplicates of what `fetch_recent` already returned. `embed_and_store(...)` is what the worker job calls back into.
+- **`procedural.py`** — the "recipe-box" over `plans`. `StoredPlan` dataclass. `search_similar(user_id, query_embedding, k=5, min_score=None)` does pgvector cosine lookup; rows without embeddings are skipped. `store(...)` inserts a generated plan. `update_outcome(...)` is partial-write — the Executor writes `final_answer` + `success` + `error`, the Post-Evaluator follows up with `score`.
+- **`skills.py`** — generalized reusable procedures over `skills`. `Skill` dataclass; `search_by_task(user_id, query_embedding, k=5)` returns user-owned + seeded (`user_id IS NULL`) matches, filtering superseded rows. `STARTER_SKILLS` is the v1 hand-written exemplar set; `seed_starter_skills(...)` is idempotent. `store_emitted(...)` is what the Skill Distiller calls (caller dedups via cosine before invoking). `list_active_for_user` / `neighbours` / `mark_superseded` power the Sleep Cycle's consolidation pass.
+- **`task_events.py`** — append-only DAO over `task_events`. `append_event(task_id, event_type, content)` writes one row; `fetch_for_task(task_id, limit)` reads chronologically. `task_id` is nullable so the Post-Evaluator can emit `plan_scored` events for plans that aren't wrapped in a Task.
+- **`tasks.py`** — DAO for `tasks` with the full state machine: `create` (accepts `parent_task_id` + `budget_cents` for subagent tasks), `get_by_id` (user-scoped), `list_for_user`, terminal transitions, `attach_plan`, `get_depth` (walks `parent_task_id` for the executor's depth cap), `get_root` (walks to the top of the chain — per-root subagent concurrency semaphore relies on this), `rollup_spent_cents` (sums `token_usage.cost_cents + compute_usage.cost_cents` for the task and writes back to `tasks.spent_cents` on terminal transitions). Terminal status is sticky — subsequent transition attempts no-op rather than corrupting state. `cancel` and `get_by_id` are user-scoped so one user can't kill or inspect another's task.
+- **`channel_links.py`** — DAO for `channel_links` (per-user mapping from wolfpaw user_id to a channel-side identity, e.g. Telegram user id, or Slack `<team_id>:<user_id>`). Unique on `(channel, external_id)` so the same Telegram account or `(workspace, slack user)` pair can't link to two wolfpaw users.
+- **`slack_workspaces.py`** — DAO for `slack_workspaces` (per-Slack-workspace bot token + installer). `upsert` is idempotent and clears `revoked_at` so a re-install reactivates; `get(team_id)` is the webhook's hot path; `revoke` soft-deletes.
+- **`tools.py`** — DAO for `tools` (Tool Creator outputs): `propose / approve / reject`, `find_active_by_name(user_id, name)` (the Executor's fall-through when a builtin doesn't match), `list_approved_for_user` (Planner inlines these into its catalog block), `search_similar` (cosine dedup before proposal).
+
+## Flow — what hits Postgres on a single turn
+
+```mermaid
+flowchart TD
+    Turn([Inbound turn])
+    Turn --> Auth[("auth/<br/>users + sessions")]
+    Auth --> Thread[("threads<br/>get_or_create_thread")]
+    Thread --> Trio[Three reads in one acquire from PlannerAgent]
+
+    subgraph Trio
+        T1["conv.fetch_recent (20)"]
+        T2["conv.fetch_summaries (L1+L2)"]
+        T3["conv.search_relevant (vector recall)"]
+        T4["procedural.search_similar"]
+        T5["skills.search_by_task"]
+        T6["tools.list_approved_for_user"]
+        T7["integration links lookups"]
+    end
+
+    Trio --> PlanRow[("plans row<br/>procedural.store")]
+    PlanRow --> Exec[Executor runs steps]
+    Exec --> ToolReads[("tool-side reads:<br/>workspace_files, user_data_*,<br/>integration tokens")]
+    Exec --> Update[("procedural.update_outcome<br/>final_answer + success + error")]
+    Update --> Score[("Post-Evaluator:<br/>procedural.update_outcome score<br/>+ task_events append")]
+    Score --> Maybe[("Skill Distiller:<br/>skills.store_emitted on win<br/>(gated, dedup'd)")]
+    Score --> Persist[("conv.append user + final<br/>+ enqueue_embed_message")]
+
+    classDef pg fill:#0f172a,stroke:#a78bfa,color:#f9fafb;
+    class Auth,Thread,PlanRow,ToolReads,Update,Score,Maybe,Persist pg;
+```
+
+Plus async work that fires after the response is sent: workers/jobs/compact_thread.py runs L1/L2 summarization when a thread crosses the trigger threshold (see [`workers/README.md`](../workers/README.md)).
 
 ## How it fits together
 
-Every module that touches Postgres imports `acquire` from `db.py`. The pool is closed on FastAPI shutdown via the lifespan hook in `api.py`.
-
-The Quick Agent (step 10) uses `conversational` like this on every turn:
-```
-async with acquire() as conn:
-    past = await conv.fetch_recent(conn, thread_id=tid, n=20)
-    await conv.append(conn, thread_id=tid, role="user", content=text)
-# ... agent loop ...
-async with acquire() as conn:
-    await conv.append(conn, thread_id=tid, role="assistant", content=final_text)
-```
-
-Tests that need a real DB drop and re-apply migrations into a scratch schema, then close the pool between cases (see the `_fresh_db` fixture pattern in `test_auth_flow.py` / `test_memory_conversational.py`). Tests that *don't* want a DB monkeypatch `wolfpaw.memory.db.acquire` to a no-op context manager and patch the bound names in importing modules.
-
-## Extending
-
-- **Skills auto-emission** (v2 step 25): the Post-Evaluator emits new rows into `skills` keyed on the originating plan when a plan scores highly and looks reusable.
-- **Cross-thread vector recall** (v2+): `search_relevant` is per-thread by design (`WHERE thread_id = $1`). Lifting that constraint into a user-toggle is a v2 concern once the per-thread path has real usage. Touch `message_embeddings` lookups carefully — the IVFFlat index needs a `VACUUM ANALYZE` after large backfills to stay useful.
-- **New seeded skill**: append a dict to `STARTER_SKILLS` in `skills.py` with a `name` (unique), `description` (this is what gets embedded), `ingredients` (which tools it uses), and a `steps` skeleton. `seed_starter_skills` is name-keyed so it'll add the new one without re-inserting the existing seeds.
+Every module that touches Postgres imports `acquire` from `db.py`. The pool is closed on FastAPI shutdown via the lifespan hook in `api.py`. Tests that need a real DB drop and re-apply migrations into a scratch schema, then close the pool between cases (see the `_fresh_db` fixture pattern in `test_auth_flow.py` / `test_memory_conversational.py`). Tests that *don't* want a DB monkeypatch `wolfpaw.memory.db.acquire` to a no-op context manager and patch the bound names in importing modules.
 
 ## Importing-module gotcha
 
@@ -46,3 +62,9 @@ monkeypatch.setattr("wolfpaw.metering.model_client.acquire", _fake_acquire)
 ```
 
 Same applies to other DB helpers like `get_active_price` that some modules pull in by name.
+
+## Extending
+
+- **New seeded skill** — append a dict to `STARTER_SKILLS` in `skills.py` (`name` unique, `description` is what gets embedded, `ingredients` lists the tools it uses, `steps` is the skeleton). `seed_starter_skills` is name-keyed so it'll add the new one without re-inserting the existing seeds.
+- **Cross-thread vector recall** — `search_relevant` is per-thread by design (`WHERE thread_id = $1`). Lifting that into a user-toggle is a follow-on once the per-thread path has real usage. Touch `message_embeddings` lookups carefully — the IVFFlat index needs a `VACUUM ANALYZE` after large backfills to stay useful.
+- **New memory type** (#44 entity / knowledge base) — model the rows in a new migration, write a DAO sibling here, add a retrieval helper to [`agents/planner.py`](../agents/README.md)'s context build.

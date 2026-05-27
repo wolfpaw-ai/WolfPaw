@@ -1,22 +1,57 @@
 # Wolfpaw
+## Tread lightly.
 
-### *Tread lightly.*
-
-A careful, capable, general-purpose AI worker for people who want an intelligent employee in the channels they already use — web, Telegram, email — without the setup tax of running their own agent.
+*Wolfpaw is the trustworthy long-running agent for the channels you already use — at a cost you can see, with capabilities you explicitly grant.*
 
 ---
 
 ## What is Wolfpaw?
 
+A careful, capable, general-purpose AI worker for people who want an intelligent employee in the channels they already use — web, Telegram, Slack, email — without the setup tax of running their own agent.
+
 Wolfpaw is an agentic *worker*, not just an assistant. It runs code in a sandbox, takes on multi-day tasks, produces real deliverables (spreadsheets, PDFs, slide decks, charts), and works in the background while you're doing other things. You decide what it can see and how you want to talk to it. You control your data; Wolfpaw earns its keep through quiet, careful, useful work.
 
-Its motto, *Tread lightly,* is also its design constraint: take the smallest action that meets the goal, ask before doing anything destructive, surface uncertainty plainly, and never surprise the user with a hidden bill. Wolfpaw learns the person it works for over time — their tasks, their preferences (the User File), their past plans (procedural memory) — but it stays general, not specialist.
+Its motto, *Tread lightly,* is also its design constraint: take the smallest action that meets the goal, ask before doing anything destructive, surface uncertainty plainly, and never surprise the user with a hidden bill. Wolfpaw learns the person it works for over time — their tasks, their preferences (the User File), their past plans (procedural memory), the skills it distills from successful runs — but it stays general, not specialist.
 
-**One sentence:** *Wolfpaw is the trustworthy long-running agent for the channels you already use — at a cost you can see, with capabilities you explicitly grant.*
+---
+
+## How Wolfpaw differs from its neighbors
+
+| System | Optimized for | Wolfpaw's contrast |
+|---|---|---|
+| **OpenClaw** | Open-source, local-first, full system access on a power user's own hardware. Hackable kernel, mature ecosystem. | Wolfpaw is channel-native (web / Telegram / Slack / email) rather than desktop-native, and intentionally conservative on local capability. Audience is people who *don't* want an agent with root on their laptop. |
+| **NanoClaw** | A minimal agent kernel — small, focused, a building block you wire up yourself. | Wolfpaw is a full product, not a kernel: channels, tasks, billing, memory, sandbox, observability all in one. Wolfpaw borrows NanoClaw's credential-vault pattern but ships the whole stack around it. |
+| **Claude Desktop** | A first-party chat client for Claude on macOS / Windows, with MCP tool integration and local file access. Conversational, in-the-moment. | Wolfpaw runs *across* sessions, not inside one. It owns long-running tasks that pause when blocked and resume across days, pings you on whichever channel suits the moment, and produces real deliverables — not just a chat reply. |
+| **Claude Cowork** | Anthropic's hosted agentic system for knowledge workers — bundled inference, desktop companion, deep first-party integrations (Drive, Gmail, Slack, DocuSign, FactSet). | Wolfpaw differentiates on channel mix (Telegram + email forwarding, not desktop), explicit cost mechanics (hard pause at cap, `/usage`), read-only-by-default scopes, model portability, and self-host as a first-class deployment path. |
+
+The through-line: **OpenClaw maximizes capability on your own machine. NanoClaw is the minimum viable kernel. Claude Desktop is a chat client. Cowork is the model vendor's first-party agent. Wolfpaw is the careful, channel-native worker that gets real work done at a cost you can see — self-hostable and operator-deployable.**
+
+A longer feature-by-feature comparison lives in [`spec.md`](spec.md).
+
+---
+
+## Documentation map
+
+| File | What it covers |
+|---|---|
+| [`README.md`](README.md) | This file — pitch, neighbor comparison, top-level architecture, build status |
+| [`spec.md`](spec.md) | v1 product spec; long feature-by-feature comparison with OpenClaw and Cowork; scope decisions |
+| [`v2_spec.md`](v2_spec.md) / [`v3_spec.md`](v3_spec.md) | Subsequent design rounds (self-improving agent, integrations, reliability) |
+| [`implementation_plan.md`](implementation_plan.md) | v1 schema, infra, tools, sandbox, tasks, metering, build order with ✅ markers |
+| [`v2_implementation_plan.md`](v2_implementation_plan.md) | v2+ build order — same shape, ✅ markers |
+| [`soul.md`](soul.md) | Agent persona — loaded into every agent prompt |
+| [`WolfPaw_01.pdf`](WolfPaw_01.pdf) | Canonical architecture drawing |
+| [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md) | Detailed class structure across five Mermaid views |
+| [`docs/self-host.md`](docs/self-host.md) | Self-host operator guide (env, compose, migrate, redeploy) |
+| [`docs/oauth-integrations.md`](docs/oauth-integrations.md) | Dropbox / Notion / Microsoft provider setup |
+| [`docs/decisions/`](docs/decisions/) | Architecture decision records (framework choice, observability) |
+| `src/wolfpaw/<subpackage>/README.md` | Per-domain orientation with a focused flowchart — one in each subpackage. Start here when extending that domain. |
+
+---
 
 ## Deploying Wolfpaw
 
-This repo is the Wolfpaw app — agents, channels, memory, tools, sandbox, metering, REST + SSE API, React web client. Deployable to your own server, laptop, or homelab. Bring your own model + embedding + (optional) sandbox API keys. Operate your own Telegram bot. You own everything. License TBD.
+This repo is the Wolfpaw app — agents, channels, memory, tools, sandbox, metering, REST + SSE API, React web client, arq worker, OAuth integrations. Deployable to your own server, laptop, or homelab. Bring your own model + embedding + (optional) sandbox API keys. Operate your own Telegram / Slack bots. You own everything. License TBD.
 
 Wolfpaw ships everything it needs to run on a single host or be wrapped behind a multi-tenant service. The deployment story — reverse proxy, log shipper, secrets management, infra-as-code — is intentionally left to the operator so this repo stays vendor-neutral.
 
@@ -28,10 +63,10 @@ Wolfpaw is channel-native: you reach it where you already work.
 
 ### Channels
 
-- **Web chat** — sign in at your deployment's URL, type in the chat box. Replies stream live. The React app under `web/` ships chat + task list + workspace files + usage dashboard + profile editor + Telegram link minting.
-- **Telegram** — DM your bot after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile` or the channel-settings UI). Operators provision the bot via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
-- **Email** *(v1.5)* — forward to a per-user alias on your deployment's domain; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
-- **Slack** *(step 21)* — workspace install via OAuth (create your app from [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml), then "Connect Slack" from the web app's profile page). `/wolfpaw <text>` slash command and DMs to the bot both go through the agent pipeline.
+- **Web chat** — sign in at your deployment's URL, type in the chat box. Replies stream live. The React app under [`web/`](web/) ships chat + task list + workspace files + usage dashboard + profile editor + Telegram / Slack link minting.
+- **Telegram** — DM your bot after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile`). Operators provision the bot via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
+- **Slack** — workspace install via OAuth (create your app from [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml), then "Connect Slack" from the web app's profile page). `/wolfpaw <text>` slash command and DMs to the bot both go through the agent pipeline.
+- **Email** *(roadmap)* — forward to a per-user alias on your deployment's domain; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
 
 ### Slash commands
 
@@ -42,15 +77,23 @@ Intercepted before the model in every channel so they don't burn tokens.
 | `/help` | List available commands |
 | `/usage`, `/usage today`, `/usage month`, `/usage all` | Token + sandbox-compute spend. `month` adds a by-agent breakdown. |
 | `/tasks`, `/task <id>`, `/cancel <id>` | Task list + control |
-| `/reset` | Start a new conversation thread *(step 11)* |
+| `/reset` | Start a new conversation thread |
 
 ### Workspace
 
-Upload files for Wolfpaw to work with; pick up deliverables it produces. Same workspace whether you arrived via web, Telegram, or email — backed by the configured `Storage` provider (`LocalStorage` for dev / self-host; `S3Storage` for managed deployments). v1 is a flat namespace; folders and Drive / Dropbox sync are v2.
+Upload files for Wolfpaw to work with; pick up deliverables it produces. Same workspace whether you arrived via web, Telegram, or Slack — backed by the configured `Storage` provider (`LocalStorage` for dev / self-host; `S3Storage` for managed deployments). Workspace docs are also semantically indexed: the agent can find them by content via `search_docs(...)`, not just by filename. v1 is a flat namespace; folders and Drive / Dropbox sync are roadmap.
+
+### Integrations
+
+OAuth connectors that the agent can read/write through, gated by per-user consent: **Dropbox** (app-folder scoped), **Notion** (workspace pages), **Microsoft / Outlook Calendar**. Each lives in [`src/wolfpaw/integrations/`](src/wolfpaw/integrations/) and registers its own tools so they appear automatically in the Planner's catalog when the user has connected the provider.
 
 ### Tasks
 
-Anything beyond a single chat turn becomes a **Task** — a persistent unit of work that can run for hours or days, pause when blocked, and ping you on your preferred channel when it needs input or has results ready. You see status, spend, and artifacts in the web app; cancel at any time. *(Step 15.)*
+Anything beyond a single chat turn becomes a **Task** — a persistent unit of work that can run for hours or days, pause when blocked, and ping you on your preferred channel when it needs input or has results ready. You see status, spend, and artifacts in the web app; cancel at any time. With `WOLFPAW_WORKERS_ENABLED=true`, tasks run on the arq worker so they survive process restarts.
+
+### Self-healing
+
+When a step fails with a recoverable tool error (e.g. "column doesn't exist — actual columns: [...]"), the Executor calls a cheap model to repair the inputs and retries once. If that still fails, the Planner is invoked again with the failure context and emits a *continuation plan* that finishes the original request. Capped per execution so it can't loop. See [`src/wolfpaw/agents/README.md`](src/wolfpaw/agents/README.md) for the recovery + replan flow.
 
 ### Cost control
 
@@ -60,13 +103,13 @@ Every model call and every sandbox-second is metered. The OSS app ships with a n
 
 Two paths:
 
-**Self-host via Docker Compose** *(step 20 — recommended for actually using the app)*:
+**Self-host via Docker Compose** (recommended for actually using the app):
 
 ```bash
 ./install.sh
 ```
 
-That generates a session key, asks you to fill in `WOLFPAW_ANTHROPIC_API_KEY` in `.env`, and on re-run brings up Postgres + the backend + the React app behind nginx. Visit http://localhost:3000. Full reference in [`docs/self-host.md`](docs/self-host.md).
+That generates a session key, asks you to fill in `WOLFPAW_ANTHROPIC_API_KEY` in `.env`, and on re-run brings up Postgres + Redis + the backend + the worker + the React app behind nginx. Visit http://localhost:3000. Full reference in [`docs/self-host.md`](docs/self-host.md). After a redeploy run `git pull && docker compose up -d --build && docker compose restart web` so nginx picks up the fresh upstream.
 
 **Direct (no Docker, for contributing)** — two processes, backend on :8000, React app on :5173:
 
@@ -90,562 +133,176 @@ curl -N -X POST localhost:8000/channels/web/chat \
   -d '{"content": "/usage"}'
 ```
 
-Non-slash messages go through the Router: Triage classifies → Quick (one-shot answer), Planner + Executor + Post-Evaluator (generates a plan, runs it, scores it), or Task (creates a persistent Task row, runs synchronously, transitions through states). The SSE stream emits `thread`, `triage`, optional `plan` + `tool` + `step.start` / `step.end` / `step.error` + `score` + `task` + `ask_user` events as work progresses, then `delta` (final answer) and `done`.
+---
+
+## Architecture — top level
+
+The reference architecture diagram is [`WolfPaw_01.pdf`](WolfPaw_01.pdf). Below is the **top-level query flow**: what happens at the boundary of each subsystem. As soon as control crosses into a folder under `src/wolfpaw/`, follow the link to that folder's README for the internal flowchart.
+
+```mermaid
+flowchart TD
+    User([User])
+    User -->|"web / telegram / slack / email"| Channels
+
+    Channels["<b>channels/</b><br/>parse + slash dispatch"]:::pkg
+    Channels -->|"slash command"| SlashResponse([Direct response])
+    Channels -->|"free-form text"| Agents
+
+    Agents["<b>agents/</b><br/>Router → Triage → Quick or Plan"]:::pkg
+    Agents -->|"quick verdict"| QuickAnswer([Final text])
+    Agents -->|"plan verdict<br/>+ is_task=false"| Inline["inline Planner+Pre-Eval+Executor+Post-Eval"]
+    Agents -->|"plan verdict<br/>+ is_task=true"| Tasks
+
+    Tasks["<b>tasks/</b><br/>Task lifecycle"]:::pkg
+    Tasks -->|"workers on"| Workers
+    Tasks -->|"workers off"| Inline
+
+    Workers["<b>workers/</b><br/>arq job runner"]:::pkg
+    Workers --> Inline
+
+    Inline -->|"functional / reasoning / eval / subagent / tool_creator steps"| Toolbox
+
+    Toolbox["<b>toolbox/</b><br/>tool registry + run"]:::pkg
+    Toolbox -.->|"db reads/writes"| Memory["<b>memory/</b><br/>asyncpg + DAOs"]:::pkg
+    Toolbox -.->|"file bytes"| Storage["<b>storage/</b>"]:::pkg
+    Toolbox -.->|"code exec"| Sandbox["<b>sandbox/</b>"]:::pkg
+    Toolbox -.->|"workspace file rows"| Workspace["<b>workspace/</b>"]:::pkg
+    Toolbox -.->|"OAuth-gated"| Integrations["<b>integrations/</b><br/>Dropbox · Notion · MS"]:::pkg
+
+    Inline --> Final([Final answer])
+    Final --> User
+
+    Channels -.- Auth["<b>auth/</b><br/>magic-link sessions"]:::pkg
+    Agents -.->|"every model call"| Metering["<b>metering/</b><br/>ModelClient + cost + LangSmith"]:::pkg
+    Agents -.->|"every prompt"| Persona["<b>persona/</b><br/>Soul + User File"]:::pkg
+    Agents -.->|"query embeddings"| Embeddings["<b>embeddings/</b><br/>Voyage / Stub"]:::pkg
+
+    classDef pkg fill:#1f2937,stroke:#60a5fa,color:#f9fafb,stroke-width:1px;
+
+    click Channels "src/wolfpaw/channels/README.md"
+    click Agents "src/wolfpaw/agents/README.md"
+    click Tasks "src/wolfpaw/tasks/README.md"
+    click Workers "src/wolfpaw/workers/README.md"
+    click Toolbox "src/wolfpaw/toolbox/README.md"
+    click Memory "src/wolfpaw/memory/README.md"
+    click Storage "src/wolfpaw/storage/README.md"
+    click Sandbox "src/wolfpaw/sandbox/README.md"
+    click Workspace "src/wolfpaw/workspace/README.md"
+    click Integrations "src/wolfpaw/integrations/README.md"
+    click Auth "src/wolfpaw/auth/README.md"
+    click Metering "src/wolfpaw/metering/README.md"
+    click Persona "src/wolfpaw/persona/README.md"
+    click Embeddings "src/wolfpaw/embeddings/README.md"
+```
+
+Read top-to-bottom:
+
+1. **[`channels/`](src/wolfpaw/channels/README.md)** receives whatever the user sent (web SSE chat, Telegram webhook, Slack events) and normalizes it into an `InboundMessage`. Slash commands are intercepted here and never reach the model; everything else hands off to the Router. [`auth/`](src/wolfpaw/auth/README.md) resolves the user behind the request.
+2. **[`agents/`](src/wolfpaw/agents/README.md)** owns the Router → Triage → (Quick | Plan) pipeline. Plan path runs Pre-Evaluator → Executor → Post-Evaluator and may emit a new Skill at the end. Self-healing lives here too: when a step fails, the Executor first tries to repair the inputs via a cheap model call, then asks the Planner for a continuation plan if that doesn't unblock.
+3. **[`tasks/`](src/wolfpaw/tasks/README.md)** wraps the plan pipeline in a persistent Task row when the Planner decides the work needs a long-running lifecycle (deliverables, monitoring, `ask_user` pauses). With workers enabled, [`workers/`](src/wolfpaw/workers/README.md) runs the task off the request thread.
+4. **[`toolbox/`](src/wolfpaw/toolbox/README.md)** is where every functional step ends up. Tools speak to [`memory/`](src/wolfpaw/memory/README.md) (Postgres + pgvector), [`storage/`](src/wolfpaw/storage/README.md) (file bytes), [`sandbox/`](src/wolfpaw/sandbox/README.md) (Python execution), [`workspace/`](src/wolfpaw/workspace/README.md) (catalog rows + embeddings), and [`integrations/`](src/wolfpaw/integrations/README.md) (OAuth-gated external services).
+5. **Cross-cutting:** every model call funnels through [`metering/`](src/wolfpaw/metering/README.md) (pricing, recording, LangSmith). Every system prompt is assembled by [`persona/`](src/wolfpaw/persona/README.md) (Soul + User File). Query / document embeddings come from [`embeddings/`](src/wolfpaw/embeddings/README.md).
+
+Detailed class-level views (5 axes, ~200 lines of Mermaid) live in [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md). The full architectural drawing is [`WolfPaw_01.pdf`](WolfPaw_01.pdf).
 
 ---
 
-## How Wolfpaw differs from its neighbors
-
-| System | Optimized for | Wolfpaw's contrast |
-|---|---|---|
-| **OpenClaw** | Open-source, local-first, full system access on a power user's own hardware. Hackable kernel, mature ecosystem. | Wolfpaw is channel-native (web / Telegram / email) rather than desktop-native, and intentionally conservative on local capability. Audience is people who *don't* want an agent with root on their laptop. |
-| **NanoClaw** | A minimal agent kernel — small, focused, a building block you wire up yourself. | Wolfpaw is a full product, not a kernel: channels, tasks, billing, memory, sandbox, observability all in one. Wolfpaw borrows NanoClaw's credential-vault pattern but ships the whole stack around it. |
-| **Claude Desktop** | A first-party chat client for Claude on macOS / Windows, with MCP tool integration and local file access. Conversational, in-the-moment. | Wolfpaw runs *across* sessions, not inside one. It owns long-running tasks that pause when blocked and resume across days, pings you on whichever channel suits the moment, and produces real deliverables — not just a chat reply. |
-| **Claude Cowork** | Anthropic's hosted agentic system for knowledge workers — bundled inference, desktop companion, deep first-party integrations (Drive, Gmail, Slack, DocuSign, FactSet). | Wolfpaw differentiates on channel mix (Telegram + email forwarding, not desktop), explicit cost mechanics (hard pause at cap, `/usage`), read-only-by-default scopes, model portability (v2), and self-host as a first-class deployment path. |
-
-The through-line: **OpenClaw maximizes capability on your own machine. NanoClaw is the minimum viable kernel. Claude Desktop is a chat client. Cowork is the model vendor's first-party agent. Wolfpaw is the careful, channel-native worker that gets real work done at a cost you can see — self-hostable and operator-deployable.**
-
-A longer feature-by-feature comparison lives in [`spec.md`](spec.md).
-
----
-
-## Architecture
-
-The full system flow is captured in the architecture diagram:
-
-[**WolfPaw architecture diagram (PDF)**](WolfPaw_00.pdf)
-
-<object data="WolfPaw_00.pdf" type="application/pdf" width="100%" height="700px">
-  <a href="WolfPaw_00.pdf">View WolfPaw_00.pdf</a>
-</object>
-
-A user message — typed in the web app, sent to the Telegram bot, or forwarded by email — flows through a structured loop:
-
-1. **Triage.** A small fast model (Haiku) figures out what the user actually wants and how big a job it is. Conditioned on the Soul File (agent persona) and the User File (the user's persona and preferences).
-2. **Plan** (when the job is non-trivial). A larger model (Sonnet, sometimes Opus) checks procedural memory first — *have we solved something like this before?* — then assembles a plan. If the work is multi-step or produces deliverables, Wolfpaw creates a **Task**: a persistent unit of work that can run for hours or days, pause when blocked, and resume later.
-3. **Execute.** Each step runs as a functional step (pure tool call), a reasoning step (model), or an evaluation step. Big plans branch into parallel sub-agents with their own budgets, then synthesize their outputs. Code runs in a sandboxed Python environment.
-4. **Evaluate.** The Post-Evaluator scores the outcome, persists the plan into procedural memory (a recipe-box of description + ingredients + steps), and — when the result is reusable — emits a generalized **Skill** the planner can pull next time.
-
-### Runtime wiring (top-level)
-
-```mermaid
-classDiagram
-    direction LR
-    class InboundMessage
-    class TriageAgent
-    class QuickAgent
-    class PlanningAgent
-    class Executor
-    class PostEvaluator
-    class ProceduralMemory
-    class SkillsMemory
-    class Task
-    class Sandbox
-    class ModelClient
-
-    InboundMessage --> TriageAgent
-    TriageAgent --> QuickAgent : simple
-    TriageAgent --> PlanningAgent : non-trivial
-    PlanningAgent --> ProceduralMemory : 1st step
-    PlanningAgent --> Executor
-    Executor --> Sandbox : tool calls
-    Executor --> PostEvaluator
-    PostEvaluator --> ProceduralMemory : persist
-    PostEvaluator --> SkillsMemory : "Creates skills"
-    Executor --> Task : long-running
-    TriageAgent --> ModelClient
-    QuickAgent --> ModelClient
-    PlanningAgent --> ModelClient
-    Executor --> ModelClient
-    PostEvaluator --> ModelClient
-```
-
-Five detailed class views below; full UML doc with the box-to-class crosswalk lives in [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md).
-
-<details>
-<summary><strong>View 1 — Channels, Persona, Triage</strong></summary>
-
-```mermaid
-classDiagram
-    direction LR
-
-    class Channel {
-        <<abstract>>
-        +str name
-        +receive(payload) InboundMessage
-        +send(user_id, content)
-        +supports_streaming() bool
-    }
-    class WebChannel
-    class TelegramChannel
-    class EmailChannel
-    class SlackChannel
-    Channel <|-- WebChannel
-    Channel <|-- TelegramChannel
-    Channel <|-- EmailChannel : v1.5
-    Channel <|-- SlackChannel : v2
-
-    class InboundMessage {
-        +UUID user_id
-        +UUID thread_id
-        +str content
-        +str channel_name
-    }
-
-    class SlashCommandDispatcher {
-        +dispatch(InboundMessage) Response|None
-    }
-
-    class Soul {
-        +str version
-        +str content_md
-        +load() Soul
-    }
-
-    class UserProfile {
-        +UUID user_id
-        +int version
-        +str persona_md
-        +dict preferences
-        +str timezone
-        +load(user_id) UserProfile
-    }
-
-    class TriageAgent {
-        +str model
-        +classify(InboundMessage, Soul, UserProfile) TriageResult
-    }
-
-    Channel ..> InboundMessage : produces
-    InboundMessage --> SlashCommandDispatcher
-    SlashCommandDispatcher --> TriageAgent
-    TriageAgent --> Soul : reads
-    TriageAgent --> UserProfile : reads
-```
-
-</details>
-
-<details>
-<summary><strong>View 2 — Planning Loop</strong></summary>
-
-```mermaid
-classDiagram
-    direction TB
-
-    class PlanningAgent {
-        +str model
-        +bool can_use_opus
-        +plan(query, Soul, UserProfile) Plan
-        +adapt(past_plan, query) Plan
-    }
-
-    class Plan {
-        +UUID id
-        +str query
-        +Vector query_embedding
-        +List~Step~ steps
-        +bool success
-        +int score
-    }
-
-    class Step {
-        <<abstract>>
-        +UUID id
-        +StepStatus status
-        +int parallel_group
-        +run(ExecutionContext) StepResult
-    }
-
-    class FunctionalStep
-    class ReasoningStep
-    class EvaluationStep
-    Step <|-- FunctionalStep
-    Step <|-- ReasoningStep
-    Step <|-- EvaluationStep
-
-    class PlanPreEvaluator {
-        +evaluate(Plan, List~Plan~ past_plans) PreEvalVerdict
-    }
-    note for PlanPreEvaluator "v2 — three checks:\nachieves objective? simplifiable?\nimprovement over past plans?"
-
-    class ToolCreatorAgent {
-        +propose_tool(gap) Tool
-    }
-    note for ToolCreatorAgent "v2"
-
-    PlanningAgent --> Plan
-    PlanningAgent --> ProceduralMemory : "1. check first"
-    PlanningAgent --> ToolRegistry : "get_tools_for_task"
-    PlanningAgent --> ToolCreatorAgent : if gap
-    PlanningAgent --> PlanPreEvaluator : v2
-    Plan o-- Step
-```
-
-</details>
-
-<details>
-<summary><strong>View 3 — Execution, Tasks, Sub-agents</strong></summary>
-
-```mermaid
-classDiagram
-    direction TB
-
-    class QuickAgent {
-        +str model
-        +answer(InboundMessage, ToolRegistry) Response
-    }
-
-    class Executor {
-        +execute(Plan, ExecutionContext) ExecutionPlan
-        +run_step(Step) StepResult
-    }
-
-    class ExecutionPlan {
-        +Plan plan
-        +PlanStatus status
-        +Dict results
-    }
-
-    class ExecutionContext {
-        +UUID trace_id
-        +User user
-        +Soul soul
-        +UserProfile user_profile
-        +Task task
-        +Sandbox sandbox
-        +ToolRegistry tools
-        +ModelClient models
-    }
-
-    class Task {
-        +UUID id
-        +UUID parent_task_id
-        +TaskStatus status
-        +int budget_cents
-        +int spent_cents
-        +str blocking_reason
-        +str schedule_pattern
-    }
-
-    class TaskStatus {
-        <<enumeration>>
-        pending
-        running
-        blocked
-        awaiting_user
-        completed
-        failed
-        cancelled
-    }
-
-    class Artifact {
-        +str filename
-        +str mime_type
-        +str storage_url
-    }
-
-    class PostEvaluator {
-        +str model
-        +evaluate(ExecutionPlan) PostEvalResult
-        +persist(Plan, score) None
-        +maybe_emit_skill(Plan) Skill
-    }
-    note for PostEvaluator "Diagram edge:\n'Creates skills'."
-
-    Executor --> ExecutionPlan
-    Executor --> ExecutionContext
-    Task "1" o-- "*" Task : parent/child
-    Task "1" o-- "*" Plan
-    Task "1" o-- "*" Artifact
-    ExecutionPlan --> PostEvaluator
-    PostEvaluator --> ProceduralMemory
-    PostEvaluator --> SkillsMemory : v2
-```
-
-</details>
-
-<details>
-<summary><strong>View 4 — Memory, Tools, Sandbox</strong></summary>
-
-```mermaid
-classDiagram
-    direction LR
-
-    class ConversationalMemory {
-        +fetch_recent(n) List~Message~
-        +fetch_summaries() List~ThreadSummary~
-        +search_relevant(query_embedding, k) List~Message~
-        +append(Message)
-    }
-    note for ConversationalMemory "Per-thread tiered (v1):\nverbatim window + L1/L2 summaries\n+ vector recall at Planner."
-
-    class ProceduralMemory {
-        +search_similar(query_embedding, k) List~Plan~
-        +store(Plan)
-    }
-    note for ProceduralMemory "Recipe-box:\ndescription, ingredients, steps, score."
-
-    class SkillsMemory {
-        +store(Skill)
-        +search_by_task(query_embedding) List~Skill~
-    }
-    note for SkillsMemory "v1: retrieval + seeded starter set.\nv2: auto-emission by PostEvaluator."
-
-    class Skill {
-        +str name
-        +str description
-        +dict ingredients
-        +List~Step~ steps
-        +UUID source_plan_id
-    }
-
-    class ToolRegistry {
-        +register(Tool)
-        +get_tools_for_task(query) List~Tool~
-    }
-
-    class Tool {
-        <<abstract>>
-        +str name
-        +dict signature
-        +bool needs_sandbox
-        +run(inputs, ExecutionContext) ToolResult
-    }
-    class WebSearchTool
-    class HttpGetTool
-    class CalculatorTool
-    class SqlQueryTool
-    class CreateTableTool
-    class ReadDocTool
-    class WriteDocTool
-    class RunPythonTool
-    class CreateSpreadsheetTool
-    class CreatePdfTool
-    class CreateChartTool
-    class CreateSlidesTool
-    class AskUserTool
-    Tool <|-- WebSearchTool
-    Tool <|-- HttpGetTool
-    Tool <|-- CalculatorTool
-    Tool <|-- SqlQueryTool
-    Tool <|-- CreateTableTool
-    Tool <|-- ReadDocTool
-    Tool <|-- WriteDocTool
-    Tool <|-- RunPythonTool
-    Tool <|-- CreateSpreadsheetTool
-    Tool <|-- CreatePdfTool
-    Tool <|-- CreateChartTool
-    Tool <|-- CreateSlidesTool
-    Tool <|-- AskUserTool
-
-    class Sandbox {
-        <<abstract>>
-        +start()
-        +stop()
-        +run_python(code, timeout) ExecResult
-        +read_file(path) bytes
-        +write_file(path, content)
-    }
-    class E2BSandbox
-    class DockerSandbox
-    Sandbox <|-- E2BSandbox
-    Sandbox <|-- DockerSandbox
-
-    class CredentialProxy {
-        +allow(credential, destinations)
-        +proxy(request) response
-    }
-    Sandbox --> CredentialProxy : egress through
-
-    ToolRegistry o-- Tool
-    SkillsMemory o-- Skill
-```
-
-</details>
-
-<details>
-<summary><strong>View 5 — Model client, metering, observability, identity</strong></summary>
-
-```mermaid
-classDiagram
-    direction TB
-
-    class ModelClient {
-        +call(user_id, agent, model, messages, prompt_version_id) ModelResponse
-    }
-
-    class Enforcer {
-        +check_can_spend(user_id) None
-    }
-    class Recorder {
-        +write(user_id, agent, model, prompt_version_id, usage, cost_cents)
-    }
-    class Pricing {
-        +compute(model, usage, at_time) int
-    }
-    class PromptVersionStore {
-        +active(agent) PromptVersion
-        +bump(agent, version_label, content)
-    }
-    class PromptVersion {
-        +UUID id
-        +str agent
-        +str version_label
-        +str content_hash
-    }
-    class LangSmithClient {
-        +bool enabled
-        +trace(agent, model, trace_id) ContextManager
-    }
-    class CostNotifier {
-        +maybe_send(user_id, cost_cents)
-    }
-
-    ModelClient --> Enforcer
-    ModelClient --> LangSmithClient
-    ModelClient --> Recorder
-    ModelClient --> Pricing
-    ModelClient --> PromptVersionStore
-    ModelClient --> CostNotifier
-
-    class User {
-        +UUID id
-        +str email
-    }
-    class Subscription {
-        +str tier
-        +int allowance_cents
-        +bool overage_authorized
-    }
-    User "1" --> "1" Subscription
-
-    class TokenUsage {
-        +int input_tokens
-        +int output_tokens
-        +int cost_cents
-    }
-    class ComputeUsage {
-        +int compute_seconds
-        +int cost_cents
-    }
-    Recorder --> TokenUsage
-    Sandbox --> ComputeUsage
-
-    class SleepCycle {
-        +run()
-        +reorganize_procedural(user_id)
-        +rescore_plans(user_id)
-    }
-    note for SleepCycle "v2 — cron job"
-```
-
-</details>
-
----
-
-## Current repo layout
+## Repo layout
 
 ```
 wolfpaw/
   pyproject.toml
   README.md                          # this file
-  LICENSE                            # TBD
-  spec.md                            # product spec + neighbor comparison
-  implementation_plan.md             # schema, infra, build order (✅ marks shipped steps)
-  soul.md                            # agent persona
-  WolfPaw_00.pdf                     # architecture diagram (canonical)
-  Dockerfile                         # backend image (step 20)
-  docker-compose.yml                 # db + migrate + app + web (step 20)
-  install.sh                         # one-shot self-host setup (step 20)
-  .env.example                       # env template (step 20)
+  spec.md / v2_spec.md / v3_spec.md  # product specs (build phases)
+  implementation_plan.md             # v1 build order (✅ markers)
+  v2_implementation_plan.md          # v2/v3 build order (✅ markers)
+  soul.md                            # agent persona — loaded into every prompt
+  WolfPaw_01.pdf                     # architecture diagram (canonical)
+  Dockerfile                         # backend image
+  docker-compose.yml                 # db + redis + migrate + app + worker + web
+  install.sh                         # one-shot self-host setup
+  .env.example                       # env template
   docs/
-    self-host.md                     # self-host reference (step 20)
-    slack-app-manifest.yaml          # Slack app manifest (step 21)
-    uml_class_diagram.md             # anticipated class structure (Mermaid)
-    decisions/                       # architecture decision records
-      framework-choice.md
-      observability.md
+    self-host.md                     # self-host reference
+    oauth-integrations.md            # Dropbox/Notion/Microsoft provider setup
+    slack-app-manifest.yaml          # Slack app manifest
+    uml_class_diagram.md             # detailed Mermaid class views (5 axes)
+    decisions/                       # ADRs
   scripts/
     migrate.py                       # idempotent schema migration runner
   migrations/
     001_init.sql                     # users, threads, plans, tasks, sandboxes, token_usage, …
     002_auth.sql                     # magic_link_tokens
-    003_sandbox.sql                  # nullable task_id on sandboxes + compute_usage
+    003_sandbox.sql                  # sandbox + compute_usage
     004_seed_skills.sql              # seeded starter skills marker
     005_post_evaluator.sql           # nullable task_id on task_events
     006_telegram.sql                 # channel_links + channel_link_tokens
     007_slack.sql                    # slack_workspaces
+    008_conv_compaction.sql          # thread_summaries fold tracking
+    009_skill_distiller.sql          # auto-emitted skills metadata
+    010_skill_supersession.sql       # superseded_by + Sleep Cycle consolidation
+    011_tool_creator.sql             # tools table + ToolCreator approvals
+    012_integrations.sql             # dropbox_links + oauth_states
+    013_notion.sql                   # notion_links
+    014_microsoft.sql                # microsoft_links
+    015_workspace_embeddings.sql     # vector(1024) + ivfflat on workspace_files
   src/wolfpaw/
-    api.py                           # FastAPI app — mounts auth, web channel, workspace
+    api.py                           # FastAPI app — mounts every router below
     config.py                        # env, model IDs, feature flags, backend selection
-    schemas.py                       # cross-package dataclasses (Plan, Step)
+    schemas.py                       # cross-package dataclasses (Plan, Step, ReplanContext, …)
     tracing.py                       # trace_id contextvar + structured JSON logger
-    agents/                          # Quick + Triage + Planner + Executor (incl. subagent steps) + Post-Evaluator + Router (steps 10–17)  [README]
+    agents/                          # Router, Triage, Quick, Planner, Pre/Post-Eval,
+                                     #   Executor (with retry + replan), Skill Distiller,
+                                     #   Tool Creator   [README]
     auth/                            # magic-link auth, sessions, user bootstrap  [README]
-    channels/                        # Channel ABC, web SSE, Telegram webhook + onboarding, Slack OAuth + events + commands, slash dispatcher  [README]
+    channels/                        # Channel ABC, web SSE, Telegram, Slack,
+                                     #   slash dispatcher  [README]
     embeddings/                      # EmbeddingClient ABC, Voyage + Stub providers  [README]
-    memory/                          # asyncpg pool, conversational, procedural, skills, task_events, channel_links  [README]
-    metering/                        # cost recording, prompt versions, ModelClient, /usage  [README]
-    persona/                         # Soul loader, UserProfile DAO, system-prompt builder, /me/profile  [README]
-    sandbox/                         # Sandbox ABC, Subprocess/Docker/E2B providers, manager  [README]
-    storage/                         # Storage ABC, LocalStorage, S3Storage, signing  [README]
-    tasks/                           # Task lifecycle service, ask_user registry, slash commands  [README]
-    toolbox/                         # tool registry + 16 tools (info, docs, SQL, sandbox, artifacts, ask_user)  [README]
-    workspace/                       # workspace_files DAO + REST API  [README]
+    integrations/                    # Dropbox, Notion, Microsoft Calendar
+                                     #   (OAuth state + per-provider clients + tools)  [README]
+    memory/                          # asyncpg pool, conversational + tiered summaries,
+                                     #   procedural, skills, task_events, channel_links,
+                                     #   slack_workspaces  [README]
+    metering/                        # cost recording, prompt versions, ModelClient,
+                                     #   /usage  [README]
+    persona/                         # Soul loader, UserProfile DAO, system-prompt
+                                     #   builder, /me/profile  [README]
+    sandbox/                         # Sandbox ABC, Subprocess/Docker/E2B,
+                                     #   SandboxManager, compute metering  [README]
+    storage/                         # Storage ABC, LocalStorage, S3Storage,
+                                     #   HMAC signing  [README]
+    tasks/                           # Task lifecycle service, ask_user registry,
+                                     #   slash commands, REST routes  [README]
+    toolbox/                         # tool registry + 20+ tools (info, docs, SQL CRUD,
+                                     #   sandbox, artifacts, ask_user, doc search,
+                                     #   integrations)  [README]
+    workers/                         # arq job runner: compact_thread, embed_message,
+                                     #   embed_workspace_file, run_task, channel
+                                     #   dispatch, sleep_cycle  [README]
+    workspace/                       # workspace_files DAO (with embedding) + REST API  [README]
   tests/
-    test_*.py                        # 294 unit + 108 DB-gated tests as of step 21
-web/                                  # React + Vite SPA (step 19) — Dockerfile + nginx config for self-host  [README]
+    test_*.py                        # ~460 unit + ~160 DB-gated as of v2 phase C
+web/                                 # React + Vite SPA + nginx Dockerfile  [README]
 ```
 
 Each subfolder has its own README — start there when extending that domain. The grouping matches the architecture views: every diagram block has a home, and the cross-cutting concerns (metering, tracing) are sibling packages rather than mixed into the agents.
 
-**Not built yet:** `workers/` (arq deferred from step 15; needed for true async tasks + step 12.5 compaction). Hosted-deploy specifics (managed observability, billing integration) are intentionally out of repo — see the per-deployment notes that operators maintain alongside their fork or pinned dependency. The implementation plan tracks order and scope for the OSS app itself.
-
 ---
 
-## Status
+## Build status
 
-Steps 1–19 of the v1 build order are shipped (see [`implementation_plan.md`](implementation_plan.md) for the numbered list with ✅ markers). Concretely:
+The v1 build order ran 21 steps and is shipped end-to-end. v2 extends with self-improving agent behavior, OAuth integrations, and reliability features. Detailed step-by-step receipts are in [`implementation_plan.md`](implementation_plan.md) (v1) and [`v2_implementation_plan.md`](v2_implementation_plan.md) (v2+).
 
-- **Foundation, DB, auth, metering** (steps 1–4) — FastAPI app + `001_init.sql` + magic-link auth + the `ModelClient` wrapper that records every token call.
-- **Channels + slash commands** (step 5) — `Channel` ABC, web SSE endpoint, `/help` dispatcher.
-- **`/usage`** (step 6) — first-class command, prices each call at its own `created_at` via LATERAL join, 30s cached.
-- **Workspace + info/data tools** (step 7) — `Storage` ABC, LocalStorage + S3 adapters, workspace REST API, and seven tools: `calculator`, `http_get`, `web_search`, `sql_query`, `create_table`, `read_doc`, `write_doc`.
-- **Sandbox** (step 8) — `Sandbox` ABC, Subprocess (dev/test default, real REPL), Docker, and E2B providers, `SandboxManager`, compute metering, and four sandbox tools.
-- **Artifact tools** (step 9) — `create_spreadsheet`/`create_chart`/`create_slides`/`create_pdf`, all running inside the sandbox via a shared `_artifact.py` helper; outputs land in `workspace_files` with `source='agent_output'`.
-- **Quick Agent + conversational memory** (step 10) — Haiku-driven tool loop over the 7 non-sandbox tools, hard-capped at 10 iterations. `memory/conversational.py` ships the verbatim recent window (threads + messages). **First step where `/usage` shows real numbers.**
-- **Triage Agent + Router** (step 11) — Haiku-driven classifier with forced `classify` tool_use returns a structured `TriageVerdict(route, complexity, reasoning)`. `Router` composes Triage → downstream dispatch; the web channel now talks to the Router instead of Quick directly. SSE events: `thread` / `triage` / `plan` / `tool` / `delta` / `done`.
-- **Planner + procedural + skills retrieval** (step 12) — Sonnet 4.6 (Opus 4.7 for ambitious verdicts) with a forced `generate_plan` tool_use returning a structured `Plan` (`schemas.py`). New `embeddings/` subsystem with `Voyage` + `Stub` providers; new `memory/procedural.py` and `memory/skills.py` with the seeded starter skill set.
-- **Executor** (step 13) — runs a `Plan`. Walks steps in order, batches contiguous parallel-group steps via `asyncio.gather`. Functional steps invoke registered tools; reasoning + evaluation steps run as Sonnet calls with prior step results inlined. Step failures skip the rest. Sandbox is torn down in `finally`. Outcome (final_answer / success / error) persists back to procedural memory. Synthesis is skipped when the last completed step is reasoning. SSE adds `step.start` / `step.end` / `step.error` events.
-- **Post-Evaluator** (step 14) — Haiku-driven scoring with a forced `record_score` tool_use. Runs synchronously in the Router after the Executor; scoring is best-effort (failures don't block the user response). Score (0-100) persists to procedural memory via `procedural.update_outcome(score=...)`; the full verdict goes into a `task_events` row. SSE adds a `score` event before the final `delta`. Skills auto-emission stays v2.
-- **Tasks + `ask_user`** (step 15) — `memory/tasks.py` DAO with the full state machine and cross-user-scoped reads/cancels. `tasks/` package: `TaskService.create_and_run` wraps Planner+Executor+Post-Eval in a Task row with per-step status transitions and `task_events` emissions. `ask_user` tool pauses a task on `asyncio.Future`, resumes when the user POSTs to `/channels/web/answer`. Slash commands `/tasks`, `/task <id>`, `/cancel <id>` (all user-scoped). Router's task verdict now calls `TaskService`; SSE adds `task` event. **arq async worker deferred** (sync execution covers the substrate).
-- **Sub-agent delegation** (step 16) — new `subagent` step kind. The Planner can mark plan branches as delegated, the Executor spawns a child Task via `TaskService.create_and_run` (with `parent_task_id` + `budget_cents`), and captures the child's `final_answer` as the step output. Depth capped at 3 ancestors via `memory.tasks.get_depth`. Multiple subagent steps in the same `parallel_group` run concurrently via the existing `asyncio.gather` path; a trailing reasoning step in the parent plan synthesizes their outputs.
-- **Soul + User File integration** (step 17) — new `persona/` subpackage: `soul.py` loads + hashes `soul.md`, `user_profile.py` DAO with partial-write `update(...)` that bumps `version`, `builder.py` assembles `Soul + User File + agent_role` into every agent's system prompt. All 5 agents now build their system prompts at call time via `persona.builder.build_for_agent`; `prompt_versions` hashes only the per-agent role (Soul + Profile vary per-user). New `GET / PATCH /me/profile` endpoints (React UI lands step 19). Thread creation now stamps `soul_version` + `user_profile_version` so procedural-memory retrieval can later scope by persona snapshot.
-- **Telegram channel** (step 18) — migration `006_telegram.sql` adds `channel_links` + `channel_link_tokens`. New `TelegramChannel` adapter, `HttpTelegramClient` (httpx → Bot API `sendMessage`) + injectable `FakeTelegramClient` for tests, and two HTTP routes: `POST /channels/telegram/webhook` (validates `X-Telegram-Bot-Api-Secret-Token`, handles `/start link_<token>` onboarding inline, dispatches slash commands inline, fires the Router as a background `asyncio.create_task` for free-form messages) and `POST /channels/telegram/link-token` (authenticated Wolfpaw user → deep-link URL `https://t.me/<bot>?start=link_<token>`). Single-use TTL'd link tokens via `channels/telegram_tokens.py`.
-- **React web app** (step 19) — new `web/` directory: Vite + React + TypeScript + React Router, dev server proxies API paths so the session cookie stays single-origin. Auth context + magic-link sign-in + verify. ChatPage with a POST-based SSE parser that renders every event type (`thread` / `triage` / `plan` / `tool` / `step.start|end|error` / `score` / `task` / `ask_user` / `delta`) plus an inline reply form for `ask_user` pauses. Tasks list + detail (with cancel). Files browser. Profile editor (User File + Telegram link minting). Usage dashboard with scope tabs. Backend additions: `src/wolfpaw/tasks/routes.py` (`GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}/cancel`) and `src/wolfpaw/metering/routes.py` (`GET /usage?scope=...`) — JSON companions to the slash commands.
-- **OSS packaging** (step 20) — top-level `Dockerfile` + `web/Dockerfile` + `docker-compose.yml` + `install.sh` + `.env.example` + `docs/self-host.md`. Four-service stack: `db` (pgvector/pg16 with healthcheck) → `migrate` (one-shot, idempotent `python -m scripts.migrate` tracks applied files in `schema_migrations`) → `app` (FastAPI on :8000, depends on migrate completed successfully) → `web` (nginx serving the Vite build, proxying API paths with SSE-friendly `proxy_buffering off`, published on host `:3000`). New `scripts/migrate.py` runner + `WOLFPAW_MIGRATIONS_DIR` env override so the migrations resolver works in both the source tree (dev) and the container.
-- **Slack channel** (step 21) — migration `007_slack.sql` adds `slack_workspaces` (per-workspace bot token + soft-delete `revoked_at`); reuses `channel_links` + `channel_link_tokens` from step 18. New `channels/slack.py` mounts four routes: `GET /channels/slack/install-url` (mints state token + returns OAuth URL), `GET /channels/slack/oauth/callback` (exchanges code + persists workspace, renders HTML success/error page), `POST /channels/slack/events` (URL-verification handshake + DM dispatch), `POST /channels/slack/commands` (`/wolfpaw <text>` — dispatches built-in commands inline, fires Router for free-form text with "Working on it…" ack). HMAC signature verification on every inbound POST via `channels/slack_signing.py` (raw body + ±5min replay window). `channels/slack_client.py` ships `HttpSlackClient` + `FakeSlackClient`. Channel identity is composite `<team_id>:<slack_user_id>` so the same person in two workspaces is two distinct identities. `docs/slack-app-manifest.yaml` is the operator-facing manifest to paste into api.slack.com/apps.
+**Shipped:**
 
-**Tests:** `pytest` runs 294 unit tests in ~1s; 108 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`.
+- **v1 foundation** — FastAPI, magic-link auth, ModelClient with metering, slash dispatcher, `/usage`, Storage abstraction (Local + S3), workspace file API, sandbox (Subprocess + Docker + E2B), artifact tools (PDF / xlsx / slides / chart), Quick Agent, Triage, Planner, Executor, Post-Evaluator, Task lifecycle + `ask_user`, subagent steps, Soul + User File, Telegram, web SPA, Docker Compose self-host, Slack.
+- **v2 self-improving agent (phase A + B)** — tiered conversational memory (L1/L2 compaction + per-thread vector recall), arq worker, Plan Pre-Evaluator with one-retry loop, Skill auto-emission on high-scoring reusable plans, weekly Sleep Cycle (skill consolidation), structured subagent failure policies (`fail` / `drop` / `retry`), Tool Creator agent with `ask_user` approval.
+- **v2 integrations (phase C, partial)** — Dropbox app-folder, Notion workspace, Microsoft Outlook Calendar. Google Calendar (#31) and Gmail readonly (#33) are deferred pending Google verification.
+- **v3 reliability + memory** — full row-level CRUD on user SQL tables, schema introspection (`list_tables`, `describe_table`) with column-hint errors on failure, document semantic search (`list_docs`, `search_docs` over embedded `workspace_files`), self-healing recovery on `ToolError` (step-level input repair + one mid-plan replan with the Planner).
 
-**Next up:** Tiered conversational compaction (12.5). The full v1 build order is shipped; future channels (email forwarding, etc.) are roadmap items rather than blocking work.
+**Roadmap (not yet built):** proactive task-completion push to the user's preferred channel (#37), Slack `app_mention` + threads (#35), Telegram inline keyboards (#36), email forwarding intake, full-fat usage dashboard, OpenTelemetry tracing, entity / knowledge-base memory.
 
-The repo currently lives inside [`dmitris-fabulous/wolfpaw/`](.) for incubation; it will move to its own standalone repo before public release.
-
----
-
-## Documentation map
-
-| File | What it covers |
-|---|---|
-| [`README.md`](README.md) | This file — pitch, comparison, architecture overview, status |
-| [`spec.md`](spec.md) | Product spec; long feature-by-feature comparison with OpenClaw and Cowork; scope decisions |
-| [`implementation_plan.md`](implementation_plan.md) | Locked-in decisions, Postgres schema, tools, sandbox, tasks, metering, build order |
-| [`soul.md`](soul.md) | Agent persona — loaded into every agent prompt |
-| [`WolfPaw_00.pdf`](WolfPaw_00.pdf) | Canonical architecture diagram |
-| [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md) | Anticipated class structure across five views, plus diagram-box-to-class crosswalk |
-| [`docs/decisions/`](docs/decisions/) | Architecture decision records (framework choice, observability) |
-| `src/wolfpaw/<subpackage>/README.md` | Per-domain orientation for maintainers — one in each of `agents/`, `auth/`, `channels/`, `embeddings/`, `memory/`, `metering/`, `persona/`, `sandbox/`, `storage/`, `tasks/`, `toolbox/`, `workspace/`. Start here when extending that domain. |
+**Tests:** `pytest` runs ~460 unit tests in under a minute; another ~160 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`. CI deploys via `git pull && docker compose up -d --build && docker compose restart web` (the `restart web` ensures nginx flushes its upstream DNS).
 
 ---
 
