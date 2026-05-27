@@ -129,6 +129,21 @@ async def enqueue_embed_message(
     )
 
 
+async def enqueue_embed_workspace_file(file_id: UUID, text: str) -> None:
+    """Embed a newly-written workspace file so it shows up in
+    `search_docs`. Called from ``write_doc`` post-register."""
+    from wolfpaw.workspace.files import embed_and_store_doc
+
+    settings = get_settings()
+    if not settings.workers_enabled:
+        _spawn_inline(embed_and_store_doc(file_id, text))
+        return
+    pool = await get_pool()
+    await pool.enqueue_job(
+        "embed_workspace_file_job", str(file_id), text,
+    )
+
+
 async def enqueue_run_task(task_id: UUID) -> None:
     """Run a queued Task end-to-end (planner → executor → post-eval +
     terminal transition). Called from the Router's task path when

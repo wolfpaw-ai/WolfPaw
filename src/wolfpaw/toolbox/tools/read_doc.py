@@ -42,8 +42,20 @@ class ReadDocTool(Tool):
             existing = await files_dao.get_latest_by_filename(
                 conn, ctx.user_id, filename
             )
+            if existing is None:
+                available = await files_dao.list_latest(conn, ctx.user_id)
         if existing is None:
-            raise ToolError(f"no workspace file named {filename!r}")
+            if available:
+                names = ", ".join(repr(f.filename) for f in available[:10])
+                raise ToolError(
+                    f"no workspace file named {filename!r} — available"
+                    f" files include: [{names}]. Call `list_docs` for"
+                    " the full list or `search_docs` to find by content."
+                )
+            raise ToolError(
+                f"no workspace file named {filename!r} — the user's"
+                " workspace is empty"
+            )
         try:
             data = await get_storage().get(ctx.user_id, filename)
         except FileNotFoundError as e:

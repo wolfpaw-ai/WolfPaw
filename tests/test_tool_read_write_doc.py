@@ -60,6 +60,7 @@ def storage_and_dao(tmp_path, monkeypatch):
     monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.toolbox.tools.read_doc.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.toolbox.tools.write_doc.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.toolbox.tools.list_docs.acquire", _fake_acquire)
 
     rows: list[_Row] = []
 
@@ -86,8 +87,28 @@ def storage_and_dao(tmp_path, monkeypatch):
         rows.append(r)
         return _to_dao(r)
 
+    async def list_latest(_conn, user_id):
+        latest: dict[str, _Row] = {}
+        for r in rows:
+            if r.user_id != user_id:
+                continue
+            cur = latest.get(r.filename)
+            if cur is None or r.version > cur.version:
+                latest[r.filename] = r
+        out = [_to_dao(r) for r in latest.values()]
+        out.sort(key=lambda f: f.created_at, reverse=True)
+        return out
+
     monkeypatch.setattr(files_dao, "get_latest_by_filename", get_latest_by_filename)
     monkeypatch.setattr(files_dao, "register", register)
+    monkeypatch.setattr(files_dao, "list_latest", list_latest)
+    # write_doc enqueues an embed job — stub it so the test doesn't try
+    # to use the fake DB connection for the asyncpg vector update.
+    async def _noop_enqueue(_file_id, _text):  # noqa: ARG001
+        return None
+    monkeypatch.setattr(
+        "wolfpaw.workers.queue.enqueue_embed_workspace_file", _noop_enqueue,
+    )
     import wolfpaw.toolbox.tools.read_doc as rd
     import wolfpaw.toolbox.tools.write_doc as wd
     monkeypatch.setattr(rd, "files_dao", files_dao)
@@ -142,6 +163,54 @@ async def test_read_missing_raises(storage_and_dao):
     read = get_registry().get("read_doc")
     with pytest.raises(ToolError):
         await read.run(ctx, filename="ghost.md")
+
+
+async def test_read_missing_includes_available_filenames(storage_and_dao):
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    write = get_registry().get("write_doc")
+    read = get_registry().get("read_doc")
+    await write.run(ctx, filename="receipts.md", content="r")
+    await write.run(ctx, filename="recipes.md", content="m")
+
+    with pytest.raises(ToolError) as excinfo:
+        await read.run(ctx, filename="ghost.md")
+    msg = str(excinfo.value)
+    assert "receipts.md" in msg and "recipes.md" in msg
+
+
+async def test_read_missing_on_empty_workspace_says_so(storage_and_dao):
+    uid = uuid4()
+    read = get_registry().get("read_doc")
+    with pytest.raises(ToolError, match="empty"):
+        await read.run(ToolContext(user_id=uid), filename="ghost.md")
+
+
+async def test_list_docs_returns_latest_per_filename(storage_and_dao):
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    write = get_registry().get("write_doc")
+    list_d = get_registry().get("list_docs")
+
+    await write.run(ctx, filename="a.md", content="a1")
+    await write.run(ctx, filename="b.md", content="b1")
+    await write.run(ctx, filename="a.md", content="a2", overwrite=True)
+
+    out = await list_d.run(ctx)
+    by_name = {f["filename"]: f for f in out["files"]}
+    assert out["file_count"] == 2
+    assert by_name["a.md"]["version"] == 2
+    assert by_name["b.md"]["version"] == 1
+
+
+async def test_list_docs_isolated_per_user(storage_and_dao):
+    a, b = uuid4(), uuid4()
+    write = get_registry().get("write_doc")
+    list_d = get_registry().get("list_docs")
+    await write.run(ToolContext(user_id=a), filename="alice.md", content="x")
+
+    bs_view = await list_d.run(ToolContext(user_id=b))
+    assert bs_view["file_count"] == 0
 
 
 async def test_read_isolated_per_user(storage_and_dao):

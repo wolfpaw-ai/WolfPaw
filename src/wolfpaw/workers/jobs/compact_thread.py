@@ -300,6 +300,17 @@ async def embed_message_job(
     await embed_and_store(UUID(message_id_str), content)
 
 
+async def embed_workspace_file_job(
+    _ctx: dict, file_id_str: str, text: str,
+) -> None:
+    """arq-shaped wrapper around
+    :func:`wolfpaw.workspace.files.embed_and_store_doc`. Runs after a
+    workspace file is written so `search_docs` can find it."""
+    from wolfpaw.workspace.files import embed_and_store_doc
+
+    await embed_and_store_doc(UUID(file_id_str), text)
+
+
 # --- production summarizer -------------------------------------------------
 
 

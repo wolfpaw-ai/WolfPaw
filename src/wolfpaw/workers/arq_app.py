@@ -13,6 +13,7 @@ Job registration:
 
 - ``compact_thread_job`` — tiered conversational memory compaction.
 - ``embed_message_job`` — write a vector into ``message_embeddings``.
+- ``embed_workspace_file_job`` — write a vector onto a ``workspace_files`` row.
 - ``run_task_job`` — drive a queued Task end-to-end.
 - ``telegram_dispatch_job`` — handle a Telegram free-form inbound.
 - ``slack_dispatch_job`` — handle a Slack DM or slash command inbound.
@@ -43,6 +44,7 @@ from wolfpaw.workers.jobs.channel_dispatch import (
 from wolfpaw.workers.jobs.compact_thread import (
     compact_thread_job,
     embed_message_job,
+    embed_workspace_file_job,
 )
 from wolfpaw.workers.jobs.run_task import run_task_job
 from wolfpaw.workers.jobs.sleep_cycle import sleep_cycle_job
@@ -70,6 +72,7 @@ class WorkerSettings:
     functions = [
         compact_thread_job,
         embed_message_job,
+        embed_workspace_file_job,
         run_task_job,
         telegram_dispatch_job,
         slack_dispatch_job,
