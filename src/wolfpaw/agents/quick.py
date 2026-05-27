@@ -72,6 +72,8 @@ class QuickAgent:
             "describe_table",
             "read_doc",
             "write_doc",
+            "list_docs",
+            "search_docs",
         }
     )
 

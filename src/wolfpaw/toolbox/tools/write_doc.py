@@ -87,6 +87,9 @@ class WriteDocTool(Tool):
                 supersedes_id=supersedes_id,
             )
 
+        from wolfpaw.workers.queue import enqueue_embed_workspace_file
+        await enqueue_embed_workspace_file(f.id, content)
+
         return {
             "file_id": str(f.id),
             "filename": f.filename,
