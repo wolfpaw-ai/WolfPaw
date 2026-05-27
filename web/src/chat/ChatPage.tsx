@@ -40,6 +40,7 @@ export function ChatPage() {
   const [answerDraft, setAnswerDraft] = useState("");
   const turnCounter = useRef(0);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({
@@ -47,6 +48,16 @@ export function ChatPage() {
       behavior: "smooth",
     });
   }, [turns]);
+
+  // Keep the message textarea focused so the user can type → enter →
+  // type → enter without clicking back into the field. Fires on mount
+  // (busy=false, pendingQuestion=null), after a turn completes (busy
+  // → false), and after an ask_user reply (pendingQuestion → null).
+  useEffect(() => {
+    if (!busy && !pendingQuestion) {
+      inputRef.current?.focus();
+    }
+  }, [busy, pendingQuestion]);
 
   const send = useCallback(
     async (text: string) => {
@@ -211,6 +222,7 @@ export function ChatPage() {
 
       <form className="chat-input" onSubmit={onSubmit}>
         <textarea
+          ref={inputRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder={busy ? "Wolfpaw is working…" : "Type a message…"}

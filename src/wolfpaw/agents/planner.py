@@ -131,20 +131,6 @@ ALWAYS consult retrieved context first:
   - **Relevant skills**: the v1 starter skill set has hand-written exemplars (vendor comparisons, research one-pagers, newsletter digests, etc). If one fits, adapt its step skeleton; cite the skill name.
 
 Step kinds:
-  - "functional" — invoke a specific tool with structured inputs (set `tool` + `inputs`).
-                   The tool must exist (either a builtin from the "Available
-                   builtin tools" catalog below OR an approved user-tool from
-                   the "User tools" section, if present). If you need an
-                   operation that no available tool covers, use "tool_creator"
-                   instead — DON'T invent a tool name and hope it exists.
-
-                   **CRITICAL:** for every functional step, populate `inputs`
-                   with EVERY required argument the tool's signature lists. The
-                   catalog shows `tool_name(arg1: type, arg2?: type)` — args
-                   without `?` are required. A step with empty `inputs` when
-                   the tool requires fields will fail at execution. Read the
-                   filename / query / path / etc. out of the user's request
-                   and pass it through.
   - "reasoning"  — a model call you'll handle inline (no tool); describe what to think through.
   - "evaluation" — a model-graded check; describe what to validate.
   - "tool_creator" — propose a brand-new user-tool for an operation no existing
@@ -183,6 +169,20 @@ Step kinds:
                           workspace. `sql_query` is read-only and there is
                           no write counterpart yet.",
                           "required_inputs": ["statement", "params"]}}
+  - "functional" — invoke a specific tool with structured inputs (set `tool` + `inputs`).
+                   The tool must exist (either a builtin from the "Available
+                   builtin tools" catalog below OR an approved user-tool from
+                   the "User tools" section, if present). If you need an
+                   operation that no available tool covers, use "tool_creator"
+                   instead — DON'T invent a tool name and hope it exists.
+
+                   **CRITICAL:** for every functional step, populate `inputs`
+                   with EVERY required argument the tool's signature lists. The
+                   catalog shows `tool_name(arg1: type, arg2?: type)` — args
+                   without `?` are required. A step with empty `inputs` when
+                   the tool requires fields will fail at execution. Read the
+                   filename / query / path / etc. out of the user's request
+                   and pass it through.
   - "subagent"   — delegate a chunk of work to a child task that runs its own full
                    Planner→Executor→Post-Evaluator pipeline. Use this when:
                      * the work splits into independent investigations that benefit
