@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncpg
+
 from wolfpaw.memory.db import acquire
 from wolfpaw.toolbox.registry import (
     Tool,
@@ -20,6 +22,7 @@ from wolfpaw.toolbox.registry import (
 )
 from wolfpaw.toolbox.user_data import (
     ensure_schema,
+    explain_column_error,
     quote_ident,
     validate_identifier,
 )
@@ -111,7 +114,14 @@ class SqlUpdateTool(Tool):
                 f'UPDATE {quote_ident(schema)}.{quote_ident(table)}'
                 f' SET {", ".join(set_clauses)}{where_sql}'
             )
-            status = await conn.execute(sql, *params)
+            try:
+                status = await conn.execute(sql, *params)
+            except (
+                asyncpg.UndefinedColumnError,
+                asyncpg.UndefinedTableError,
+            ) as e:
+                hint = await explain_column_error(conn, schema, table, e)
+                raise ToolError(hint) from e
 
         return {
             "updated": _row_count_from_status(status),

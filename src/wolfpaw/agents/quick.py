@@ -68,6 +68,8 @@ class QuickAgent:
             "sql_update",
             "sql_delete",
             "create_table",
+            "list_tables",
+            "describe_table",
             "read_doc",
             "write_doc",
         }

@@ -114,6 +114,143 @@ async def test_create_table_rejects_bad_identifier():
         )
 
 
+async def test_create_table_reports_existed_and_actual_schema():
+    """Reproduce the 'meatloaf' failure: a stale table from an earlier
+    attempt has a sparser schema than the new plan wants. CREATE TABLE
+    IF NOT EXISTS no-ops, and the tool must report the *real* columns
+    plus existed=True so the caller can adapt."""
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+
+    first = await create.run(
+        ctx, table_name="recipes",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "vendor", "type": "text"},
+            {"name": "amount", "type": "numeric"},
+        ],
+    )
+    assert first["existed"] is False
+    assert {c["name"] for c in first["columns"]} == {"id", "vendor", "amount"}
+
+    second = await create.run(
+        ctx, table_name="recipes",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "title", "type": "text"},
+            {"name": "ingredients", "type": "jsonb"},
+        ],
+    )
+    # Truth wins: the second call doesn't replace the schema.
+    assert second["existed"] is True
+    assert {c["name"] for c in second["columns"]} == {"id", "vendor", "amount"}
+
+
+async def test_list_tables_and_describe_table():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    list_t = get_registry().get("list_tables")
+    describe = get_registry().get("describe_table")
+
+    empty = await list_t.run(ctx)
+    assert empty["table_count"] == 0
+    assert empty["tables"] == []
+
+    await create.run(
+        ctx, table_name="recipes",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "title", "type": "text"},
+        ],
+    )
+    await create.run(
+        ctx, table_name="receipts",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "amount", "type": "numeric"},
+        ],
+    )
+
+    listing = await list_t.run(ctx)
+    names = [t["name"] for t in listing["tables"]]
+    assert names == ["receipts", "recipes"]
+
+    described = await describe.run(ctx, table_name="recipes")
+    assert [c["name"] for c in described["columns"]] == ["id", "title"]
+
+
+async def test_describe_table_missing_raises_with_hint():
+    uid = uuid4()
+    describe = get_registry().get("describe_table")
+    with pytest.raises(ToolError, match="list_tables"):
+        await describe.run(ToolContext(user_id=uid), table_name="nope")
+
+
+async def test_sql_insert_unknown_column_returns_actual_columns():
+    """The exact recipes/meatloaf failure: insert references a column
+    that doesn't exist. The ToolError must surface the real column list
+    so the agent's retry can recover."""
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    insert = get_registry().get("sql_insert")
+
+    await create.run(
+        ctx, table_name="recipes",
+        columns=[
+            {"name": "id", "type": "integer"},
+            {"name": "vendor", "type": "text"},
+            {"name": "amount", "type": "numeric"},
+        ],
+    )
+    with pytest.raises(ToolError) as excinfo:
+        await insert.run(
+            ctx, table_name="recipes",
+            rows=[{"id": 1, "title": "Meatloaf"}],
+        )
+    msg = str(excinfo.value)
+    assert "title" in msg
+    assert "vendor" in msg and "amount" in msg
+
+
+async def test_sql_update_unknown_column_returns_actual_columns():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    update = get_registry().get("sql_update")
+
+    await create.run(
+        ctx, table_name="t",
+        columns=[{"name": "id", "type": "integer"}],
+    )
+    with pytest.raises(ToolError) as excinfo:
+        await update.run(
+            ctx, table_name="t",
+            set={"missing": 1}, where_all=True,
+        )
+    assert "missing" in str(excinfo.value)
+    assert "id" in str(excinfo.value)
+
+
+async def test_sql_delete_unknown_column_returns_actual_columns():
+    uid = uuid4()
+    ctx = ToolContext(user_id=uid)
+    create = get_registry().get("create_table")
+    delete = get_registry().get("sql_delete")
+
+    await create.run(
+        ctx, table_name="t",
+        columns=[{"name": "id", "type": "integer"}],
+    )
+    with pytest.raises(ToolError) as excinfo:
+        await delete.run(
+            ctx, table_name="t", where={"missing": 1},
+        )
+    assert "missing" in str(excinfo.value)
+
+
 async def test_sql_insert_then_query_round_trip():
     uid = uuid4()
     ctx = ToolContext(user_id=uid)

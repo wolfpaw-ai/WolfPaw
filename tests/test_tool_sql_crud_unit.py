@@ -86,3 +86,18 @@ async def test_sql_delete_rejects_both_where_and_where_all(ctx):
         await tool.run(
             ctx, table_name="t", where={"a": 1}, where_all=True,
         )
+
+
+# --- describe_table -------------------------------------------------------
+
+
+async def test_describe_table_requires_table_name(ctx):
+    tool = get_registry().get("describe_table")
+    with pytest.raises(ToolError):
+        await tool.run(ctx)
+
+
+async def test_describe_table_rejects_bad_identifier(ctx):
+    tool = get_registry().get("describe_table")
+    with pytest.raises(ValueError):
+        await tool.run(ctx, table_name="DROP TABLE")

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncpg
+
 from wolfpaw.memory.db import acquire
 from wolfpaw.toolbox.registry import (
     Tool,
@@ -19,6 +21,7 @@ from wolfpaw.toolbox.registry import (
 )
 from wolfpaw.toolbox.user_data import (
     ensure_schema,
+    explain_column_error,
     quote_ident,
     validate_identifier,
 )
@@ -100,6 +103,13 @@ class SqlInsertTool(Tool):
                 f'INSERT INTO {quote_ident(schema)}.{quote_ident(table)}'
                 f' ({col_sql}) VALUES {", ".join(value_groups)}'
             )
-            await conn.execute(sql, *params)
+            try:
+                await conn.execute(sql, *params)
+            except (
+                asyncpg.UndefinedColumnError,
+                asyncpg.UndefinedTableError,
+            ) as e:
+                hint = await explain_column_error(conn, schema, table, e)
+                raise ToolError(hint) from e
 
         return {"inserted": len(rows), "schema": schema, "table": table}
