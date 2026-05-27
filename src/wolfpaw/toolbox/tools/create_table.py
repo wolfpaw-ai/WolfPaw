@@ -18,6 +18,7 @@ from wolfpaw.toolbox.registry import (
     register_tool,
 )
 from wolfpaw.toolbox.user_data import (
+    describe_columns,
     ensure_schema,
     quote_ident,
     validate_identifier,
@@ -96,17 +97,22 @@ class CreateTableTool(Tool):
 
         async with acquire() as conn:
             schema = await ensure_schema(conn, ctx.user_id)
-            sql = (
-                f'CREATE TABLE IF NOT EXISTS {quote_ident(schema)}.{quote_ident(table)}'
-                f' ({", ".join(col_clauses)})'
-            )
-            await conn.execute(sql)
+            existing = await describe_columns(conn, schema, table)
+            existed = bool(existing)
+            if not existed:
+                sql = (
+                    f'CREATE TABLE {quote_ident(schema)}.{quote_ident(table)}'
+                    f' ({", ".join(col_clauses)})'
+                )
+                await conn.execute(sql)
+                existing = await describe_columns(conn, schema, table)
 
         return {
             "schema": schema,
             "table": table,
-            "columns": [
-                {"name": validate_identifier(c["name"]), "type": str(c["type"]).lower()}
-                for c in columns
-            ],
+            "existed": existed,
+            # Truth from `information_schema`, not the requested column
+            # list — when the table pre-existed with a different layout,
+            # the caller needs to see what's actually there.
+            "columns": existing,
         }

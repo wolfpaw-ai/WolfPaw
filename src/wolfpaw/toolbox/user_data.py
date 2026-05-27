@@ -40,3 +40,69 @@ async def ensure_schema(conn: asyncpg.Connection, user_id: UUID) -> str:
     # Schema name comes from validated hex UUID — safe to interpolate.
     await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
     return schema
+
+
+async def describe_columns(
+    conn: asyncpg.Connection, schema: str, table_name: str,
+) -> list[dict[str, object]]:
+    """Return one dict per column: {name, type, not_null}. Empty if no
+    such table. Caller validates `table_name` if it came from user input."""
+    rows = await conn.fetch(
+        """
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        ORDER BY ordinal_position
+        """,
+        schema, table_name,
+    )
+    return [
+        {
+            "name": r["column_name"],
+            "type": r["data_type"],
+            "not_null": r["is_nullable"] == "NO",
+        }
+        for r in rows
+    ]
+
+
+async def explain_column_error(
+    conn: asyncpg.Connection, schema: str, table_name: str,
+    pg_error: BaseException,
+) -> str:
+    """Build a hint that augments a Postgres column/relation error with
+    the table's actual current columns. Useful for translating opaque
+    asyncpg errors into something the agent can recover from on retry."""
+    cols = await describe_columns(conn, schema, table_name)
+    if not cols:
+        return (
+            f"{pg_error} — table {table_name!r} does not exist in the"
+            " user's SQL workspace; call `list_tables` first"
+        )
+    names = ", ".join(str(c["name"]) for c in cols)
+    return f"{pg_error} — actual columns on {table_name!r}: [{names}]"
+
+
+async def list_user_tables(
+    conn: asyncpg.Connection, user_id: UUID,
+) -> dict[str, list[dict[str, object]]]:
+    """Return {table_name: [columns...]} for every table in the user's
+    private schema. Empty dict when the user hasn't created any yet."""
+    schema = user_data_schema(user_id)
+    rows = await conn.fetch(
+        """
+        SELECT table_name, column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = $1
+        ORDER BY table_name, ordinal_position
+        """,
+        schema,
+    )
+    tables: dict[str, list[dict[str, object]]] = {}
+    for r in rows:
+        tables.setdefault(r["table_name"], []).append({
+            "name": r["column_name"],
+            "type": r["data_type"],
+            "not_null": r["is_nullable"] == "NO",
+        })
+    return tables
