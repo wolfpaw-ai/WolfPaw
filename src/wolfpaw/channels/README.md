@@ -2,6 +2,82 @@
 
 User-facing surfaces — web, Telegram, Slack, eventually email. Every channel implements the same `Channel` interface and feeds normalized messages into a shared slash-command dispatcher before any agent sees them. The [root README](../../../README.md) shows where channels sit at the top-level.
 
+## Connecting
+
+Each channel has two layers: a one-time **operator setup** (creating the bot / app, putting credentials in `.env`) and a per-user **link step** (done from the web app's profile page). The web channel needs neither — it works as soon as you log in.
+
+### Web
+
+Nothing to configure. Log into the web app and start chatting. The Profile page is where you add the other channels.
+
+### Telegram
+
+The bot is shared across all users of a deployment (one `@WolfpawBot`-style handle per instance). Telegram requires a **public HTTPS webhook**, so the deployment must be reachable from the internet — see [`how-to-run.md`](../../../how-to-run.md) for the Tailscale Funnel or DDNS+Caddy options.
+
+**Operator (once):**
+
+1. Create the bot in Telegram: message [`@BotFather`](https://t.me/BotFather) → `/newbot` → pick a display name and a username. Copy the bot token it gives you.
+2. Add to `.env`:
+   ```
+   WOLFPAW_TELEGRAM_BOT_TOKEN=<token from BotFather>
+   WOLFPAW_TELEGRAM_BOT_USERNAME=<username without the @>
+   WOLFPAW_TELEGRAM_WEBHOOK_SECRET=<any random string>
+   ```
+3. Restart so the new env is loaded:
+   ```bash
+   docker compose restart app worker
+   ```
+4. Register the webhook with Telegram (one-time per deployment):
+   ```bash
+   curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+     -d "url=https://<your-domain>/channels/telegram/webhook" \
+     -d "secret_token=<WOLFPAW_TELEGRAM_WEBHOOK_SECRET>"
+   ```
+   Telegram will refuse non-HTTPS URLs. Verify with `curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"`.
+
+**Each user:**
+
+1. Log into the wolfpaw web app and open **Profile**.
+2. Click **"Mint Telegram link"** — this calls `POST /channels/telegram/link-token` (handler in [`telegram.py`](telegram.py)) and returns a single-use `https://t.me/<bot>?start=link_<token>` URL.
+3. Click **"Open in Telegram →"**. The bot receives `/start link_<token>`, [`telegram_tokens.consume`](telegram_tokens.py) maps it back to your wolfpaw `user_id`, and the row is written to `channel_links`. The bot replies "You're linked."
+
+Token TTL is 15 minutes (`WOLFPAW_TELEGRAM_LINK_TOKEN_TTL_MINUTES`). After expiry, mint a new one.
+
+### Slack
+
+Unlike Telegram (one shared bot per deployment), Slack is one **app** per deployment but one **install** per workspace. The OAuth flow gives each workspace its own bot token, stored in `slack_workspaces`. Slack also requires public HTTPS.
+
+**Operator (once per deployment):**
+
+1. Create the Slack app from the manifest at [`docs/slack-app-manifest.yaml`](../../../docs/slack-app-manifest.yaml):
+   - https://api.slack.com/apps → **Create New App** → **From an app manifest**.
+   - Pick a workspace for development (you can distribute to others later from Settings → Manage Distribution).
+   - Paste the YAML, replacing every `<YOUR-DOMAIN>` with your public HTTPS URL.
+2. From the new app's **Basic Information → App Credentials** page, copy into `.env`:
+   ```
+   WOLFPAW_SLACK_CLIENT_ID=<Client ID>
+   WOLFPAW_SLACK_CLIENT_SECRET=<Client Secret>
+   WOLFPAW_SLACK_SIGNING_SECRET=<Signing Secret>
+   ```
+3. Restart:
+   ```bash
+   docker compose restart app worker
+   ```
+
+The manifest already points Slack's event-subscriptions URL at `/channels/slack/events` and the OAuth redirect at `/channels/slack/oauth/callback`, so there's nothing to register separately.
+
+**Each user (per workspace):**
+
+1. Log into the wolfpaw web app and open **Profile**.
+2. Click **"Connect Slack"** — this calls `GET /channels/slack/install-url`, which mints a state token (same shape as the Telegram link token) and returns Slack's OAuth authorize URL.
+3. Approve the install in Slack. Slack redirects to `/channels/slack/oauth/callback`, [`slack.py`](slack.py) exchanges the code for a bot token, upserts the workspace into `slack_workspaces`, and writes a `channel_links` row keyed on `team:slack_user`.
+4. DM the bot in Slack, or use `/wolfpaw <message>` in any channel where the bot is installed.
+
+### Email
+
+Not implemented yet — see "Extending" below.
+
+
 ## Files
 
 - **`__init__.py`** — `Channel` ABC + `InboundMessage` dataclass. Every channel implements `receive(payload) → InboundMessage`, `send(user_id, content)`, `supports_streaming()`. The ABC is the contract; concrete channels live as siblings.
@@ -21,18 +97,18 @@ User-facing surfaces — web, Telegram, Slack, eventually email. Every channel i
 flowchart TD
     Provider[("web client / Telegram / Slack")]
     Provider -->|"HTTP POST"| Channel
-    Channel["channels/<provider>.py<br/>parse payload → InboundMessage"]
-    Channel --> Auth{authenticated?<br/>auth/ for web,<br/>HMAC for Slack,<br/>secret token for Telegram}
-    Auth -->|"no"| Reject[401 / 403]
+    Channel["channels/&lt;provider&gt;.py<br/>parse payload → InboundMessage"]
+    Channel --> Auth{"authenticated?<br/>auth/ for web,<br/>HMAC for Slack,<br/>secret token for Telegram"}
+    Auth -->|"no"| Reject["401 / 403"]
     Auth -->|"yes"| Dispatch["CommandDispatcher.dispatch"]
-    Dispatch -->|"slash match"| Slash[CommandResult<br/>rendered back to user<br/>never reaches model]
-    Dispatch -->|"None"| RouteChoice{push channel?}
+    Dispatch -->|"slash match"| Slash["CommandResult<br/>rendered back to user<br/>never reaches model"]
+    Dispatch -->|"None"| RouteChoice{"push channel?"}
     RouteChoice -->|"Telegram / Slack"| Enqueue["workers/queue.enqueue_*_dispatch<br/>(or asyncio.create_task in dev)"]
-    RouteChoice -->|"Web SSE"| InlineRouter[Router.handle in-process<br/>(SSE stream tied to HTTP)]
-    Enqueue --> Worker[arq worker]
-    Worker --> Router[agents/ Router.handle]
+    RouteChoice -->|"Web SSE"| InlineRouter["Router.handle in-process<br/>(SSE stream tied to HTTP)"]
+    Enqueue --> Worker["arq worker"]
+    Worker --> Router["agents/ Router.handle"]
     InlineRouter --> Router
-    Router --> Send[channel.send<br/>or SSE delta]
+    Router --> Send["channel.send<br/>or SSE delta"]
     Send --> Provider
 
     click Channel "."
