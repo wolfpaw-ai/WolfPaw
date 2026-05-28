@@ -93,6 +93,32 @@ your-domain.com {
 }
 ```
 
+### Camera-driven tools (HTTPS required)
+
+`scan_barcode` and the live-preview path of `capture_photo` (see
+[`photo-tools.md`](../photo-tools.md)) call
+`navigator.mediaDevices.getUserMedia`, which browsers only expose on
+HTTPS origins (`localhost` excepted). Reach them from another device on
+your network and they will fail silently on plain `http://`. Options:
+
+- **Tailscale MagicDNS** (easiest). Run Tailscale on the host and on the
+  devices you want to scan from; reach the app at
+  `https://<host>.<your-tailnet>.ts.net` with a real cert and no router
+  config. Works inside and outside your home network.
+- **mkcert + your own CA.** Generate a local CA once with
+  [`mkcert`](https://github.com/FiloSottile/mkcert), install it on each
+  household device, mint a cert for `wolfpaw.local` (or whatever
+  hostname Avahi/Bonjour gives the host), terminate TLS at Caddy/nginx
+  with that cert. New guest devices need the CA installed before they
+  can scan.
+- **Self-signed cert with browser warning.** Cheapest, but every device
+  has to click through a security warning the first time.
+
+The text-based `ask_user` and the file-picker path of `capture_photo`
+(plain `<input type="file" capture="environment">`) do not need
+`getUserMedia` and work on plain HTTP — only the live-camera widgets
+require this.
+
 ## Operations
 
 ### Logs
