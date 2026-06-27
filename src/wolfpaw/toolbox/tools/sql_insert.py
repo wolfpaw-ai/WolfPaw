@@ -20,6 +20,7 @@ from wolfpaw.toolbox.registry import (
     register_tool,
 )
 from wolfpaw.toolbox.user_data import (
+    describe_columns,
     ensure_schema,
     explain_column_error,
     quote_ident,
@@ -27,6 +28,17 @@ from wolfpaw.toolbox.user_data import (
 )
 
 _MAX_ROWS_PER_CALL = 500
+
+# information_schema data_type → Postgres cast target. String values bound to
+# these columns (e.g. 'today', '2026-06-27') fail asyncpg's strict temporal
+# binding, so we cast the placeholder and let Postgres parse the string.
+_TEMPORAL_CASTS = {
+    "date": "date",
+    "timestamp without time zone": "timestamp",
+    "timestamp with time zone": "timestamptz",
+    "time without time zone": "time",
+    "time with time zone": "timetz",
+}
 
 
 def _normalize_rows(rows: Any) -> list[dict[str, Any]]:
@@ -88,17 +100,33 @@ class SqlInsertTool(Tool):
         cols = list(rows[0].keys())
 
         col_sql = ", ".join(quote_ident(c) for c in cols)
-        # Single VALUES list with N params per row.
         n = len(cols)
-        value_groups = []
-        params: list[Any] = []
-        for i, r in enumerate(rows):
-            placeholders = ", ".join(f"${i * n + j + 1}" for j in range(n))
-            value_groups.append(f"({placeholders})")
-            params.extend(r[c] for c in cols)
 
         async with acquire() as conn:
             schema = await ensure_schema(conn, ctx.user_id)
+            # Cast string values targeting temporal columns so Postgres parses
+            # them ('today', ISO dates) instead of asyncpg rejecting the str.
+            coltypes = {
+                c["name"]: c["type"]
+                for c in await describe_columns(conn, schema, table)
+            }
+            casts = [_TEMPORAL_CASTS.get(coltypes.get(c, "")) for c in cols]
+
+            # Single VALUES list with N params per row.
+            value_groups = []
+            params: list[Any] = []
+            for i, r in enumerate(rows):
+                placeholders = []
+                for j, c in enumerate(cols):
+                    idx = i * n + j + 1
+                    val = r[c]
+                    if casts[j] and isinstance(val, str):
+                        placeholders.append(f"${idx}::{casts[j]}")
+                    else:
+                        placeholders.append(f"${idx}")
+                    params.append(val)
+                value_groups.append(f"({', '.join(placeholders)})")
+
             sql = (
                 f'INSERT INTO {quote_ident(schema)}.{quote_ident(table)}'
                 f' ({col_sql}) VALUES {", ".join(value_groups)}'

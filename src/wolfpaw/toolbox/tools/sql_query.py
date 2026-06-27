@@ -39,7 +39,8 @@ def _validate_select(sql: str) -> None:
     stripped = _strip_leading_comments(sql).upper()
     if not (stripped.startswith("SELECT") or stripped.startswith("WITH")):
         raise ToolError(
-            "sql_query only accepts SELECT / WITH statements"
+            "sql_query only accepts SELECT / WITH statements — use"
+            " sql_insert / sql_update / sql_delete for writes"
         )
 
 
