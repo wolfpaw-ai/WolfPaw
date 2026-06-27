@@ -49,6 +49,10 @@ class Tool(ABC):
     name: str
     description: str
     input_schema: dict[str, Any]
+    # True if this tool can only run inside a Task (needs a `task_id` to
+    # pause/resume). Plans containing such a tool are forced onto the Task
+    # path — see planner `_requires_task_context`.
+    requires_task_context: bool = False
 
     @abstractmethod
     async def run(self, ctx: ToolContext, **inputs: Any) -> dict[str, Any]:
@@ -78,6 +82,11 @@ class Registry:
             return self._tools[name]
         except KeyError as e:
             raise KeyError(f"unknown tool: {name!r}") from e
+
+    def try_get(self, name: str) -> Tool | None:
+        """Like `get`, but returns None for an unregistered name instead of
+        raising — for callers inspecting possibly-unknown tool references."""
+        return self._tools.get(name)
 
     def all(self) -> list[Tool]:
         return sorted(self._tools.values(), key=lambda t: t.name)

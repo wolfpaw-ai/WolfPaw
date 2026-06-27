@@ -25,7 +25,7 @@ WORKDIR /build
 
 # Project metadata + source. Copy these separately from the heavy deps so
 # small source changes don't bust the dep-install layer cache.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
 RUN pip install --upgrade pip \

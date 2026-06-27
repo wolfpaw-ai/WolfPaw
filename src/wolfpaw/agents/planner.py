@@ -50,7 +50,7 @@ from wolfpaw.metering.recorder import record_usage
 from wolfpaw.metering.types import TokenCounts
 from wolfpaw.persona.builder import build_for_agent
 from wolfpaw.schemas import Plan, ReplanContext, Step, StepResult
-from wolfpaw.toolbox.registry import ToolContext
+from wolfpaw.toolbox.registry import ToolContext, get_registry
 from wolfpaw.tracing import get_logger
 
 log = get_logger()
@@ -174,7 +174,7 @@ Step kinds:
 
 Use `parallel_group: <int>` on steps that may run concurrently (e.g. fetching N URLs at once, or N subagent investigations). Omit `parallel_group` for sequential steps. Keep parallelism conservative — only when steps are genuinely independent.
 
-Set `is_task=true` for plans that should outlive the current chat turn: long-running work, external waits, monitoring/recurring jobs, plans containing a `tool_creator` step (it needs `ask_user`, which needs a task lifecycle). Default `false` for plans the user is waiting on now.
+Set `is_task=true` for plans that should outlive the current chat turn: long-running work, external waits, monitoring/recurring jobs, any plan with an `ask_user` step, or a `tool_creator` step (both need `ask_user`, which needs a task lifecycle). Default `false` for plans the user is waiting on now. (Any plan that uses `ask_user` is forced onto the Task path regardless, but set the flag so the rest of your reasoning is consistent.)
 
 Tread lightly: prefer fewer, broader steps over many tiny ones. Don't over-engineer.
 
@@ -604,6 +604,27 @@ def _format_context_block(
     return "\n\n".join(parts)
 
 
+def _requires_task_context(steps: list[Step]) -> bool:
+    """True if any step can only run inside a Task.
+
+    A `tool_creator` step uses `ask_user` internally; otherwise the precondition
+    is declared by the tool itself via `Tool.requires_task_context` (ask_user,
+    dynamic user-tools, ...) rather than a hardcoded name list — so new tools
+    with the same need are covered automatically. A plan containing any such
+    step MUST route to the Task path, so we force `is_task` here rather than
+    trusting the model to have set it.
+    """
+    registry = get_registry()
+    for step in steps:
+        if step.kind == "tool_creator":
+            return True
+        if step.tool:
+            tool = registry.try_get(step.tool)
+            if tool is not None and getattr(tool, "requires_task_context", False):
+                return True
+    return False
+
+
 def _parse_plan_from_response(raw: Any, *, query: str, model: str) -> Plan:
     for block in getattr(raw, "content", []) or []:
         if _block_type(block) == "tool_use" and _block_name(block) == "generate_plan":
@@ -621,7 +642,8 @@ def _parse_plan_from_response(raw: Any, *, query: str, model: str) -> Plan:
                 query=query,
                 summary=str(payload.get("summary", "")),
                 steps=steps,
-                is_task=bool(payload.get("is_task", False)),
+                is_task=bool(payload.get("is_task", False))
+                or _requires_task_context(steps),
                 model_used=model,
                 adapted_from_past_plan_id=adapted_uuid,
                 applied_skill_name=payload.get("applied_skill_name"),

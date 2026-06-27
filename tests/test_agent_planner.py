@@ -225,6 +225,49 @@ def test_parse_plan_handles_bad_uuid_for_past_plan_id():
     assert plan.adapted_from_past_plan_id is None
 
 
+def test_parse_plan_forces_is_task_when_plan_has_ask_user_step():
+    """A plan with an `ask_user` step MUST route to the Task path — `ask_user`
+    raises without a `task_id`. Even when the model emits is_task=False, the
+    parser coerces it True. Regression for the "ask_user requires a Task
+    context" inline-execution failure."""
+    raw = _plan_tool_response(
+        is_task=False,
+        steps=[
+            {"id": "ask", "kind": "functional", "tool": "ask_user",
+             "description": "gather match details"},
+            {"id": "ins", "kind": "functional", "tool": "sql_insert",
+             "description": "log the match"},
+        ],
+    )
+    plan = _parse_plan_from_response(raw, query="q", model="x")
+    assert plan.is_task is True
+
+
+def test_parse_plan_forces_is_task_for_tool_creator_step():
+    """`tool_creator` uses `ask_user` internally, so it also needs a Task."""
+    raw = _plan_tool_response(
+        is_task=False,
+        steps=[{"id": "tc", "kind": "tool_creator", "description": "make a tool"}],
+    )
+    plan = _parse_plan_from_response(raw, query="q", model="x")
+    assert plan.is_task is True
+
+
+def test_parse_plan_leaves_is_task_false_for_benign_plan():
+    """No ask_user / tool_creator → respect the model's is_task=False."""
+    raw = _plan_tool_response(
+        is_task=False,
+        steps=[
+            {"id": "ins", "kind": "functional", "tool": "sql_insert",
+             "description": "log the match"},
+            {"id": "q", "kind": "functional", "tool": "sql_query",
+             "description": "read it back"},
+        ],
+    )
+    plan = _parse_plan_from_response(raw, query="q", model="x")
+    assert plan.is_task is False
+
+
 # --- integration with fakes ------------------------------------------------
 
 

@@ -66,6 +66,8 @@ class DynamicUserTool(Tool):
     """Adapter that lets the Executor invoke a user-approved tool the
     same way it invokes a builtin."""
 
+    requires_task_context = True
+
     def __init__(self, user_tool: UserTool) -> None:
         self._user_tool = user_tool
         self.name = user_tool.name

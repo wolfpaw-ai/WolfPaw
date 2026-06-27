@@ -16,7 +16,7 @@ from uuid import UUID
 StepKind = Literal[
     "functional", "reasoning", "evaluation", "subagent", "tool_creator",
 ]
-_VALID_STEP_KINDS = {"functional", "reasoning", "evaluation", "subagent"}
+_VALID_STEP_KINDS = {"functional", "reasoning", "evaluation", "subagent", "tool_creator"}
 
 
 class StepStatus(str, Enum):

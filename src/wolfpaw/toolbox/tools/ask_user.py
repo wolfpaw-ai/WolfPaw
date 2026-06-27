@@ -43,6 +43,7 @@ log = get_logger()
 @register_tool
 class AskUserTool(Tool):
     name = "ask_user"
+    requires_task_context = True
     description = (
         "Pause the current task and ask the user a question via their"
         " channel. Returns the user's answer once they reply. Use this"
