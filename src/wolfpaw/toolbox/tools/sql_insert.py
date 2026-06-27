@@ -25,20 +25,10 @@ from wolfpaw.toolbox.user_data import (
     explain_column_error,
     quote_ident,
     validate_identifier,
+    value_placeholder,
 )
 
 _MAX_ROWS_PER_CALL = 500
-
-# information_schema data_type → Postgres cast target. String values bound to
-# these columns (e.g. 'today', '2026-06-27') fail asyncpg's strict temporal
-# binding, so we cast the placeholder and let Postgres parse the string.
-_TEMPORAL_CASTS = {
-    "date": "date",
-    "timestamp without time zone": "timestamp",
-    "timestamp with time zone": "timestamptz",
-    "time without time zone": "time",
-    "time with time zone": "timetz",
-}
 
 
 def _normalize_rows(rows: Any) -> list[dict[str, Any]]:
@@ -104,13 +94,13 @@ class SqlInsertTool(Tool):
 
         async with acquire() as conn:
             schema = await ensure_schema(conn, ctx.user_id)
-            # Cast string values targeting temporal columns so Postgres parses
-            # them ('today', ISO dates) instead of asyncpg rejecting the str.
+            # Column types so string values bound to temporal columns get a
+            # `::text::<type>` cast (Postgres parses 'today' / ISO dates rather
+            # than asyncpg rejecting the str). See user_data.value_placeholder.
             coltypes = {
                 c["name"]: c["type"]
                 for c in await describe_columns(conn, schema, table)
             }
-            casts = [_TEMPORAL_CASTS.get(coltypes.get(c, "")) for c in cols]
 
             # Single VALUES list with N params per row.
             value_groups = []
@@ -120,10 +110,9 @@ class SqlInsertTool(Tool):
                 for j, c in enumerate(cols):
                     idx = i * n + j + 1
                     val = r[c]
-                    if casts[j] and isinstance(val, str):
-                        placeholders.append(f"${idx}::{casts[j]}")
-                    else:
-                        placeholders.append(f"${idx}")
+                    placeholders.append(
+                        value_placeholder(idx, val, coltypes.get(c))
+                    )
                     params.append(val)
                 value_groups.append(f"({', '.join(placeholders)})")
 

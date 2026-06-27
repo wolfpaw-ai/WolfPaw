@@ -9,6 +9,7 @@ the 63-char identifier limit.
 from __future__ import annotations
 
 import re
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -32,6 +33,34 @@ def validate_identifier(name: str) -> str:
 def quote_ident(name: str) -> str:
     """Postgres-style double-quote escaping. Validate the input first."""
     return '"' + name.replace('"', '""') + '"'
+
+
+# information_schema data_type → Postgres cast target. A string value bound
+# to one of these columns (e.g. 'today', '2026-05-27') fails asyncpg's strict
+# temporal binding. Build the placeholder as `$N::text::<type>` so asyncpg
+# sends the value as text and Postgres parses it — a bare `$N::<type>` makes
+# Postgres infer the param as the temporal type, and asyncpg rejects the str.
+_TEMPORAL_CASTS = {
+    "date": "date",
+    "timestamp without time zone": "timestamp",
+    "timestamp with time zone": "timestamptz",
+    "time without time zone": "time",
+    "time with time zone": "timetz",
+}
+
+
+def temporal_cast(pg_data_type: str | None) -> str | None:
+    """Cast target for a temporal column type, or None if not temporal."""
+    return _TEMPORAL_CASTS.get(pg_data_type or "")
+
+
+def value_placeholder(idx: int, value: Any, pg_data_type: str | None) -> str:
+    """`$idx`, or `$idx::text::<type>` when binding a string to a temporal
+    column so Postgres parses it instead of asyncpg rejecting the str."""
+    cast = temporal_cast(pg_data_type)
+    if cast and isinstance(value, str):
+        return f"${idx}::text::{cast}"
+    return f"${idx}"
 
 
 async def ensure_schema(conn: asyncpg.Connection, user_id: UUID) -> str:

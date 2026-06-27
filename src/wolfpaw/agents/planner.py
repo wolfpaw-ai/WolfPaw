@@ -305,6 +305,7 @@ class PlannerAgent:
                 await procedural.search_similar(
                     conn, user_id=ctx.user_id,
                     query_embedding=query_embedding, k=3,
+                    min_score=settings.plan_retrieval_min_score,
                 )
                 if query_embedding is not None else []
             )

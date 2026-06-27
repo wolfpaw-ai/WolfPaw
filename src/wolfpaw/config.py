@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     skill_emit_min_score: int = 90
     skill_dedup_similarity_threshold: float = 0.85
 
+    # Procedural-memory plan retrieval (step 14). The Planner only adapts
+    # past plans that scored at or above this — failed attempts must not be
+    # offered back as templates. (NULL-score in-flight plans still pass.)
+    plan_retrieval_min_score: int = 50
+
     # Tool Creator (step 28). When the Planner emits a `tool_creator`
     # step the Executor invokes the Tool Creator agent, which drafts a
     # spec, asks the user to approve via `ask_user`, persists on

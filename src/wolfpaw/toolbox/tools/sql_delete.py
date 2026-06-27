@@ -20,10 +20,12 @@ from wolfpaw.toolbox.registry import (
 )
 from wolfpaw.toolbox.tools.sql_update import _row_count_from_status
 from wolfpaw.toolbox.user_data import (
+    describe_columns,
     ensure_schema,
     explain_column_error,
     quote_ident,
     validate_identifier,
+    value_placeholder,
 )
 
 
@@ -79,17 +81,25 @@ class SqlDeleteTool(Tool):
         for c in where:
             validate_identifier(c)
 
-        params: list[Any] = []
-        where_sql = ""
-        if where:
-            where_clauses: list[str] = []
-            for c, v in where.items():
-                params.append(v)
-                where_clauses.append(f"{quote_ident(c)} = ${len(params)}")
-            where_sql = " WHERE " + " AND ".join(where_clauses)
-
         async with acquire() as conn:
             schema = await ensure_schema(conn, ctx.user_id)
+            # Column types so a string compared to a temporal column in WHERE
+            # gets a `::text::<type>` cast instead of failing asyncpg binding.
+            coltypes = {
+                col["name"]: col["type"]
+                for col in await describe_columns(conn, schema, table)
+            }
+
+            params: list[Any] = []
+            where_sql = ""
+            if where:
+                where_clauses: list[str] = []
+                for c, v in where.items():
+                    params.append(v)
+                    ph = value_placeholder(len(params), v, coltypes.get(c))
+                    where_clauses.append(f"{quote_ident(c)} = {ph}")
+                where_sql = " WHERE " + " AND ".join(where_clauses)
+
             sql = (
                 f'DELETE FROM {quote_ident(schema)}.{quote_ident(table)}'
                 f'{where_sql}'

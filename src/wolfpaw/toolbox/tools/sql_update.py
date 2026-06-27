@@ -21,10 +21,12 @@ from wolfpaw.toolbox.registry import (
     register_tool,
 )
 from wolfpaw.toolbox.user_data import (
+    describe_columns,
     ensure_schema,
     explain_column_error,
     quote_ident,
     validate_identifier,
+    value_placeholder,
 )
 
 
@@ -94,22 +96,32 @@ class SqlUpdateTool(Tool):
         for c in where:
             validate_identifier(c)
 
-        params: list[Any] = []
-        set_clauses: list[str] = []
-        for c, v in set_map.items():
-            params.append(v)
-            set_clauses.append(f"{quote_ident(c)} = ${len(params)}")
-
-        where_sql = ""
-        if where:
-            where_clauses: list[str] = []
-            for c, v in where.items():
-                params.append(v)
-                where_clauses.append(f"{quote_ident(c)} = ${len(params)}")
-            where_sql = " WHERE " + " AND ".join(where_clauses)
-
         async with acquire() as conn:
             schema = await ensure_schema(conn, ctx.user_id)
+            # Column types so string values bound to temporal columns (in SET
+            # or WHERE) get a `::text::<type>` cast — Postgres parses the
+            # string instead of asyncpg rejecting it.
+            coltypes = {
+                col["name"]: col["type"]
+                for col in await describe_columns(conn, schema, table)
+            }
+
+            params: list[Any] = []
+            set_clauses: list[str] = []
+            for c, v in set_map.items():
+                params.append(v)
+                ph = value_placeholder(len(params), v, coltypes.get(c))
+                set_clauses.append(f"{quote_ident(c)} = {ph}")
+
+            where_sql = ""
+            if where:
+                where_clauses: list[str] = []
+                for c, v in where.items():
+                    params.append(v)
+                    ph = value_placeholder(len(params), v, coltypes.get(c))
+                    where_clauses.append(f"{quote_ident(c)} = {ph}")
+                where_sql = " WHERE " + " AND ".join(where_clauses)
+
             sql = (
                 f'UPDATE {quote_ident(schema)}.{quote_ident(table)}'
                 f' SET {", ".join(set_clauses)}{where_sql}'
