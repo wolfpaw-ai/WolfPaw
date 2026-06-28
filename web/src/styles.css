@@ -88,7 +88,8 @@ label > * { margin-top: 0.2rem; }
   border-radius: 6px; padding: 0.8rem 1rem;
 }
 .turn-user { background: #eef4fc; }
-.turn-role { font-size: 0.85em; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+.turn-role { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.85em; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+.turn-time { text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .turn-text { font-size: 14px; }
 .turn-events { font-size: 0.85em; color: var(--fg-muted); margin: 0.3rem 0 0.5rem 0; }
 .turn-events code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 3px; }

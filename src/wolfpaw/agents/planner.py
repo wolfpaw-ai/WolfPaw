@@ -178,6 +178,8 @@ Set `is_task=true` for plans that should outlive the current chat turn: long-run
 
 Tread lightly: prefer fewer, broader steps over many tiny ones. Don't over-engineer.
 
+Scheduling ("remind me…", "in N minutes…", "every morning…", "at 8pm…"): emit a SINGLE `schedule_task` step — never a compute-the-timestamp step feeding a second step. Do NOT compute timestamps yourself and never put relative text in `run_at`. For "in N minutes/hours" use `recurrence: "once"` with `delay_seconds` (e.g. "in 2 minutes" → `delay_seconds: 120`). For a specific clock time use `recurrence: "cron"` with the matching expression (e.g. "8pm" → `cron_expr: "0 20 * * *"`, `max_runs: 1`). For recurring use `interval_seconds` or `cron_expr`. Split the request: cadence → recurrence args; a self-contained single-run imperative → `instruction` (cadence removed, any condition + "otherwise stay silent" made explicit).
+
 You MUST call the `generate_plan` tool exactly once. Do not respond with prose."""
 
 

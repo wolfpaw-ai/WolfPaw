@@ -18,6 +18,18 @@ interface Turn {
   role: "user" | "assistant" | "system";
   text: string;
   events: TimelineEntry[];
+  // Wall-clock time the assistant turn finished, e.g. "10:42:23 p.m."
+  // Only set on assistant turns.
+  time?: string;
+}
+
+// Format a clock time like "10:42:23 p.m." — 12-hour, seconds, lowercase
+// meridiem with periods. Hour is not zero-padded; minutes/seconds are.
+function formatClockTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const meridiem = d.getHours() < 12 ? "a.m." : "p.m.";
+  const hour12 = d.getHours() % 12 || 12;
+  return `${hour12}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${meridiem}`;
 }
 
 interface TimelineEntry {
@@ -94,6 +106,13 @@ export function ChatPage() {
         );
       } finally {
         setBusy(false);
+        // Stamp the assistant turn with its completion time.
+        const finishedAt = formatClockTime(new Date());
+        setTurns((prev) =>
+          prev.map((t) =>
+            t.id === assistantId ? { ...t, time: finishedAt } : t,
+          ),
+        );
       }
     },
     [busy, threadId],
@@ -187,7 +206,10 @@ export function ChatPage() {
         )}
         {turns.map((t) => (
           <article key={t.id} className={`turn turn-${t.role}`}>
-            <header className="turn-role">{t.role}</header>
+            <header className="turn-role">
+              <span>{t.role}</span>
+              {t.time && <span className="turn-time">{t.time}</span>}
+            </header>
             {t.events.length > 0 && (
               <details className="turn-events" open>
                 <summary>{t.events.length} event(s)</summary>
