@@ -150,6 +150,17 @@ def test_schedule_tools_registered():
     } <= names
 
 
+def test_schedule_task_accepts_delay_seconds():
+    from wolfpaw.toolbox.registry import get_registry
+
+    schema = get_registry().get("schedule_task").input_schema
+    props = schema["properties"]
+    assert "delay_seconds" in props
+    # 'once' must no longer hard-require run_at (delay_seconds is the
+    # preferred relative path); only instruction + recurrence are required.
+    assert set(schema["required"]) == {"instruction", "recurrence"}
+
+
 def test_quick_agent_exposes_user_schedule_tools():
     from wolfpaw.agents.quick import QuickAgent
 

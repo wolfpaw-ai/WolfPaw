@@ -20,7 +20,7 @@ Recurrence:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -72,13 +72,15 @@ class ScheduleTaskTool(Tool):
     name = "schedule_task"
     description = (
         "Schedule an instruction to run later — once, on an interval, or on a"
-        " cron schedule. Use for reminders and recurring checks ('remind me at"
-        " 8pm', 'every 10 minutes check the weather'). Split the user's"
-        " request: put the cadence in the recurrence args and a self-contained"
-        " single-run imperative in `instruction` (cadence removed, any"
-        " 'message me if…' condition and 'otherwise stay silent' made"
-        " explicit). Returns immediately; the run happens at the scheduled"
-        " time."
+        " cron schedule. Do NOT compute timestamps yourself. For one-time 'in"
+        " N minutes/hours' use recurrence='once' with `delay_seconds` (e.g."
+        " 'in 2 minutes' -> delay_seconds=120); never put relative text in"
+        " `run_at`. For a specific clock time ('at 8pm') use recurrence='cron'"
+        " with the matching expression (e.g. '0 20 * * *') and max_runs=1. For"
+        " recurring use interval_seconds or cron. Split the request: cadence ->"
+        " recurrence args; a self-contained single-run imperative ->"
+        " `instruction` (cadence removed, any 'message me if…' condition and"
+        " 'otherwise stay silent' made explicit). Returns immediately."
     )
     input_schema = {
         "type": "object",
@@ -93,9 +95,20 @@ class ScheduleTaskTool(Tool):
                 "type": "string",
                 "enum": ["once", "interval", "cron"],
             },
+            "delay_seconds": {
+                "type": "integer",
+                "description": (
+                    "Run once this many seconds from now (use for 'in N"
+                    " minutes/hours'). Preferred over run_at for relative times."
+                ),
+            },
             "run_at": {
                 "type": "string",
-                "description": "ISO-8601 time for recurrence='once'.",
+                "description": (
+                    "Absolute ISO-8601 time for recurrence='once'. Only use if"
+                    " you have a real timestamp; for relative times use"
+                    " delay_seconds instead."
+                ),
             },
             "interval_seconds": {
                 "type": "integer",
@@ -153,12 +166,21 @@ class ScheduleTaskTool(Tool):
         interval_seconds: int | None = None
 
         if recurrence == "once":
+            delay_seconds = inputs.get("delay_seconds")
             run_at = inputs.get("run_at")
-            if not run_at:
-                raise ToolError("recurrence='once' requires `run_at`")
-            next_run_at = _parse_dt(str(run_at), tz_name)
-            if next_run_at <= now:
-                raise ToolError("`run_at` must be in the future")
+            if delay_seconds is not None:
+                if not isinstance(delay_seconds, (int, float)) or delay_seconds <= 0:
+                    raise ToolError("`delay_seconds` must be a positive number")
+                next_run_at = now + timedelta(seconds=int(delay_seconds))
+            elif run_at:
+                next_run_at = _parse_dt(str(run_at), tz_name)
+                if next_run_at <= now:
+                    raise ToolError("`run_at` must be in the future")
+            else:
+                raise ToolError(
+                    "recurrence='once' requires `delay_seconds` (for 'in N"
+                    " minutes') or `run_at` (an absolute ISO-8601 time)"
+                )
 
         elif recurrence == "interval":
             interval_seconds = inputs.get("interval_seconds")
