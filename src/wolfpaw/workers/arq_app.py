@@ -22,6 +22,9 @@ Job registration:
   (manual enqueue for ad-hoc runs) AND a cron job firing Sunday 03:00
   UTC. The job itself no-ops unless ``WOLFPAW_SLEEP_CYCLE_ENABLED=true``,
   so the cron schedule is safe to keep registered on every deployment.
+- ``dispatch_schedules_job`` — per-minute schedule dispatcher: claims due
+  ``schedules`` rows and spawns a Task per schedule. No-ops unless
+  ``WOLFPAW_SCHEDULES_ENABLED=true``; safe to keep registered everywhere.
 
 Adding a new job: define it in ``workers/jobs/`` (taking ``_ctx, ...``
 as the arq signature), import it here, and append to
@@ -46,6 +49,7 @@ from wolfpaw.workers.jobs.compact_thread import (
     embed_message_job,
     embed_workspace_file_job,
 )
+from wolfpaw.workers.jobs.dispatch_schedules import dispatch_schedules_job
 from wolfpaw.workers.jobs.run_task import run_task_job
 from wolfpaw.workers.jobs.sleep_cycle import sleep_cycle_job
 
@@ -77,6 +81,7 @@ class WorkerSettings:
         telegram_dispatch_job,
         slack_dispatch_job,
         sleep_cycle_job,
+        dispatch_schedules_job,
     ]
     cron_jobs = [
         # Weekly Sleep Cycle — Sunday 03:00 UTC. The job itself gates on
@@ -89,6 +94,16 @@ class WorkerSettings:
             weekday="sun",
             hour=3,
             minute=0,
+        ),
+        # Schedule dispatcher — every minute, at second 0. Claims due
+        # `schedules` rows and spawns Tasks. No-ops unless
+        # WOLFPAW_SCHEDULES_ENABLED=true, so safe to keep registered
+        # everywhere; per-minute is the granularity floor for scheduled
+        # tasks (see schedules_min_interval_seconds).
+        cron(
+            dispatch_schedules_job,
+            name="dispatch_schedules",
+            second=0,
         ),
     ]
     on_startup = _on_startup

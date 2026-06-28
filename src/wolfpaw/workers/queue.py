@@ -196,6 +196,21 @@ async def enqueue_sleep_cycle() -> None:
     await pool.enqueue_job("sleep_cycle_job")
 
 
+async def enqueue_dispatch_schedules() -> None:
+    """Manually trigger one schedule-dispatch pass. The per-minute cron in
+    ``arq_app.py`` is what normally fires this; this helper is for ad-hoc
+    runs (e.g. tests, or kicking the dispatcher after enabling it without
+    waiting for the next minute boundary)."""
+    from wolfpaw.workers.jobs.dispatch_schedules import dispatch_schedules
+
+    settings = get_settings()
+    if not settings.workers_enabled:
+        _spawn_inline(dispatch_schedules())
+        return
+    pool = await get_pool()
+    await pool.enqueue_job("dispatch_schedules_job")
+
+
 async def enqueue_slack_dispatch(
     *,
     user_id: UUID,

@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     # the user never returning, or a channel-link mishap.
     sleep_cycle_orphan_thread_age_days: int = 30
 
+    # Schedules. A per-minute dispatcher (workers/jobs/dispatch_schedules.py)
+    # turns due `schedules` rows into Tasks. The cron is always registered on
+    # the worker; flipping this flag enables the dispatch without redeploying
+    # (mirrors sleep_cycle). Off by default because scheduled tasks re-run the
+    # agent pipeline — that's recurring token spend the operator should opt in
+    # to. Min interval is the dispatch granularity floor (the cron fires once
+    # a minute, so anything finer can't be honored).
+    schedules_enabled: bool = False
+    schedules_dispatch_batch: int = 50
+    schedules_min_interval_seconds: int = 60
+
     # Auth
     secret_key: str = "dev-only-secret-CHANGE-ME-in-non-dev-envs"
     magic_link_ttl_minutes: int = 15

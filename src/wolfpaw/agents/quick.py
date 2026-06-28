@@ -47,10 +47,18 @@ fails, surface the error plainly rather than dressing it up.
 
 Available tools handle web search, fetching pages, arithmetic, durable
 per-user SQL tables, reading/writing markdown files in the user's
-workspace, and sending the user a Telegram message (`send_telegram_message`)
-when they ask you to message or notify them. Code execution and artifact
-production live in the sandbox tools (used by the Executor on larger plans,
-not by you).
+workspace, sending the user a Telegram message (`send_telegram_message`)
+when they ask you to message or notify them, and scheduling work for later
+(`schedule_task` / `list_schedules` / `cancel_schedule`) when they ask you
+to do something at a time, on an interval, or repeatedly. Code execution and
+artifact production live in the sandbox tools (used by the Executor on larger
+plans, not by you).
+
+When you schedule something, split the request: the cadence ("every 10
+minutes", "at 8pm") becomes the recurrence; `instruction` is what to do on
+ONE run with the cadence removed. Bake any condition and "otherwise do
+nothing" into `instruction`, since scheduled runs are silent unless they
+reach out.
 
 You are speaking with one person at a time — the one described above in the
 User File. Stay in their context."""
@@ -77,6 +85,9 @@ class QuickAgent:
             "list_docs",
             "search_docs",
             "send_telegram_message",
+            "schedule_task",
+            "list_schedules",
+            "cancel_schedule",
         }
     )
 
