@@ -135,6 +135,45 @@ curl -N -X POST localhost:8000/channels/web/chat \
 
 ---
 
+## Scheduled Tasks
+
+Wolfpaw can run work later — once ("remind me in 20 minutes"), on an interval, or on a cron schedule ("every morning at 8"). When you ask, the agent calls the `schedule_task` tool, which splits your request into a *cadence* (the recurrence) and a self-contained *instruction* (what to do on one run, with any "otherwise stay silent" condition baked in), and writes a single row to the `schedules` table. That row is a template: it stores the what (instruction + resolved context + cross-run state) and the when (`next_run_at` plus the recurrence kind), scoped to your user so nothing else can read or cancel it. You can see everything pending in the **Scheduled** tab and cancel from chat.
+
+Dispatch is a per-minute arq cron on the worker (`dispatch_schedules`). Each firing claims every `schedules` row that's due (`status='active' AND next_run_at <= now`) using `FOR UPDATE SKIP LOCKED`, and **in the same transaction** advances each claimed row to its next slot — recomputing `next_run_at`, or marking it `done` for a one-shot or an exhausted recurrence. Advancing before spawning gives at-most-once semantics and makes the dispatcher safe to run concurrently and across overlapping minutes. For every claimed schedule the dispatcher renders the instruction into a headless prompt ("you're a scheduled job — don't ask questions, reach out via `send_telegram_message` if the instruction says to"), creates a `pending` task linked back to the schedule, and enqueues a `run_task` job. The whole cron is gated behind `WOLFPAW_SCHEDULES_ENABLED=true` (and requires `WOLFPAW_WORKERS_ENABLED=true`), so it's safe to keep registered everywhere and opt into the recurring token spend per deployment.
+
+The worker picks up the `run_task` job, recovers the instruction from the task's `status.pending` event, and runs it through the **Quick agent's tool loop** — the same engine that handles a one-shot message you type in chat — rather than the static planner→executor pipeline. This matters: the loop calls tools iteratively with their real outputs in context, so a "fetch the weather, then send it to me" instruction actually fetches *and* sends, whereas the static pipeline can't thread a freshly-composed value into a later tool call. On success the task settles to `completed` (with the loop's final answer stamped on the event for visibility in the Scheduled/Tasks views); on error it settles to `failed`. Delivery to you happens inside the loop via `send_telegram_message`, not via the task completion itself — consistent with the "scheduled runs are silent unless they reach out" contract.
+
+```mermaid
+sequenceDiagram
+    participant Cron as arq cron
+    participant Disp as dispatch_schedules
+    participant DB as Postgres
+    participant Q as arq queue
+    participant W as Worker
+    participant Agent as Quick agent loop
+    participant U as You on Telegram
+
+    Cron->>Disp: fire every minute if enabled
+    Disp->>DB: claim due rows and advance next_run_at in one txn
+    DB-->>Disp: due schedule snapshots
+    loop for each due schedule
+        Disp->>DB: create pending agentic task linked to schedule
+        Disp->>Q: enqueue run_task
+    end
+    Q->>W: deliver run_task
+    W->>DB: load task and recover instruction
+    W->>DB: mark running
+    W->>Agent: run_headless with instruction
+    loop tool-use iterations
+        Agent->>Agent: call tools with live outputs in context
+        Agent->>U: send_telegram_message with report
+    end
+    Agent-->>W: final answer
+    W->>DB: mark completed and store final answer
+```
+
+---
+
 ## Architecture — top level
 
 The reference architecture diagram is [`WolfPaw_01.pdf`](WolfPaw_01.pdf). Below is the **top-level query flow**: what happens at the boundary of each subsystem. As soon as control crosses into a folder under `src/wolfpaw/`, follow the link to that folder's README for the internal flowchart.

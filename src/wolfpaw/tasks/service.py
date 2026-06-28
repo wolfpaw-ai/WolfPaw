@@ -44,6 +44,7 @@ from wolfpaw.agents.post_evaluator import (
     PostEvaluatorAgent,
     get_post_evaluator_agent,
 )
+from wolfpaw.agents.quick import QuickAgent, get_quick_agent
 from wolfpaw.agents.skill_distiller import maybe_distill_skill
 from wolfpaw.memory import procedural, task_events, tasks as tasks_dao
 from wolfpaw.memory.db import acquire
@@ -74,12 +75,14 @@ class TaskService:
         executor: ExecutorAgent | None = None,
         pre_evaluator: PlanPreEvaluatorAgent | None = None,
         post_evaluator: PostEvaluatorAgent | None = None,
+        quick: QuickAgent | None = None,
         registry: AskUserRegistry | None = None,
     ) -> None:
         self._planner = planner
         self._executor = executor
         self._pre_evaluator = pre_evaluator
         self._post_evaluator = post_evaluator
+        self._quick = quick
         self._registry = registry
 
     @property
@@ -99,6 +102,10 @@ class TaskService:
         return self._post_evaluator or get_post_evaluator_agent()
 
     @property
+    def quick(self) -> QuickAgent:
+        return self._quick or get_quick_agent()
+
+    @property
     def registry(self) -> AskUserRegistry:
         return self._registry or get_registry()
 
@@ -116,11 +123,16 @@ class TaskService:
         complexity_hint: str = "moderate",
         parent_task_id: UUID | None = None,
         budget_cents: int | None = None,
+        agentic: bool = False,
     ) -> tasks_dao.Task:
         """Insert the task row in `pending`, stamp a ``status.pending``
         event with the inputs the worker will need (content, thread_id,
         complexity_hint live in the event's `content` JSONB so the run
         side can recover them without a separate side-table).
+
+        ``agentic`` set → the run executes as a tool loop (Quick agent's
+        engine) instead of the planner→executor pipeline. Scheduled tasks
+        use this so "compose X then send it" works the way it does in chat.
 
         Returns the new Task; does NOT start the pipeline. Pair with
         :meth:`run` (inline or via the workers queue)."""
@@ -143,6 +155,7 @@ class TaskService:
                     "content": content,
                     "thread_id": str(thread_id) if thread_id else None,
                     "complexity_hint": complexity_hint,
+                    **({"agentic": True} if agentic else {}),
                     **({"parent_task_id": str(parent_task_id)}
                        if parent_task_id else {}),
                 },
@@ -200,6 +213,7 @@ class TaskService:
         thread_id_raw = ev.get("thread_id")
         thread_id = UUID(thread_id_raw) if thread_id_raw else None
         complexity_hint = ev.get("complexity_hint") or "moderate"
+        agentic = bool(ev.get("agentic"))
 
         return await self._run_inner(
             user_id=user_id,
@@ -208,6 +222,7 @@ class TaskService:
             content=content,
             complexity_hint=complexity_hint,
             emit=emit,
+            agentic=agentic,
         )
 
     async def create_and_run(
@@ -274,6 +289,7 @@ class TaskService:
         complexity_hint: str,
         emit: EmitFn | None,
         precomputed_plan: Plan | None = None,
+        agentic: bool = False,
     ) -> TaskOutcome:
         ctx = ToolContext(user_id=user_id, task_id=task_id)
 
@@ -282,6 +298,15 @@ class TaskService:
             task_id, "status.running",
             lambda c: tasks_dao.mark_started(c, task_id=task_id),
         )
+
+        # Agentic runs (scheduled tasks) use the Quick agent's tool loop
+        # instead of the static planner→executor pipeline — no plan, no
+        # procedural-memory scoring.
+        if agentic:
+            return await self._run_agentic(
+                ctx=ctx, user_id=user_id, task_id=task_id,
+                content=content, emit=emit,
+            )
 
         # Plan + Pre-Evaluate. Skipped when the Router pre-planned
         # and handed us the Plan (precomputed_plan).
@@ -388,6 +413,55 @@ class TaskService:
             task=await self._reload_required(task_id, user_id),
             plan=plan, execution=execution, verdict=verdict,
             final_answer=execution.final_answer,
+        )
+
+    async def _run_agentic(
+        self,
+        *,
+        ctx: ToolContext,
+        user_id: UUID,
+        task_id: UUID,
+        content: str,
+        emit: EmitFn | None,
+    ) -> TaskOutcome:
+        """Execute a task as a tool loop (the Quick agent's engine) rather
+        than the static planner→executor pipeline. The model calls tools
+        iteratively with their real outputs in context, so "compose X then
+        send it" works — the exact behavior you get typing in chat. No
+        plan, so no post-eval / procedural scoring; delivery happens via
+        the tools the loop calls (e.g. send_telegram_message)."""
+        try:
+            final_answer = await self.quick.run_headless(
+                ctx=ctx, content=content, emit=emit,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("tasks.service.agentic_crashed", task_id=str(task_id))
+            await self._fail(task_id, f"agentic run crashed: {e}")
+            return TaskOutcome(
+                task=await self._reload_required(task_id, user_id),
+                plan=None, execution=None, verdict=None,
+                final_answer=f"The scheduled run failed: {e}",
+            )
+
+        # Stamp the final answer onto the completion event — an agentic run
+        # has no plan row to inspect, so this is the tasks-tab's only window
+        # into what the loop produced. Truncated to keep the event small.
+        await self._transition(
+            task_id, "status.completed",
+            lambda c: tasks_dao.mark_completed(c, task_id=task_id),
+            extra_content={"final_answer": final_answer[:2000]},
+        )
+        try:
+            async with acquire() as conn:
+                await tasks_dao.rollup_spent_cents(conn, task_id=task_id)
+        except Exception:  # noqa: BLE001
+            log.warning("tasks.service.rollup_failed", task_id=str(task_id),
+                        exc_info=True)
+
+        return TaskOutcome(
+            task=await self._reload_required(task_id, user_id),
+            plan=None, execution=None, verdict=None,
+            final_answer=final_answer,
         )
 
     # --- transitions ------------------------------------------------------
