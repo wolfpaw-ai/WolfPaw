@@ -11,6 +11,7 @@ export function Nav() {
       <ul className="nav-links">
         <li><NavLink to="/chat">Chat</NavLink></li>
         <li><NavLink to="/tasks">Tasks</NavLink></li>
+        <li><NavLink to="/schedules">Scheduled</NavLink></li>
         <li><NavLink to="/files">Files</NavLink></li>
         <li><NavLink to="/usage">Usage</NavLink></li>
         <li><NavLink to="/profile">Profile</NavLink></li>
