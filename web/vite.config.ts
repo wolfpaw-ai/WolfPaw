@@ -16,6 +16,7 @@ export default defineConfig({
       "/channels": proxyTarget,
       "/workspace": proxyTarget,
       "/tasks": proxyTarget,
+      "/schedules": proxyTarget,
       "/usage": proxyTarget,
       "/me": proxyTarget,
       "/health": proxyTarget,
