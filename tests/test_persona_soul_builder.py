@@ -82,6 +82,22 @@ def test_build_system_prompt_includes_all_three_blocks():
     assert s.index("I am Alice") < s.index("You are the Quick Agent.")
 
 
+def test_build_system_prompt_includes_chat_history_guidance():
+    """Every agent's prompt carries the standing 'what the thread is for'
+    guidance, placed after the user block and before the role — so the
+    model treats history as referential context, not a how-to corpus."""
+    profile = _profile(persona_md="I am Alice.")
+    s = build_system_prompt(
+        soul=None, user_profile=profile,
+        agent_role="You are the Quick Agent.",
+    )
+    assert "Conversation history — what it's for" in s
+    assert "not authoritative" in s
+    # Sits between the user block and the role.
+    assert s.index("I am Alice") < s.index("Conversation history")
+    assert s.index("Conversation history") < s.index("You are the Quick Agent.")
+
+
 def test_build_system_prompt_handles_missing_soul():
     profile = _profile(persona_md="hi")
     s = build_system_prompt(

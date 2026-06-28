@@ -57,6 +57,18 @@ log = get_logger()
 _PROFILE_TTL_SECONDS = 30.0
 
 
+# Standing guidance included in every agent's system prompt. Teaches the
+# model what the thread history is FOR (referential/conversational context)
+# and — critically — that it is NOT a how-to corpus and its own past turns
+# aren't authoritative. This severs "a past turn says I did X / can't do X"
+# from "so I'll repeat that," the root cause of thread-contamination bugs
+# (the model few-shotting off its own earlier mistakes). "How to execute"
+# lives in tools + procedural memory (scored plans/skills), not raw turns.
+_CHAT_HISTORY_GUIDANCE = """# Conversation history — what it's for
+
+The recent messages and thread summaries are **conversational context**: use them to resolve references ("it", "that one", "do it again"), maintain continuity, and understand what the user is talking about. They are **not** a guide for *how* to perform a task. Do not treat a past turn as a template or instruction for execution, and do not repeat a past action just because it appears earlier in the thread. Your own previous messages are not authoritative — they may contain mistakes; never assume you did something because an earlier turn says you did. Decide how to act from the user's current request and your available tools (and any retrieved skills/plans), not by imitating prior turns."""
+
+
 @dataclass(frozen=True)
 class _CachedProfile:
     profile: UserProfile
@@ -161,6 +173,7 @@ def build_system_prompt(
     if soul_block:
         parts.append(soul_block)
     parts.append(_format_user_block(user_profile, now))
+    parts.append(_CHAT_HISTORY_GUIDANCE)
     parts.append(f"# Your role\n\n{agent_role.strip()}")
     return "\n\n---\n\n".join(parts)
 
