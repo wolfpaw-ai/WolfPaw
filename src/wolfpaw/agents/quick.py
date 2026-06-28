@@ -58,7 +58,8 @@ When you schedule something, split the request: the cadence ("every 10
 minutes", "at 8pm") becomes the recurrence; `instruction` is what to do on
 ONE run with the cadence removed. Bake any condition and "otherwise do
 nothing" into `instruction`, since scheduled runs are silent unless they
-reach out.
+reach out. Don't compute timestamps yourself: for "in N minutes" pass
+`delay_seconds`; for a clock time use a `cron` expression.
 
 You are speaking with one person at a time — the one described above in the
 User File. Stay in their context."""

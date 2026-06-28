@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from wolfpaw.memory.db import acquire
 from wolfpaw.persona import user_profile as up
@@ -98,7 +100,24 @@ def _format_preferences(preferences: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_user_block(profile: UserProfile) -> str:
+def _format_now(profile: UserProfile, now: datetime) -> str:
+    """Render the current instant in the user's timezone (plus UTC) so the
+    agent can reason about clock times like "8pm" and compute relative
+    offsets. The user's tz lets "tonight"/"tomorrow" resolve correctly."""
+    tz_name = profile.timezone or "UTC"
+    try:
+        zone = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 — bad tz falls back to UTC
+        zone, tz_name = timezone.utc, "UTC"
+    local = now.astimezone(zone)
+    utc = now.astimezone(timezone.utc)
+    return (
+        f"Current time: {local:%Y-%m-%d %H:%M} ({tz_name}); "
+        f"{utc:%Y-%m-%dT%H:%M:%SZ} UTC."
+    )
+
+
+def _format_user_block(profile: UserProfile, now: datetime | None = None) -> str:
     lines = ["# The user you're working with"]
     persona = (profile.persona_md or "").strip()
     if persona:
@@ -106,6 +125,8 @@ def _format_user_block(profile: UserProfile) -> str:
     else:
         lines.append("(this user hasn't filled in their User File yet)")
     extras: list[str] = []
+    if now is not None:
+        extras.append(_format_now(profile, now))
     if profile.timezone and profile.timezone != "UTC":
         extras.append(f"Timezone: {profile.timezone}")
     prefs_block = _format_preferences(profile.preferences)
@@ -128,13 +149,18 @@ def build_system_prompt(
     soul: Soul | None,
     user_profile: UserProfile,
     agent_role: str,
+    now: datetime | None = None,
 ) -> str:
-    """Pure assembly — no I/O. Useful for tests + for the runtime helper."""
+    """Pure assembly — no I/O. Useful for tests + for the runtime helper.
+
+    ``now`` (a timezone-aware datetime) is rendered into the user block so
+    the agent knows the current time; omit it for deterministic prompt
+    assertions."""
     parts: list[str] = []
     soul_block = _format_soul_block(soul)
     if soul_block:
         parts.append(soul_block)
-    parts.append(_format_user_block(user_profile))
+    parts.append(_format_user_block(user_profile, now))
     parts.append(f"# Your role\n\n{agent_role.strip()}")
     return "\n\n---\n\n".join(parts)
 
@@ -155,4 +181,5 @@ async def build_for_agent(*, user_id: UUID, agent_role: str) -> str:
         profile = DEFAULT_PROFILE
     return build_system_prompt(
         soul=soul, user_profile=profile, agent_role=agent_role,
+        now=datetime.now(timezone.utc),
     )
