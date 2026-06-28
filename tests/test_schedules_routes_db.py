@@ -74,25 +74,26 @@ def test_list_schedules_requires_auth():
     assert client.get("/schedules").status_code == 401
 
 
-async def test_list_schedules_returns_active_soonest_first():
+async def test_list_schedules_newest_first_with_cadence():
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     uid = await _seed_user(dsn)
     conn = await _conn()
     try:
         await schedules_dao.create(
-            conn, user_id=uid, instruction="later", recurrence="once",
-            next_run_at=_soon(60), title="later",
+            conn, user_id=uid, instruction="older", recurrence="once",
+            next_run_at=_soon(60), title="older",
         )
         await schedules_dao.create(
-            conn, user_id=uid, instruction="soon", recurrence="cron",
-            next_run_at=_soon(5), cron_expr="0 8 * * *", title="soon",
+            conn, user_id=uid, instruction="newer", recurrence="cron",
+            next_run_at=_soon(5), cron_expr="0 8 * * *", title="newer",
         )
     finally:
         await conn.close()
     r = _client(uid).get("/schedules")
     assert r.status_code == 200
     rows = r.json()["schedules"]
-    assert [s["title"] for s in rows] == ["soon", "later"]
+    # Newest-created first, mirroring the Tasks tab.
+    assert [s["title"] for s in rows] == ["newer", "older"]
     assert rows[0]["cadence"] == "cron: 0 8 * * * (UTC)"
 
 
@@ -111,24 +112,29 @@ async def test_list_schedules_humanizes_interval():
     assert rows[0]["cadence"] == "every 1h"
 
 
-async def test_list_schedules_excludes_terminal():
+async def test_list_schedules_includes_terminal_with_status():
+    """Terminal rows (cancelled/done) stay visible with their real status,
+    like the Tasks tab — not filtered out."""
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     uid = await _seed_user(dsn)
     conn = await _conn()
     try:
         s = await schedules_dao.create(
-            conn, user_id=uid, instruction="cancel-me", recurrence="once",
-            next_run_at=_soon(5), title="cancel-me",
+            conn, user_id=uid, instruction="cancelled-one", recurrence="once",
+            next_run_at=_soon(5), title="cancelled-one",
         )
         await schedules_dao.cancel(conn, user_id=uid, schedule_id=s.id)
         await schedules_dao.create(
-            conn, user_id=uid, instruction="keep", recurrence="once",
-            next_run_at=_soon(5), title="keep",
+            conn, user_id=uid, instruction="active-one", recurrence="once",
+            next_run_at=_soon(5), title="active-one",
         )
     finally:
         await conn.close()
     rows = _client(uid).get("/schedules").json()["schedules"]
-    assert [s["title"] for s in rows] == ["keep"]
+    # Both present, newest first, each with its real status.
+    by_title = {s["title"]: s["status"] for s in rows}
+    assert by_title == {"active-one": "active", "cancelled-one": "cancelled"}
+    assert [s["title"] for s in rows] == ["active-one", "cancelled-one"]
 
 
 async def test_list_schedules_doesnt_leak_other_users():

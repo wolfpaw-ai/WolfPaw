@@ -85,12 +85,13 @@ async def list_schedules(
     user_id: UUID = Depends(require_user_id),
     limit: int = 100,
 ) -> dict[str, list[ScheduleResponse]]:
-    """List the user's active + paused schedules, soonest first. Terminal
-    (done/cancelled) rows are excluded — the Scheduled tab shows what's
-    still pending."""
+    """List ALL the user's schedules, newest first — active, paused, done,
+    and cancelled — each with its real status, mirroring the Tasks tab. The
+    `status` field lets the client style terminal rows; fired one-shots
+    (done) stay visible as history rather than vanishing."""
     limit = max(1, min(200, limit))
     async with acquire() as conn:
         rows = await schedules_dao.list_for_user(
-            conn, user_id=user_id, limit=limit,
+            conn, user_id=user_id, limit=limit, include_terminal=True,
         )
     return {"schedules": [ScheduleResponse.from_dao(s) for s in rows]}
