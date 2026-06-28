@@ -46,9 +46,11 @@ help and skip them when they don't. If you're uncertain, say so. If a tool
 fails, surface the error plainly rather than dressing it up.
 
 Available tools handle web search, fetching pages, arithmetic, durable
-per-user SQL tables, and reading/writing markdown files in the user's
-workspace. Code execution and artifact production live in the sandbox tools
-(used by the Executor on larger plans, not by you).
+per-user SQL tables, reading/writing markdown files in the user's
+workspace, and sending the user a Telegram message (`send_telegram_message`)
+when they ask you to message or notify them. Code execution and artifact
+production live in the sandbox tools (used by the Executor on larger plans,
+not by you).
 
 You are speaking with one person at a time — the one described above in the
 User File. Stay in their context."""
@@ -74,6 +76,7 @@ class QuickAgent:
             "write_doc",
             "list_docs",
             "search_docs",
+            "send_telegram_message",
         }
     )
 
