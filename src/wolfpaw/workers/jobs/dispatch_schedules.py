@@ -123,6 +123,12 @@ async def _spawn_run(schedule: schedules_dao.Schedule) -> None:
         title=schedule.title or "Scheduled task",
         channel_for_completion=schedule.channel,
         complexity_hint="moderate",
+        # Run scheduled work through the Quick agent's tool loop, not the
+        # static planner→executor pipeline — the loop calls tools with
+        # real outputs in context, so "compose X then send it" actually
+        # sends (the pipeline can't thread a composed value into a tool
+        # call). See TaskService._run_agentic.
+        agentic=True,
     )
     # Trace the run back to its schedule. Best-effort — the run is already
     # created; a missing back-link only costs observability.

@@ -140,6 +140,20 @@ class FakePostEvaluator:
         )
 
 
+@dataclass
+class FakeQuick:
+    """Stand-in for the Quick agent's headless tool loop."""
+
+    final_answer: str = "sent it."
+    calls: list[dict] = field(default_factory=list)
+
+    async def run_headless(self, *, ctx, content, emit=None):
+        self.calls.append({
+            "user_id": ctx.user_id, "task_id": ctx.task_id, "content": content,
+        })
+        return self.final_answer
+
+
 def _service() -> TaskService:
     return TaskService(
         planner=FakePlanner(),  # type: ignore[arg-type]
@@ -241,3 +255,64 @@ async def test_create_and_run_remains_synchronous_for_subagent_path():
     )
     assert outcome.final_answer == "done."
     assert outcome.task.status == "completed"
+
+
+async def test_agentic_run_uses_quick_loop_not_planner():
+    """A task created with agentic=True runs through the Quick agent's
+    tool loop (run_headless), NOT the planner→executor pipeline, and still
+    completes through the normal task lifecycle."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+
+    planner = FakePlanner()
+    quick = FakeQuick(final_answer="weather sent via telegram")
+    svc = TaskService(
+        planner=planner,  # type: ignore[arg-type]
+        executor=FakeExecutor(),  # type: ignore[arg-type]
+        pre_evaluator=FakePreEvaluator(),  # type: ignore[arg-type]
+        post_evaluator=FakePostEvaluator(),  # type: ignore[arg-type]
+        quick=quick,  # type: ignore[arg-type]
+    )
+
+    task = await svc.create(
+        user_id=uid, thread_id=None,
+        content="compose the weather and send it",
+        title="Scheduled task", complexity_hint="moderate",
+        channel_for_completion="telegram", agentic=True,
+    )
+    outcome = await svc.run(task.id)
+
+    # Quick loop ran with the task's content; planner never touched.
+    assert [c["content"] for c in quick.calls] == [
+        "compose the weather and send it"
+    ]
+    assert planner.calls == []
+    assert outcome.final_answer == "weather sent via telegram"
+    assert outcome.task.status == "completed"
+    assert outcome.plan is None
+
+
+async def test_non_agentic_run_still_uses_planner():
+    """Default (agentic omitted) keeps the planner→executor pipeline so
+    the router/subagent paths are unaffected."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+
+    planner = FakePlanner()
+    quick = FakeQuick()
+    svc = TaskService(
+        planner=planner,  # type: ignore[arg-type]
+        executor=FakeExecutor(),  # type: ignore[arg-type]
+        pre_evaluator=FakePreEvaluator(),  # type: ignore[arg-type]
+        post_evaluator=FakePostEvaluator(),  # type: ignore[arg-type]
+        quick=quick,  # type: ignore[arg-type]
+    )
+
+    task = await svc.create(
+        user_id=uid, thread_id=None, content="do the thing",
+        title="t", complexity_hint="moderate",
+    )
+    await svc.run(task.id)
+
+    assert quick.calls == []
+    assert len(planner.calls) == 1

@@ -187,6 +187,32 @@ class QuickAgent:
             )
         return final_text
 
+    async def run_headless(
+        self,
+        *,
+        ctx: ToolContext,
+        content: str,
+        emit: EmitFn | None = None,
+    ) -> str:
+        """Run one turn through the tool loop with no thread or history —
+        used by scheduled tasks, which have no conversation to read from or
+        write back to. Same engine as `handle`, so the model calls tools
+        iteratively with their real outputs in context (e.g. web_search →
+        compose → send_telegram_message). Returns the final text; any
+        user-facing delivery happens via the tools the loop calls."""
+        await self._ensure_prompt_version()
+        settings = get_settings()
+        messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
+        tool_specs = [t.to_anthropic_schema() for t in self.allowed_tools]
+        return await self._run_loop(
+            ctx=ctx,
+            model=settings.model_quick,
+            messages=messages,
+            tool_specs=tool_specs,
+            summaries=[],
+            emit=emit,
+        )
+
     async def _run_loop(
         self,
         *,
