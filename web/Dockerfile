@@ -10,10 +10,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /build
 
-# package.json + lockfile first so npm install is cached when only
-# source changes.
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+# package.json + lockfile first so the install layer is cached when only
+# source changes. `npm ci` installs strictly from package-lock.json
+# (reproducible, and fails if the lock and package.json have drifted).
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src

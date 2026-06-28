@@ -3,6 +3,7 @@
 // no Authorization header to manage on the client.
 
 import type {
+  Schedule,
   Task,
   TaskDetail,
   TelegramLinkResponse,
@@ -89,6 +90,15 @@ export const tasks = {
   },
   async cancel(id: string): Promise<Task> {
     return call<Task>(`/tasks/${id}/cancel`, { method: "POST" });
+  },
+};
+
+// --- schedules ----------------------------------------------------------
+
+export const schedules = {
+  async list(): Promise<Schedule[]> {
+    const r = await call<{ schedules: Schedule[] }>("/schedules");
+    return r.schedules;
   },
 };
 

@@ -54,6 +54,26 @@ export interface Task {
   last_active_at: string | null;
 }
 
+export type ScheduleStatus = "active" | "paused" | "done" | "cancelled";
+
+export interface Schedule {
+  id: string;
+  title: string | null;
+  instruction: string;
+  recurrence: "once" | "interval" | "cron";
+  cadence: string;
+  cron_expr: string | null;
+  interval_seconds: number | null;
+  timezone: string;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  run_count: number;
+  max_runs: number | null;
+  channel: string | null;
+  status: ScheduleStatus;
+  created_at: string | null;
+}
+
 export interface TaskEvent {
   id: string;
   event_type: string;

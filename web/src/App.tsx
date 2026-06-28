@@ -7,6 +7,7 @@ import { ChatPage } from "./chat/ChatPage";
 import { FilesPage } from "./files/FilesPage";
 import { AppLayout } from "./layout/AppLayout";
 import { ProfilePage } from "./profile/ProfilePage";
+import { SchedulesPage } from "./schedules/SchedulesPage";
 import { TaskDetailPage } from "./tasks/TaskDetailPage";
 import { TasksPage } from "./tasks/TasksPage";
 import { UsagePage } from "./usage/UsagePage";
@@ -31,6 +32,7 @@ export function App() {
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/tasks/:id" element={<TaskDetailPage />} />
+            <Route path="/schedules" element={<SchedulesPage />} />
             <Route path="/files" element={<FilesPage />} />
             <Route path="/usage" element={<UsagePage />} />
             <Route path="/profile" element={<ProfilePage />} />

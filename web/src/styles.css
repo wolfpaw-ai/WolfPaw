@@ -124,6 +124,9 @@ table.data tr.totals td { font-weight: 600; border-top: 2px solid var(--border);
 .status-completed { background: #e0f5e9; color: var(--success); }
 .status-failed { background: #ffe2e2; color: var(--error); }
 .status-cancelled { background: #f0f0f0; color: var(--fg-muted); }
+.status-active { background: #e0eaff; color: var(--accent); }
+.status-paused { background: #fff3d6; color: var(--warn); }
+.status-done { background: #e0f5e9; color: var(--success); }
 
 /* ---- Task detail ---- */
 dl.metadata { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 1rem 0; }

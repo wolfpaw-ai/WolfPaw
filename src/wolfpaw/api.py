@@ -26,6 +26,7 @@ from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — reg
 from wolfpaw.metering.routes import router as usage_router
 from wolfpaw import toolbox as _toolbox  # noqa: F401 — registers v1 tool set
 from wolfpaw.persona.routes import router as persona_router
+from wolfpaw.schedules.routes import router as schedules_router
 from wolfpaw.tasks import commands as _task_commands  # noqa: F401 — registers /tasks etc
 from wolfpaw.tasks.routes import router as tasks_router
 from wolfpaw.workspace.routes import router as workspace_router
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(workspace_router)
     app.include_router(persona_router)
     app.include_router(tasks_router)
+    app.include_router(schedules_router)
     app.include_router(usage_router)
     app.include_router(dropbox_router)
     app.include_router(notion_router)
