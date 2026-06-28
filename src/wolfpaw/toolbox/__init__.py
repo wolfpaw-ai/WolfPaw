@@ -27,6 +27,7 @@ from wolfpaw.toolbox.tools import (  # noqa: F401
     sandbox_read_file,
     sandbox_write_file,
     search_docs,
+    send_telegram_message,
     sql_delete,
     sql_insert,
     sql_query,
