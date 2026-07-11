@@ -14,7 +14,7 @@ This is the core prompt-growth fix, kept deliberately low-risk by extending the 
 
 Today `search_relevant` ranks purely by cosine distance, so an ancient-but-relevant message can outrank a recent-but-relevant one. Add a time-decay term to the ranking (combined score `cosine_distance − λ·recency`, λ tuned) so newer context is preferred when relevance is close. Also retrieve small windows around each hit (matched message ± ~2 neighbors) instead of isolated messages, so recalled context keeps conversational coherence. Keep top-k fixed (start ~15–20, not 40 — more retrieved turns add noise, not signal).
 
-## 4. Switch IVFFlat → HNSW
+## 4. Switch IVFFlat → HNSW (done)
 
 Swap the `message_embeddings` index from IVFFlat to HNSW so recall-at-latency stays high as the vector count grows, with no dependence on good upfront k-means clustering. At current scale (a few thousand vectors, tens of MB on the 2 GB t4g.small) this is not urgent — exact/brute-force search is already millisecond-fast — so this can land last or be deferred until the dataset is large enough to feel it. Revisit only if the box gets memory-constrained, in which case resize to a t4g.medium rather than reverting the index.
 

@@ -287,6 +287,7 @@ wolfpaw/
     015_workspace_embeddings.sql     # vector(1024) + ivfflat on workspace_files
     016_schedules.sql                # scheduled/recurring task rows
     017_l3_digest.sql                # L3 summary level (single rewritten-in-place digest)
+    018_message_embeddings_hnsw.sql  # swap message_embeddings ivfflat → hnsw
   src/wolfpaw/
     api.py                           # FastAPI app — mounts every router below
     config.py                        # env, model IDs, feature flags, backend selection
@@ -340,9 +341,9 @@ The v1 build order ran 21 steps and is shipped end-to-end. v2 extends with self-
 - **v2 self-improving agent (phase A + B)** — tiered conversational memory (L1/L2 compaction + per-thread vector recall), arq worker, Plan Pre-Evaluator with one-retry loop, Skill auto-emission on high-scoring reusable plans, weekly Sleep Cycle (skill consolidation), structured subagent failure policies (`fail` / `drop` / `retry`), Tool Creator agent with `ask_user` approval.
 - **v2 integrations (phase C, partial)** — Dropbox app-folder, Notion workspace, Microsoft Outlook Calendar. Google Calendar (#31) and Gmail readonly (#33) are deferred pending Google verification.
 - **v3 reliability + memory** — full row-level CRUD on user SQL tables, schema introspection (`list_tables`, `describe_table`) with column-hint errors on failure, document semantic search (`list_docs`, `search_docs` over embedded `workspace_files`), self-healing recovery on `ToolError` (step-level input repair + one mid-plan replan with the Planner).
-- **v4 unified long-running memory** — one channel-agnostic conversation per user (web / Telegram / Slack share a single thread, with per-message channel provenance), a size-capped **L3 digest** that folds L2s into a single rewritten-in-place summary so the prompt stays flat no matter how long the conversation runs, and **recency-weighted vector recall** that returns each hit wrapped in neighbor messages for coherence. All knobs are env-tunable — see [`memory/README.md`](src/wolfpaw/memory/README.md#tuning-conversational-memory).
+- **v4 unified long-running memory** — one channel-agnostic conversation per user (web / Telegram / Slack share a single thread, with per-message channel provenance), a size-capped **L3 digest** that folds L2s into a single rewritten-in-place summary so the prompt stays flat no matter how long the conversation runs, **recency-weighted vector recall** that returns each hit wrapped in neighbor messages for coherence, and an **HNSW** index on `message_embeddings` for recall that stays fast as the thread grows. All knobs are env-tunable — see [`memory/README.md`](src/wolfpaw/memory/README.md#tuning-conversational-memory).
 
-**Roadmap (not yet built):** memory-improvement steps 4–6 (HNSW index; a "remember when…" deep-recall tool; a confirm-gated "delete memories about X" tool), proactive task-completion push to the user's preferred channel (#37), Slack `app_mention` + threads (#35), Telegram inline keyboards (#36), email forwarding intake, full-fat usage dashboard, OpenTelemetry tracing, entity / knowledge-base memory.
+**Roadmap (not yet built):** memory-improvement steps 5–6 (a "remember when…" deep-recall tool; a confirm-gated "delete memories about X" tool), proactive task-completion push to the user's preferred channel (#37), Slack `app_mention` + threads (#35), Telegram inline keyboards (#36), email forwarding intake, full-fat usage dashboard, OpenTelemetry tracing, entity / knowledge-base memory.
 
 **Tests:** `pytest` runs ~460 unit tests in under a minute; another ~160 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`. CI deploys via `git pull && docker compose up -d --build && docker compose restart web` (the `restart web` ensures nginx flushes its upstream DNS).
 
