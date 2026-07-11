@@ -99,7 +99,7 @@ async def _run_router_into_queue(
         async def emit(event: str, data: str) -> None:
             await queue.put((event, data))
 
-        ctx = ToolContext(user_id=user_id)
+        ctx = ToolContext(user_id=user_id, channel=_web_channel.name)
         text = await router.handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=emit,
         )
@@ -145,8 +145,9 @@ async def chat(
         # If the client supplied a thread_id, honor it (validated against
         # the user's threads inside get_or_create_thread). If not — a
         # new device, fresh browser, or a tab that lost its in-memory
-        # threadId — continue the user's most-recent web thread so the
-        # conversation history follows them across devices. `/reset`
+        # threadId — continue the user's most-recent thread (any channel)
+        # so the conversation follows them across devices and channels.
+        # `/reset`
         # mints a new thread server-side, which becomes the "most
         # recent" pickup point for the next message.
         async with acquire() as conn:
@@ -161,7 +162,6 @@ async def chat(
                 existing = await conv.get_most_recent_thread(
                     conn,
                     user_id=user_id,
-                    channel=_web_channel.name,
                 )
                 if existing is not None:
                     thread_id = existing

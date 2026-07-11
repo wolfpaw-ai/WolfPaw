@@ -191,11 +191,14 @@ class Router:
         final = execution.final_answer
         try:
             async with acquire() as conn:
+                _meta = {"channel": ctx.channel} if ctx.channel else None
                 await conv.append(
                     conn, thread_id=thread_id, role="user", content=content,
+                    metadata=_meta,
                 )
                 await conv.append(
                     conn, thread_id=thread_id, role="assistant", content=final,
+                    metadata=_meta,
                 )
         except Exception:  # noqa: BLE001 — degraded mode
             log.warning("router.plan_persist_failed", exc_info=True)
@@ -254,11 +257,14 @@ class Router:
 
         try:
             async with acquire() as conn:
+                _meta = {"channel": ctx.channel} if ctx.channel else None
                 await conv.append(
                     conn, thread_id=thread_id, role="user", content=content,
+                    metadata=_meta,
                 )
                 await conv.append(
                     conn, thread_id=thread_id, role="assistant", content=final,
+                    metadata=_meta,
                 )
         except Exception:  # noqa: BLE001
             log.warning("router.task_persist_failed", exc_info=True)

@@ -301,7 +301,7 @@ async def _handle_inbound(
         async with acquire() as conn:
             thread_id = await _resolve_telegram_thread(conn, user_id)
 
-        ctx = ToolContext(user_id=user_id)
+        ctx = ToolContext(user_id=user_id, channel="telegram")
         final = await get_router().handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=None,
         )
@@ -327,11 +327,14 @@ async def _handle_inbound(
 
 
 async def _resolve_telegram_thread(conn, user_id: UUID) -> UUID:
-    """Return the user's most recent Telegram thread, creating one if
-    none exists. `/reset` mints a new empty thread server-side, which
-    then becomes the "most recent" pickup point for the next message."""
+    """Return the user's most recent thread (any channel), creating a
+    Telegram-stamped one if none exists. Threads are channel-agnostic,
+    so an inbound Telegram message continues a conversation the user may
+    have started on web. `/reset` mints a new empty thread server-side,
+    which then becomes the "most recent" pickup point for the next
+    message."""
     existing = await conv.get_most_recent_thread(
-        conn, user_id=user_id, channel="telegram",
+        conn, user_id=user_id,
     )
     if existing is not None:
         return existing

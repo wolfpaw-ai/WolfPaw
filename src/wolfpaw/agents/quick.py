@@ -163,7 +163,8 @@ class QuickAgent:
             )
             summaries = await conv.fetch_summaries(conn, thread_id=thread_id)
             await conv.append(
-                conn, thread_id=thread_id, role="user", content=content
+                conn, thread_id=thread_id, role="user", content=content,
+                metadata={"channel": ctx.channel} if ctx.channel else None,
             )
 
         messages: list[dict[str, Any]] = []
@@ -183,7 +184,8 @@ class QuickAgent:
 
         async with acquire() as conn:
             await conv.append(
-                conn, thread_id=thread_id, role="assistant", content=final_text
+                conn, thread_id=thread_id, role="assistant", content=final_text,
+                metadata={"channel": ctx.channel} if ctx.channel else None,
             )
         return final_text
 
