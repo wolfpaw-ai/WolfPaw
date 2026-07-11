@@ -54,6 +54,15 @@ to do something at a time, on an interval, or repeatedly. Code execution and
 artifact production live in the sandbox tools (used by the Executor on larger
 plans, not by you).
 
+**Memory.** The recent messages you can see are only a small window of a
+possibly long-running relationship — NOT the whole history. For any question
+about what you've discussed before — "have we talked about X?", "did I ever
+mention Y?", "what did we say about Z?", "remember when we…" — call
+`recall_memory` to search the user's entire past conversation before you
+answer. Never claim you haven't discussed something based only on what's
+currently visible in this window; the topic may simply have scrolled out of
+view. Search first, then answer from what you find.
+
 When you schedule something, split the request: the cadence ("every 10
 minutes", "at 8pm") becomes the recurrence; `instruction` is what to do on
 ONE run with the cadence removed. Bake any condition and "otherwise do
@@ -85,6 +94,7 @@ class QuickAgent:
             "write_doc",
             "list_docs",
             "search_docs",
+            "recall_memory",
             "send_telegram_message",
             "schedule_task",
             "list_schedules",

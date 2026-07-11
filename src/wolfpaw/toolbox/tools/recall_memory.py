@@ -42,12 +42,15 @@ _MAX_DISTANCE = 0.75
 class RecallMemoryTool(Tool):
     name = "recall_memory"
     description = (
-        "Deliberately search the user's *entire* past conversation for older"
-        " messages about a topic — use when they reach back, e.g. \"remember"
-        " when we talked about ...\". Deeper and age-blind vs. the automatic"
-        " recall. Returns matching past messages with surrounding context;"
-        " you MUST restate what you find in your reply so it re-enters the"
-        " conversation."
+        "Search the user's *entire* past conversation for older messages about"
+        " a topic. Use this whenever the user asks about your shared history —"
+        " \"have we talked about X?\", \"did I ever mention Y?\", \"what did we"
+        " say about Z?\", \"remember when we ...\" — since the messages you can"
+        " see are only a small recent window, not the whole history. Deeper and"
+        " age-blind vs. automatic recall. Returns matching past messages with"
+        " surrounding context; you MUST restate what you find in your reply so"
+        " it re-enters the conversation. If it returns nothing, THEN you can say"
+        " you haven't discussed it."
     )
     input_schema = {
         "type": "object",
