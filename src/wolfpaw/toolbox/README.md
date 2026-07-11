@@ -40,7 +40,8 @@ The three write tools above catch `asyncpg.UndefinedColumnError` / `UndefinedTab
 ### Conversational memory
 
 - **`recall_memory`** — deliberate, age-blind deep recall over the user's *entire* memory — **all their threads**, not just the current one (vs. the Planner's automatic recency-weighted, current-thread recall). For when the user reaches back — "remember when we talked about …". Embeds the query, runs `conv.search_user_messages` (`recency_weight=0`, loose relevance floor, per-thread neighbor windows), returns matching older messages. Contract: the agent must **restate** what it finds so the recalled material re-enters the conversation (and thus working memory) as a normal persisted turn.
-- **`delete_memories`** — permanent, confirmation-gated deletion of memories about a subject, **user-scoped across all the user's threads** (a copy in a legacy per-channel or post-`/reset` thread can't be silently left behind — that would be a privacy bug). `requires_task_context` (uses `ask_user`). Searches with a *tight* relevance floor, clusters hits into stably-numbered episodes (split on thread change or time gap), asks which to delete, then a final yes/no before destroying anything — the numbered list is held in memory across the `ask_user` await, so display and execution never disagree. Deletes the chosen messages (embeddings cascade); for each affected thread whose *summarized* history was touched it clears that thread's L1/L2/L3 summaries and enqueues a rebuild so the deleted content can't survive in compressed form. Trigger is explicit *delete* intent, never a casual "forget about that".
+
+  *(A confirmation-gated `delete_memories` / "forgetting" tool is planned but not built — deletion + summary-scrub is deferred; see the memory-improvement plan.)*
 
 ### Sandbox
 

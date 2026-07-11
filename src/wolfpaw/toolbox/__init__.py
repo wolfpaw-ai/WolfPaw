@@ -18,7 +18,6 @@ from wolfpaw.toolbox.tools import (  # noqa: F401
     create_slides,
     create_spreadsheet,
     create_table,
-    delete_memories,
     describe_table,
     http_get,
     install_package,

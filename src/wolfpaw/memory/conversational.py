@@ -380,13 +380,11 @@ async def search_user_messages(
 
     A user's memory is one continuous thing (threads are just channel-
     agnostic containers, and a user may have several from legacy per-channel
-    splits or `/reset`). Recall and deletion therefore span all of them: an
-    explicit "delete my memories about X" that missed copies in another
-    thread would be a privacy bug, and automatic recall shouldn't go blind
-    to a topic just because it was last discussed in a different thread.
-    Neighbor windows and the recency term stay *within* each message's own
-    thread (``PARTITION BY thread_id``). Results come back grouped by thread,
-    chronological within.
+    splits or `/reset`). Recall therefore spans all of them: it shouldn't go
+    blind to a topic just because it was last discussed in a different
+    thread. Neighbor windows and the recency term stay *within* each
+    message's own thread (``PARTITION BY thread_id``). Results come back
+    grouped by thread, chronological within.
 
     ``exclude_recent_thread_id`` + ``exclude_recent_n`` drop the newest
     ``exclude_recent_n`` messages of *that one thread* — used by the Planner
@@ -451,76 +449,6 @@ async def search_user_messages(
         exclude_recent_thread_id, max(0, exclude_recent_n),
     )
     return [_row_to_message(r) for r in rows]
-
-
-# --- deletion (used by the `delete_memories` tool) --------------------------
-
-
-async def delete_user_messages(
-    conn: asyncpg.Connection,
-    *,
-    user_id: UUID,
-    message_ids: list[UUID],
-) -> list[tuple[UUID, UUID, datetime]]:
-    """Permanently delete the given messages across all of a user's
-    threads. Scoped to ``user_id`` (via the ``threads`` join) so a caller
-    can't reach another user's rows even if handed a foreign id.
-    ``message_embeddings`` rows cascade (``ON DELETE CASCADE``). Returns
-    ``(id, thread_id, created_at)`` for each row actually deleted, so the
-    caller can group by thread and decide per-thread whether to scrub
-    summaries."""
-    if not message_ids:
-        return []
-    rows = await conn.fetch(
-        "DELETE FROM messages m"
-        " USING threads t"
-        " WHERE m.thread_id = t.id AND t.user_id = $1"
-        "   AND m.id = ANY($2::uuid[])"
-        " RETURNING m.id, m.thread_id, m.created_at",
-        user_id, message_ids,
-    )
-    return [(r["id"], r["thread_id"], r["created_at"]) for r in rows]
-
-
-async def recent_window_cutoff(
-    conn: asyncpg.Connection, *, thread_id: UUID, recent_window: int,
-) -> datetime | None:
-    """Return the ``created_at`` of the ``recent_window``-th newest message
-    in the thread — the boundary between the always-verbatim recent window
-    and older, summarized territory. ``None`` when the thread has fewer than
-    ``recent_window`` messages (nothing has been summarized yet)."""
-    return await conn.fetchval(
-        "SELECT created_at FROM messages"
-        " WHERE thread_id = $1"
-        " ORDER BY created_at DESC, id DESC"
-        " OFFSET $2 LIMIT 1",
-        thread_id, max(0, recent_window - 1),
-    )
-
-
-async def thread_has_summaries(
-    conn: asyncpg.Connection, *, thread_id: UUID,
-) -> bool:
-    return bool(await conn.fetchval(
-        "SELECT EXISTS(SELECT 1 FROM thread_summaries WHERE thread_id = $1)",
-        thread_id,
-    ))
-
-
-async def clear_summaries(
-    conn: asyncpg.Connection, *, thread_id: UUID,
-) -> None:
-    """Drop every tiered summary (L1/L2/L3) for a thread. Used after a
-    deletion touches already-summarized history: the surviving summaries
-    are blended, un-editable compressions that may still contain the
-    deleted content, so we clear them wholesale and let the compactor
-    rebuild the ladder from the surviving raw messages. Obviously correct
-    (no deleted content can survive in compressed form) at the cost of a
-    re-summarization pass, which is acceptable for a rare, deliberate
-    delete."""
-    await conn.execute(
-        "DELETE FROM thread_summaries WHERE thread_id = $1", thread_id,
-    )
 
 
 # --- post-append follow-ups -------------------------------------------------
