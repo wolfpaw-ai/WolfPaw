@@ -101,20 +101,14 @@ class DeleteMemoriesTool(Tool):
         subject_vec = emb.vectors[0]
 
         async with acquire() as conn:
-            thread_id = await conv.get_most_recent_thread(
-                conn, user_id=ctx.user_id,
-            )
-            if thread_id is None:
-                return {
-                    "subject": subject, "found": 0, "deleted": 0,
-                    "message": "There's no conversation history to search.",
-                }
-            hits = await conv.search_relevant(
+            # Search ALL the user's threads — deletion is user-scoped, so a
+            # copy of the subject in another thread (legacy per-channel split
+            # or a post-`/reset` thread) can't be silently left behind.
+            hits = await conv.search_user_messages(
                 conn,
-                thread_id=thread_id,
+                user_id=ctx.user_id,
                 query_embedding=subject_vec,
                 k=_SEARCH_K,
-                exclude_recent_n=0,   # deletion can target recent stuff too
                 recency_weight=0.0,   # age-blind
                 window=0,             # just the matches, not their neighbors
                 max_distance=_MAX_DISTANCE,
@@ -172,40 +166,46 @@ class DeleteMemoriesTool(Tool):
                 "message": "Okay — I've left everything as it was.",
             }
 
-        # 3. Delete, and scrub summaries if we touched summarized history.
+        # 3. Delete across the user's threads, then scrub summaries per
+        #    affected thread that had a deletion in summarized territory.
         to_delete: list[UUID] = []
         for e in chosen_eps:
             to_delete.extend(e["message_ids"])
 
+        scrubbed_threads: list[UUID] = []
         async with acquire() as conn:
-            deleted = await conv.delete_messages(
-                conn, thread_id=thread_id, message_ids=to_delete,
+            deleted = await conv.delete_user_messages(
+                conn, user_id=ctx.user_id, message_ids=to_delete,
             )
-            scrubbed = False
-            if deleted and await conv.thread_has_summaries(
-                conn, thread_id=thread_id,
-            ):
+            # Group deleted rows by their thread; a thread needs a scrub only
+            # if it has summaries AND we deleted something older than its
+            # recent (still-verbatim) window.
+            by_thread: dict[UUID, list[datetime]] = {}
+            for _id, tid, ts in deleted:
+                by_thread.setdefault(tid, []).append(ts)
+            for tid, tss in by_thread.items():
+                if not await conv.thread_has_summaries(conn, thread_id=tid):
+                    continue
                 cutoff = await conv.recent_window_cutoff(
-                    conn, thread_id=thread_id,
+                    conn, thread_id=tid,
                     recent_window=settings.recent_window_size,
                 )
-                if cutoff is not None and any(
-                    ts < cutoff for _id, ts in deleted
-                ):
-                    await conv.clear_summaries(conn, thread_id=thread_id)
-                    scrubbed = True
+                if cutoff is not None and any(ts < cutoff for ts in tss):
+                    await conv.clear_summaries(conn, thread_id=tid)
+                    scrubbed_threads.append(tid)
 
-        if scrubbed:
+        for tid in scrubbed_threads:
             try:
                 from wolfpaw.workers.queue import enqueue_compact_thread
 
-                await enqueue_compact_thread(thread_id)
+                await enqueue_compact_thread(tid)
             except Exception:  # noqa: BLE001 — best-effort rebuild
                 log.warning(
                     "delete_memories.recompact_enqueue_failed",
-                    thread_id=str(thread_id), exc_info=True,
+                    thread_id=str(tid), exc_info=True,
                 )
 
+        scrubbed = bool(scrubbed_threads)
         return {
             "subject": subject,
             "found": len(episodes),
@@ -225,13 +225,20 @@ class DeleteMemoriesTool(Tool):
 
 
 def _cluster(hits: list[conv.Message], gap: timedelta) -> list[dict]:
-    """Group chronologically-ordered hits into episodes: a new episode
-    starts whenever the gap to the previous hit exceeds ``gap``."""
+    """Group hits into episodes: a new episode starts on a thread change or
+    whenever the gap to the previous hit in the same thread exceeds ``gap``.
+    (Hits arrive grouped by thread, chronological within — see
+    ``search_user_messages``.)"""
     episodes: list[dict] = []
     cur: dict | None = None
     for m in hits:
-        if cur is None or (m.created_at - cur["end"]) > gap:
+        if (
+            cur is None
+            or m.thread_id != cur["thread_id"]
+            or (m.created_at - cur["end"]) > gap
+        ):
             cur = {
+                "thread_id": m.thread_id,
                 "start": m.created_at, "end": m.created_at,
                 "message_ids": [m.id], "messages": [m],
             }

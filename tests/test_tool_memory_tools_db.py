@@ -197,6 +197,58 @@ async def test_delete_removes_confirmed_episode(monkeypatch):
     assert surviving == 0
 
 
+async def test_delete_spans_all_user_threads(monkeypatch):
+    """A copy of the subject in a *second* thread (e.g. a legacy per-channel
+    split or a post-/reset thread) must also be deleted — memory is
+    user-scoped, not thread-scoped."""
+    uid = await _seed_user()
+    thread_a = await _seed_thread(uid)
+    thread_b = await _seed_thread(uid)
+    base = datetime.now(timezone.utc) - timedelta(days=5)
+    a_ids = [
+        await _seed_msg(thread_a, "project falcon launch schedule", base),
+        await _seed_msg(thread_a, "project falcon launch schedule",
+                        base + timedelta(minutes=1)),
+    ]
+    b_id = await _seed_msg(thread_b, "project falcon launch schedule",
+                           base + timedelta(days=1))
+    await _seed_msg(thread_a, "unrelated chatter", base + timedelta(hours=5))
+
+    _stub_ask_user(monkeypatch, ["all", "yes"])
+    tool = get_registry().get("delete_memories")
+    out = await tool.run(
+        _ctx(uid, task=True), subject="project falcon launch schedule",
+    )
+
+    assert out["deleted"] == 3  # 2 from thread A + 1 from thread B
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        surviving = await conn.fetchval(
+            "SELECT COUNT(*) FROM messages WHERE id = ANY($1::uuid[])",
+            a_ids + [b_id],
+        )
+    finally:
+        await conn.close()
+    assert surviving == 0
+
+
+async def test_recall_spans_all_user_threads():
+    """Deep recall reaches into an older, non-current thread too."""
+    uid = await _seed_user()
+    thread_a = await _seed_thread(uid)
+    thread_b = await _seed_thread(uid)  # the "current"/newer thread
+    base = datetime.now(timezone.utc) - timedelta(days=40)
+    await _seed_msg(thread_a, "the mriswith migration plan", base)
+    await _seed_msg(thread_b, "totally different recent topic",
+                    datetime.now(timezone.utc) - timedelta(minutes=1))
+
+    tool = get_registry().get("recall_memory")
+    out = await tool.run(_ctx(uid), query="the mriswith migration plan")
+    contents = [r["content"] for r in out["results"]]
+    assert "the mriswith migration plan" in contents  # found in thread A
+
+
 async def test_delete_cancelled_leaves_everything(monkeypatch):
     uid = await _seed_user()
     tid = await _seed_thread(uid)

@@ -362,30 +362,124 @@ async def search_relevant(
     return [_row_to_message(r) for r in rows]
 
 
+async def search_user_messages(
+    conn: asyncpg.Connection,
+    *,
+    user_id: UUID,
+    query_embedding: list[float],
+    k: int = 25,
+    recency_weight: float = 0.0,
+    half_life_days: float = 30.0,
+    window: int = 0,
+    max_distance: float = 2.0,
+    exclude_recent_thread_id: UUID | None = None,
+    exclude_recent_n: int = 0,
+) -> list[Message]:
+    """Like :func:`search_relevant` but scoped to the *whole user* — every
+    thread they own, not one.
+
+    A user's memory is one continuous thing (threads are just channel-
+    agnostic containers, and a user may have several from legacy per-channel
+    splits or `/reset`). Recall and deletion therefore span all of them: an
+    explicit "delete my memories about X" that missed copies in another
+    thread would be a privacy bug, and automatic recall shouldn't go blind
+    to a topic just because it was last discussed in a different thread.
+    Neighbor windows and the recency term stay *within* each message's own
+    thread (``PARTITION BY thread_id``). Results come back grouped by thread,
+    chronological within.
+
+    ``exclude_recent_thread_id`` + ``exclude_recent_n`` drop the newest
+    ``exclude_recent_n`` messages of *that one thread* — used by the Planner
+    to avoid duplicating the current thread's verbatim window (which it
+    already loaded via :func:`fetch_recent`). Other threads are never
+    excluded. Leave unset (the tools' deliberate mode) to search everything.
+    """
+    rows = await conn.fetch(
+        """
+        WITH ordered AS (
+            SELECT m.id, m.thread_id, m.role, m.content, m.metadata,
+                   m.created_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY m.thread_id
+                       ORDER BY m.created_at ASC, m.id ASC
+                   ) AS rn
+              FROM messages m
+              JOIN threads t ON t.id = m.thread_id
+             WHERE t.user_id = $1
+        ),
+        recent AS (
+            SELECT id FROM messages
+             WHERE thread_id = $8
+             ORDER BY created_at DESC, id DESC
+             LIMIT $9
+        ),
+        hits AS (
+            SELECT o.thread_id, o.rn,
+                   (e.embedding <=> $2)
+                     - COALESCE(
+                         $4 * POWER(
+                             0.5,
+                             EXTRACT(EPOCH FROM (NOW() - o.created_at))
+                                 / 86400.0 / NULLIF($5, 0)
+                         ),
+                         0
+                       ) AS score
+              FROM ordered o
+              JOIN message_embeddings e ON e.message_id = o.id
+             WHERE (e.embedding <=> $2) <= $6
+               AND o.id NOT IN (SELECT id FROM recent)
+             ORDER BY score ASC
+             LIMIT $3
+        ),
+        window_rns AS (
+            SELECT DISTINCT o.thread_id, o.rn
+              FROM ordered o
+              JOIN hits h
+                ON o.thread_id = h.thread_id
+               AND o.rn BETWEEN h.rn - $7 AND h.rn + $7
+        )
+        SELECT o.id, o.thread_id, o.role::text AS role, o.content,
+               o.metadata, o.created_at
+          FROM ordered o
+          JOIN window_rns w
+            ON o.thread_id = w.thread_id AND o.rn = w.rn
+         WHERE o.id NOT IN (SELECT id FROM recent)
+         ORDER BY o.thread_id, o.created_at ASC, o.id ASC
+        """,
+        user_id, query_embedding, k,
+        recency_weight, half_life_days, max_distance, window,
+        exclude_recent_thread_id, max(0, exclude_recent_n),
+    )
+    return [_row_to_message(r) for r in rows]
+
+
 # --- deletion (used by the `delete_memories` tool) --------------------------
 
 
-async def delete_messages(
+async def delete_user_messages(
     conn: asyncpg.Connection,
     *,
-    thread_id: UUID,
+    user_id: UUID,
     message_ids: list[UUID],
-) -> list[tuple[UUID, datetime]]:
-    """Permanently delete the given messages from a thread. Scoped to
-    ``thread_id`` so a caller can't reach another thread's (or user's)
-    rows even if handed a foreign id. ``message_embeddings`` rows cascade
-    (``ON DELETE CASCADE``). Returns ``(id, created_at)`` for each row that
-    was actually deleted — the intersection of ``message_ids`` with the
-    thread's rows — so the caller can report and decide on summary scrub."""
+) -> list[tuple[UUID, UUID, datetime]]:
+    """Permanently delete the given messages across all of a user's
+    threads. Scoped to ``user_id`` (via the ``threads`` join) so a caller
+    can't reach another user's rows even if handed a foreign id.
+    ``message_embeddings`` rows cascade (``ON DELETE CASCADE``). Returns
+    ``(id, thread_id, created_at)`` for each row actually deleted, so the
+    caller can group by thread and decide per-thread whether to scrub
+    summaries."""
     if not message_ids:
         return []
     rows = await conn.fetch(
-        "DELETE FROM messages"
-        " WHERE thread_id = $1 AND id = ANY($2::uuid[])"
-        " RETURNING id, created_at",
-        thread_id, message_ids,
+        "DELETE FROM messages m"
+        " USING threads t"
+        " WHERE m.thread_id = t.id AND t.user_id = $1"
+        "   AND m.id = ANY($2::uuid[])"
+        " RETURNING m.id, m.thread_id, m.created_at",
+        user_id, message_ids,
     )
-    return [(r["id"], r["created_at"]) for r in rows]
+    return [(r["id"], r["thread_id"], r["created_at"]) for r in rows]
 
 
 async def recent_window_cutoff(

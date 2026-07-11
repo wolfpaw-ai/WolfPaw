@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from wolfpaw.config import get_settings
 from wolfpaw.embeddings import get_embedder
 from wolfpaw.memory import conversational as conv
 from wolfpaw.memory.db import acquire
@@ -77,7 +76,6 @@ class RecallMemoryTool(Tool):
             raise ToolError("`query` must be a non-empty string")
         k = max(1, min(_MAX_K, int(inputs.get("k") or _DEFAULT_K)))
 
-        settings = get_settings()
         embedder = get_embedder()
         result = await embedder.embed_one(query)
         if not result.vectors:
@@ -85,17 +83,11 @@ class RecallMemoryTool(Tool):
         query_vec = result.vectors[0]
 
         async with acquire() as conn:
-            thread_id = await conv.get_most_recent_thread(
-                conn, user_id=ctx.user_id,
-            )
-            if thread_id is None:
-                return {"query": query, "result_count": 0, "results": []}
-            msgs = await conv.search_relevant(
+            msgs = await conv.search_user_messages(
                 conn,
-                thread_id=thread_id,
+                user_id=ctx.user_id,
                 query_embedding=query_vec,
                 k=k,
-                exclude_recent_n=settings.recent_window_size,
                 recency_weight=0.0,  # deliberate recall — don't penalize age
                 window=2,
                 max_distance=_MAX_DISTANCE,

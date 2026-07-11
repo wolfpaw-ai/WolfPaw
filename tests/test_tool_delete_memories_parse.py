@@ -67,9 +67,12 @@ def test_is_yes():
 # --- _cluster / _episode_label ---------------------------------------------
 
 
-def _msg(content: str, ts: datetime) -> Message:
+_TID = uuid4()
+
+
+def _msg(content: str, ts: datetime, tid=_TID) -> Message:
     return Message(
-        id=uuid4(), thread_id=uuid4(), role="user",
+        id=uuid4(), thread_id=tid, role="user",
         content=content, metadata={}, created_at=ts,
     )
 
@@ -86,6 +89,20 @@ def test_cluster_splits_on_time_gap():
     assert len(episodes) == 2
     assert [len(e["messages"]) for e in episodes] == [2, 2]
     assert episodes[0]["message_ids"] == [msgs[0].id, msgs[1].id]
+
+
+def test_cluster_splits_on_thread_change():
+    base = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    other = uuid4()
+    msgs = [
+        _msg("a", base),                                  # thread _TID
+        _msg("b", base + timedelta(minutes=1)),           # thread _TID
+        _msg("c", base + timedelta(minutes=2), tid=other),  # different thread
+    ]
+    episodes = _cluster(msgs, timedelta(hours=2))
+    # Same timeframe, but the thread change forces a new episode.
+    assert len(episodes) == 2
+    assert [len(e["messages"]) for e in episodes] == [2, 1]
 
 
 def test_episode_label_has_date_count_snippet():

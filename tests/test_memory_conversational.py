@@ -358,6 +358,45 @@ async def test_search_relevant_isolates_per_thread():
     assert [h.content for h in hits] == ["in B"]
 
 
+async def test_search_user_messages_spans_threads_and_excludes_current_recent():
+    """User-scoped search reaches every thread the user owns, and can drop
+    the current thread's verbatim window without touching other threads."""
+    from datetime import datetime, timedelta, timezone
+
+    from wolfpaw.embeddings.stub import StubEmbedder
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    a = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+    embedder = StubEmbedder(dimensions=1024)
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    await _seed_msg_with_embedding(
+        dsn, a, "target alpha", created_at=base, embedder=embedder)
+    await _seed_msg_with_embedding(
+        dsn, a, "filler one", created_at=base + timedelta(seconds=1),
+        embedder=embedder)
+    await _seed_msg_with_embedding(
+        dsn, a, "filler two", created_at=base + timedelta(seconds=2),
+        embedder=embedder)
+
+    q = (await embedder.embed_one("target alpha")).vectors[0]
+    # Excluding the newest 2 of thread `a` still leaves the oldest ("target
+    # alpha") searchable.
+    hits = await _with_conn(
+        conv.search_user_messages, user_id=uid, query_embedding=q,
+        k=5, window=0, max_distance=0.75,
+        exclude_recent_thread_id=a, exclude_recent_n=2,
+    )
+    assert [h.content for h in hits] == ["target alpha"]
+    # Excluding the newest 3 (all of thread `a`) drops it too.
+    hits2 = await _with_conn(
+        conv.search_user_messages, user_id=uid, query_embedding=q,
+        k=5, window=0, max_distance=0.75,
+        exclude_recent_thread_id=a, exclude_recent_n=3,
+    )
+    assert hits2 == []
+
+
 async def test_search_relevant_returns_neighbor_windows():
     """A single hit is returned with `window` neighbors on either side (by
     thread order), in chronological order, for conversational coherence."""
