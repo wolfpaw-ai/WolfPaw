@@ -273,9 +273,18 @@ async def search_relevant(
     recency_weight: float = 0.15,
     half_life_days: float = 30.0,
     window: int = 2,
+    max_distance: float = 2.0,
 ) -> list[Message]:
     """Recency-weighted top-``k`` semantic recall from this thread,
     returned as small chronological windows around each hit.
+
+    ``max_distance`` is an optional relevance floor: hits whose raw cosine
+    distance to the query exceeds it are dropped *before* ranking, so a
+    query with only a few genuinely-relevant messages doesn't dredge up
+    ``k`` loosely-related ones. Cosine distance runs 0 (identical) → 2
+    (opposite); the default 2.0 admits everything (top-k, the Planner's
+    behavior). Callers that need precision (e.g. `delete_memories`) pass a
+    tighter value.
 
     Hits are ranked by a blend of semantic distance and recency::
 
@@ -331,6 +340,7 @@ async def search_relevant(
               FROM ordered o
               JOIN message_embeddings e ON e.message_id = o.id
              WHERE o.id NOT IN (SELECT id FROM recent)
+               AND (e.embedding <=> $2) <= $8
              ORDER BY score ASC
              LIMIT $3
         ),
@@ -347,9 +357,76 @@ async def search_relevant(
          ORDER BY o.created_at ASC, o.id ASC
         """,
         thread_id, query_embedding, k, exclude_recent_n,
-        recency_weight, half_life_days, window,
+        recency_weight, half_life_days, window, max_distance,
     )
     return [_row_to_message(r) for r in rows]
+
+
+# --- deletion (used by the `delete_memories` tool) --------------------------
+
+
+async def delete_messages(
+    conn: asyncpg.Connection,
+    *,
+    thread_id: UUID,
+    message_ids: list[UUID],
+) -> list[tuple[UUID, datetime]]:
+    """Permanently delete the given messages from a thread. Scoped to
+    ``thread_id`` so a caller can't reach another thread's (or user's)
+    rows even if handed a foreign id. ``message_embeddings`` rows cascade
+    (``ON DELETE CASCADE``). Returns ``(id, created_at)`` for each row that
+    was actually deleted — the intersection of ``message_ids`` with the
+    thread's rows — so the caller can report and decide on summary scrub."""
+    if not message_ids:
+        return []
+    rows = await conn.fetch(
+        "DELETE FROM messages"
+        " WHERE thread_id = $1 AND id = ANY($2::uuid[])"
+        " RETURNING id, created_at",
+        thread_id, message_ids,
+    )
+    return [(r["id"], r["created_at"]) for r in rows]
+
+
+async def recent_window_cutoff(
+    conn: asyncpg.Connection, *, thread_id: UUID, recent_window: int,
+) -> datetime | None:
+    """Return the ``created_at`` of the ``recent_window``-th newest message
+    in the thread — the boundary between the always-verbatim recent window
+    and older, summarized territory. ``None`` when the thread has fewer than
+    ``recent_window`` messages (nothing has been summarized yet)."""
+    return await conn.fetchval(
+        "SELECT created_at FROM messages"
+        " WHERE thread_id = $1"
+        " ORDER BY created_at DESC, id DESC"
+        " OFFSET $2 LIMIT 1",
+        thread_id, max(0, recent_window - 1),
+    )
+
+
+async def thread_has_summaries(
+    conn: asyncpg.Connection, *, thread_id: UUID,
+) -> bool:
+    return bool(await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM thread_summaries WHERE thread_id = $1)",
+        thread_id,
+    ))
+
+
+async def clear_summaries(
+    conn: asyncpg.Connection, *, thread_id: UUID,
+) -> None:
+    """Drop every tiered summary (L1/L2/L3) for a thread. Used after a
+    deletion touches already-summarized history: the surviving summaries
+    are blended, un-editable compressions that may still contain the
+    deleted content, so we clear them wholesale and let the compactor
+    rebuild the ladder from the surviving raw messages. Obviously correct
+    (no deleted content can survive in compressed form) at the cost of a
+    re-summarization pass, which is acceptable for a rare, deliberate
+    delete."""
+    await conn.execute(
+        "DELETE FROM thread_summaries WHERE thread_id = $1", thread_id,
+    )
 
 
 # --- post-append follow-ups -------------------------------------------------

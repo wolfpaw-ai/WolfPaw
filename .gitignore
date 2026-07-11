@@ -24,3 +24,5 @@ venv/
 saas.md
 wolf-pi.md
 private/
+
+.claude/settings.local.json

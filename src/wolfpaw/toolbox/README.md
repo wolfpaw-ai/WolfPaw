@@ -37,6 +37,11 @@ The three write tools above catch `asyncpg.UndefinedColumnError` / `UndefinedTab
 - **`list_docs`** — enumerate the user's workspace docs (latest version per filename) with size + version + mime + created_at. No args. Cheap — no Storage round-trip.
 - **`search_docs`** — semantic search by *content*. Embeds the query, runs ANN search against `workspace_files.embedding`, returns ranked filenames + similarity scores. The agent then `read_doc`s the hits it wants.
 
+### Conversational memory
+
+- **`recall_memory`** — deliberate, age-blind deep recall over the user's *entire* past conversation (vs. the Planner's automatic recency-weighted recall). For when the user reaches back — "remember when we talked about …". Embeds the query, runs `conv.search_relevant` with `recency_weight=0` and a loose relevance floor, returns matching older messages with neighbor windows. Contract: the agent must **restate** what it finds so the recalled material re-enters the conversation (and thus working memory) as a normal persisted turn.
+- **`delete_memories`** — permanent, confirmation-gated deletion of memories about a subject. `requires_task_context` (uses `ask_user`). Searches with a *tight* relevance floor, clusters hits into stably-numbered episodes, asks which to delete, then asks a final yes/no before destroying anything — the numbered list is held in memory across the `ask_user` await, so display and execution never disagree. Deletes the chosen messages (embeddings cascade); if the deletion touched already-summarized history it clears the thread's L1/L2/L3 summaries and enqueues a rebuild so the deleted content can't survive in compressed form. Trigger is explicit *delete* intent, never a casual "forget about that".
+
 ### Sandbox
 
 - **`run_python`** — execute Python in the task's sandbox; state persists across calls.
