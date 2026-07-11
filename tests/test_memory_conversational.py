@@ -63,6 +63,14 @@ async def _with_conn(fn, *args, **kwargs):
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     conn = await asyncpg.connect(dsn=dsn)
     try:
+        # Register the same vector + jsonb codecs the app pool installs on
+        # acquire, so DAO calls that bind a query embedding
+        # (search_relevant) or read a jsonb `metadata` column behave
+        # exactly as they do in production. Raw test conns must do it
+        # themselves.
+        from wolfpaw.memory.db import _setup_connection
+
+        await _setup_connection(conn)
         return await fn(conn, *args, **kwargs)
     finally:
         await conn.close()
@@ -348,5 +356,69 @@ async def test_search_relevant_isolates_per_thread():
         thread_id=b, query_embedding=query, k=5, exclude_recent_n=0,
     )
     assert [h.content for h in hits] == ["in B"]
+
+
+async def test_search_relevant_returns_neighbor_windows():
+    """A single hit is returned with `window` neighbors on either side (by
+    thread order), in chronological order, for conversational coherence."""
+    from datetime import datetime, timedelta, timezone
+
+    from wolfpaw.embeddings.stub import StubEmbedder
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+
+    embedder = StubEmbedder(dimensions=1024)
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    for i, c in enumerate(["m0", "m1", "m2", "m3", "m4", "m5", "m6"]):
+        await _seed_msg_with_embedding(
+            dsn, tid, c, created_at=base + timedelta(seconds=i), embedder=embedder,
+        )
+
+    # Exact match on the middle message; window=2 pulls the two messages
+    # on each side. recency_weight=0 keeps the exact match deterministic.
+    query = (await embedder.embed_one("m3")).vectors[0]
+    hits = await _with_conn(
+        conv.search_relevant,
+        thread_id=tid, query_embedding=query, k=1, exclude_recent_n=0,
+        window=2, recency_weight=0.0,
+    )
+    assert [h.content for h in hits] == ["m1", "m2", "m3", "m4", "m5"]
+
+
+async def test_search_relevant_recency_breaks_ties():
+    """Two equally-relevant messages (identical content → identical vector)
+    tie on cosine distance; the recency bonus surfaces the newer one."""
+    from datetime import datetime, timedelta, timezone
+
+    from wolfpaw.embeddings.stub import StubEmbedder
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+
+    embedder = StubEmbedder(dimensions=1024)
+    now = datetime.now(timezone.utc)
+    old_id = await _seed_msg_with_embedding(
+        dsn, tid, "same topic", created_at=now - timedelta(days=365),
+        embedder=embedder,
+    )
+    new_id = await _seed_msg_with_embedding(
+        dsn, tid, "same topic", created_at=now - timedelta(days=1),
+        embedder=embedder,
+    )
+
+    query = (await embedder.embed_one("same topic")).vectors[0]
+    # k=1, window=0 → exactly the single top-scoring message. Both have
+    # cosine distance 0, so recency alone decides — the newer wins.
+    hits = await _with_conn(
+        conv.search_relevant,
+        thread_id=tid, query_embedding=query, k=1, exclude_recent_n=0,
+        window=0, recency_weight=0.15, half_life_days=30.0,
+    )
+    assert len(hits) == 1
+    assert hits[0].id == new_id
+    assert hits[0].id != old_id
 
 

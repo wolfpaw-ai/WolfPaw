@@ -268,40 +268,86 @@ async def search_relevant(
     *,
     thread_id: UUID,
     query_embedding: list[float],
-    k: int = 5,
+    k: int = 15,
     exclude_recent_n: int = 20,
+    recency_weight: float = 0.15,
+    half_life_days: float = 30.0,
+    window: int = 2,
 ) -> list[Message]:
-    """Top-k semantically-relevant older messages from this thread,
-    ranked by cosine similarity to ``query_embedding``.
+    """Recency-weighted top-``k`` semantic recall from this thread,
+    returned as small chronological windows around each hit.
 
-    The most recent ``exclude_recent_n`` messages are excluded so the
-    Planner doesn't get duplicate context from the verbatim window — it
-    already fetched those via :func:`fetch_recent`. Messages without
-    embeddings (embedding fired-and-forgot but never landed, or rows
-    that pre-date step 22) are skipped automatically by the
-    ``message_embeddings`` join.
+    Hits are ranked by a blend of semantic distance and recency::
+
+        score = (embedding <=> query)
+                - recency_weight * 0.5 ^ (age_days / half_life_days)
+
+    Lower score surfaces first. The recency term is bounded by
+    ``recency_weight`` (its max, for a brand-new message) and decays with
+    a half-life of ``half_life_days`` — so a recent-and-relevant message
+    outranks an ancient-and-equally-relevant one without letting recency
+    override a strong semantic match. ``half_life_days <= 0`` disables the
+    bonus (pure cosine).
+
+    For each of the top-``k`` hits we also pull the ``window`` messages on
+    either side (by thread order) so recalled context reads as a coherent
+    snippet rather than an isolated line; neighbors are included even if
+    they were never embedded. The most recent ``exclude_recent_n`` messages
+    are excluded — both as hits and as neighbors — since the verbatim
+    window already covers them. Results come back in chronological order.
+
+    Messages without embeddings are skipped as *hits* (the
+    ``message_embeddings`` join) but can still appear as *neighbors*.
 
     Returns an empty list if no embeddings exist for this thread yet.
     """
     rows = await conn.fetch(
         """
-        WITH recent AS (
+        WITH ordered AS (
+            SELECT m.id, m.thread_id, m.role, m.content, m.metadata,
+                   m.created_at,
+                   ROW_NUMBER() OVER (ORDER BY m.created_at ASC, m.id ASC) AS rn
+              FROM messages m
+             WHERE m.thread_id = $1
+        ),
+        recent AS (
             SELECT id
               FROM messages
              WHERE thread_id = $1
              ORDER BY created_at DESC, id DESC
              LIMIT $4
+        ),
+        hits AS (
+            SELECT o.rn,
+                   (e.embedding <=> $2)
+                     - COALESCE(
+                         $5 * POWER(
+                             0.5,
+                             EXTRACT(EPOCH FROM (NOW() - o.created_at))
+                                 / 86400.0 / NULLIF($6, 0)
+                         ),
+                         0
+                       ) AS score
+              FROM ordered o
+              JOIN message_embeddings e ON e.message_id = o.id
+             WHERE o.id NOT IN (SELECT id FROM recent)
+             ORDER BY score ASC
+             LIMIT $3
+        ),
+        window_rns AS (
+            SELECT DISTINCT o.rn
+              FROM ordered o
+              JOIN hits h ON o.rn BETWEEN h.rn - $7 AND h.rn + $7
         )
-        SELECT m.id, m.thread_id, m.role::text AS role, m.content,
-               m.metadata, m.created_at
-          FROM message_embeddings e
-          JOIN messages m ON m.id = e.message_id
-         WHERE m.thread_id = $1
-           AND m.id NOT IN (SELECT id FROM recent)
-         ORDER BY e.embedding <=> $2
-         LIMIT $3
+        SELECT o.id, o.thread_id, o.role::text AS role, o.content,
+               o.metadata, o.created_at
+          FROM ordered o
+          JOIN window_rns w ON o.rn = w.rn
+         WHERE o.id NOT IN (SELECT id FROM recent)
+         ORDER BY o.created_at ASC, o.id ASC
         """,
         thread_id, query_embedding, k, exclude_recent_n,
+        recency_weight, half_life_days, window,
     )
     return [_row_to_message(r) for r in rows]
 

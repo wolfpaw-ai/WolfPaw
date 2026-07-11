@@ -299,6 +299,9 @@ class PlannerAgent:
                     query_embedding=query_embedding,
                     k=settings.vector_recall_k,
                     exclude_recent_n=settings.recent_window_size,
+                    recency_weight=settings.vector_recall_recency_weight,
+                    half_life_days=settings.vector_recall_half_life_days,
+                    window=settings.vector_recall_window,
                 )
                 if thread_id is not None and query_embedding is not None
                 else []

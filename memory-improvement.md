@@ -2,15 +2,15 @@
 
 Goal: one continuous conversation per user across all channels, with a prompt that stays flat-sized no matter how long Wolfpaw is used. Storage stays entirely in Postgres — no eviction, cold archive, or external store at current scale. Four changes.
 
-## 1. Unify threads across channels
+## 1. Unify threads across channels (done)
 
 Drop the `channel` filter from thread resolution so web and Telegram (and future channels) resolve to one continuous conversation instead of separate per-channel threads. Change `get_most_recent_thread` in [conversational.py](src/wolfpaw/memory/conversational.py) to select the user's most-recent thread regardless of channel, and stamp the originating channel into `messages.metadata` on `append` so per-message provenance ("this came in over Telegram") survives the merge. `threads.channel` can stay as-is (it just records which channel created the thread). Keep `/reset` as an opt-in "start fresh" escape hatch, but it's no longer the default behavior.
 
-## 2. Single size-capped L3 fold (bound the summary stack)
+## 2. Single size-capped L3 fold (bound the summary stack) (done)
 
 This is the core prompt-growth fix, kept deliberately low-risk by extending the existing, working compaction machinery rather than replacing it. Today `fetch_summaries` injects *every* L2 summary into every prompt, and L2s accumulate linearly forever (no L3 fold, `CHECK (level BETWEEN 1 AND 2)`). Keep L1 and L2 exactly as they are, and add a **single** L3 row per thread (→ per user, once threads are unified) that is **rewritten in place** rather than accumulated: when enough new L2s build up, feed the summarizer `(current L3 + new L2s)` with an instruction to produce a fresh L3 within a fixed token budget (~1–1.5k tokens), enforced with a hard character-truncation guardrail as backstop. This is genuinely O(1) in the prompt. It is lossy by design — the L3 grows vaguer about the distant past as new material folds in, which is the accepted tradeoff (and mirrors how human long-term memory works). Implementation: bump the `CHECK` to `BETWEEN 1 AND 3`, add a `_drain_l3` that rewrites-not-inserts, and have `fetch_summaries` return the one L3 plus any un-folded L1/L2s.
 
-## 3. Recency-weighted vector search with windows
+## 3. Recency-weighted vector search with windows (in-progress)
 
 Today `search_relevant` ranks purely by cosine distance, so an ancient-but-relevant message can outrank a recent-but-relevant one. Add a time-decay term to the ranking (combined score `cosine_distance − λ·recency`, λ tuned) so newer context is preferred when relevance is close. Also retrieve small windows around each hit (matched message ± ~2 neighbors) instead of isolated messages, so recalled context keeps conversational coherence. Keep top-k fixed (start ~15–20, not 40 — more retrieved turns add noise, not signal).
 

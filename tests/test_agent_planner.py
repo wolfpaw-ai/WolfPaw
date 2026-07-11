@@ -101,7 +101,8 @@ def planner_env(monkeypatch):
         return []
 
     async def fake_search_relevant(
-        _conn, *, thread_id, query_embedding, k=5, exclude_recent_n=20,
+        _conn, *, thread_id, query_embedding, k=15, exclude_recent_n=20,
+        recency_weight=0.15, half_life_days=30.0, window=2,
     ):
         return []
 

@@ -120,7 +120,17 @@ class Settings(BaseSettings):
     compaction_window_size: int = 20
     compaction_trigger_threshold: int = 40  # recent_window + compaction_window
     l2_fold_threshold: int = 10
-    vector_recall_k: int = 5
+    # Per-thread vector recall (memory-improvement step 3). `k` hits are
+    # ranked by cosine distance minus a recency bonus so a recent-and-
+    # relevant message beats an ancient-and-equally-relevant one. The bonus
+    # is `recency_weight * 0.5^(age_days / half_life_days)` — bounded by
+    # `recency_weight` so it breaks near-ties without overriding a strong
+    # semantic match. Each hit is returned with `recall_window` neighbor
+    # messages on either side (by thread order) for conversational coherence.
+    vector_recall_k: int = 15
+    vector_recall_recency_weight: float = 0.15
+    vector_recall_half_life_days: float = 30.0
+    vector_recall_window: int = 2
     # L3 digest (memory-improvement step 2). Once `l3_fold_threshold`
     # un-folded L2s accumulate, they fold — together with the current L3
     # — into the thread's single rewritten-in-place L3 digest. `l3_max_tokens`
