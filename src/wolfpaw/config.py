@@ -121,6 +121,15 @@ class Settings(BaseSettings):
     compaction_trigger_threshold: int = 40  # recent_window + compaction_window
     l2_fold_threshold: int = 10
     vector_recall_k: int = 5
+    # L3 digest (memory-improvement step 2). Once `l3_fold_threshold`
+    # un-folded L2s accumulate, they fold — together with the current L3
+    # — into the thread's single rewritten-in-place L3 digest. `l3_max_tokens`
+    # bounds the summarizer's output; `l3_char_cap` is a hard truncation
+    # backstop so the digest that lands in every prompt can never blow past
+    # budget even if the model ignores its token limit.
+    l3_fold_threshold: int = 10
+    l3_max_tokens: int = 1200
+    l3_char_cap: int = 6000
 
     # Skills auto-emission (step 25). When the Post-Evaluator scores a
     # plan at or above `skill_emit_min_score` AND the plan looks

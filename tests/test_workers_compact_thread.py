@@ -39,6 +39,7 @@ async def _fresh_db(monkeypatch):
         for f in (
             "001_init.sql", "002_auth.sql", "003_sandbox.sql",
             "005_post_evaluator.sql", "008_conv_compaction.sql",
+            "017_l3_digest.sql",
         ):
             await apply_sql_file(conn, migrations_dir() / f)
     finally:
@@ -292,3 +293,158 @@ async def test_fetch_summaries_prefers_l2_after_fold():
     assert levels == [1, 2]
     assert "rolled up" in contents
     assert "L1-10" in contents  # the 11th L1, un-folded
+
+
+async def _insert_summaries(dsn: str, tid: UUID, level: int, n: int) -> None:
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        for i in range(n):
+            await conn.execute(
+                "INSERT INTO thread_summaries"
+                " (thread_id, level, summary_md) VALUES ($1, $2, $3)",
+                tid, level, f"L{level}-{i}",
+            )
+    finally:
+        await conn.close()
+
+
+async def test_compact_thread_folds_l2_into_single_l3():
+    """Once `l3_fold_threshold` un-folded L2s exist, the compactor folds
+    them into ONE L3 digest and stamps `folded_into_summary_id` on each."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _seed_thread(dsn, uid)
+    await _insert_summaries(dsn, tid, level=2, n=10)
+
+    saw_l3_mode = []
+
+    async def summarizer(items, _user_id):
+        kinds = {it.get("kind") for it in items}
+        if "level_2_summary" in kinds or "level_3_digest" in kinds:
+            saw_l3_mode.append(kinds)
+            return "L3 digest v1"
+        return "unexpected"
+
+    set_summarizer_for_test(summarizer)
+    await compact_thread(tid)
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        l3_rows = await conn.fetch(
+            "SELECT id, summary_md FROM thread_summaries"
+            " WHERE thread_id = $1 AND level = 3", tid,
+        )
+        folded = await conn.fetchval(
+            "SELECT COUNT(*) FROM thread_summaries"
+            " WHERE thread_id = $1 AND level = 2"
+            "   AND folded_into_summary_id IS NOT NULL", tid,
+        )
+    finally:
+        await conn.close()
+    assert len(l3_rows) == 1
+    assert l3_rows[0]["summary_md"] == "L3 digest v1"
+    assert folded == 10
+    assert saw_l3_mode  # the L3 branch actually ran
+
+
+async def test_l3_rewritten_in_place_never_accumulates():
+    """A second batch of 10 L2s must REWRITE the single L3 (feeding the
+    prior digest back in), not insert a second L3 row."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _seed_thread(dsn, uid)
+
+    versions = []
+    fed_prior_digest = []
+
+    async def summarizer(items, _user_id):
+        # Record whether the current digest was fed back on this call.
+        if any(it.get("kind") == "level_3_digest" for it in items):
+            fed_prior_digest.append(True)
+        v = f"L3 digest v{len(versions) + 1}"
+        versions.append(v)
+        return v
+
+    set_summarizer_for_test(summarizer)
+
+    # First batch → creates the L3.
+    await _insert_summaries(dsn, tid, level=2, n=10)
+    await compact_thread(tid)
+    # Second batch → should rewrite the same L3.
+    await _insert_summaries(dsn, tid, level=2, n=10)
+    await compact_thread(tid)
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        l3_rows = await conn.fetch(
+            "SELECT summary_md FROM thread_summaries"
+            " WHERE thread_id = $1 AND level = 3", tid,
+        )
+        folded = await conn.fetchval(
+            "SELECT COUNT(*) FROM thread_summaries"
+            " WHERE thread_id = $1 AND level = 2"
+            "   AND folded_into_summary_id IS NOT NULL", tid,
+        )
+    finally:
+        await conn.close()
+    assert len(l3_rows) == 1  # still exactly one L3
+    assert l3_rows[0]["summary_md"] == "L3 digest v2"  # rewritten
+    assert folded == 20  # both batches folded in
+    assert fed_prior_digest == [True]  # v1 was fed back into the v2 rewrite
+
+
+async def test_l3_char_cap_truncates_overrun():
+    """If the summarizer overruns, the stored L3 is hard-capped so it
+    can't blow the prompt budget."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _seed_thread(dsn, uid)
+    await _insert_summaries(dsn, tid, level=2, n=10)
+
+    from wolfpaw.config import get_settings
+
+    cap = get_settings().l3_char_cap
+
+    async def summarizer(items, _user_id):
+        return "x" * (cap + 5000)
+
+    set_summarizer_for_test(summarizer)
+    await compact_thread(tid)
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        digest = await conn.fetchval(
+            "SELECT summary_md FROM thread_summaries"
+            " WHERE thread_id = $1 AND level = 3", tid,
+        )
+    finally:
+        await conn.close()
+    assert len(digest) <= cap + 40  # cap + the truncation marker
+    assert digest.endswith("[digest truncated]")
+
+
+async def test_fetch_summaries_prefers_l3_after_fold():
+    """After L2s fold into the L3, fetch_summaries returns the L3 plus any
+    un-folded L2s, never the folded ones, ordered oldest-range first."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _seed_thread(dsn, uid)
+    await _insert_summaries(dsn, tid, level=2, n=11)  # 10 fold, 1 remains
+
+    async def summarizer(items, _user_id):
+        return "the digest"
+
+    set_summarizer_for_test(summarizer)
+    await compact_thread(tid)
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        rows = await conv.fetch_summaries(conn, thread_id=tid)
+    finally:
+        await conn.close()
+    levels = [r.level for r in rows]
+    contents = {r.summary_md for r in rows}
+    # L3 (oldest content) surfaces first, then the surviving un-folded L2.
+    assert levels == [3, 2]
+    assert "the digest" in contents
+    assert "L2-10" in contents  # the 11th L2, un-folded

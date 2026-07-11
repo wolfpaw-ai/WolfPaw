@@ -1,6 +1,6 @@
 """Compact a thread's older messages into tiered summaries.
 
-Two folds per invocation, both bounded by config knobs:
+Three folds per invocation, all bounded by config knobs:
 
 - **Level 1.** When a thread has at least
   ``compaction_trigger_threshold`` messages (default 40 = 20 verbatim +
@@ -13,6 +13,14 @@ Two folds per invocation, both bounded by config knobs:
   summary-of-summaries. The folded L1 rows stay in the table but get
   their ``folded_into_summary_id`` stamped so :func:`conv.fetch_summaries`
   prefers the L2.
+- **Level 3.** When at least ``l3_fold_threshold`` (default 10)
+  un-folded L2 summaries exist, fold them — together with the thread's
+  current L3 — into a **single** L3 digest that is rewritten in place
+  (never accumulated). This bounds the summary layer to O(1) in the
+  prompt no matter how long the conversation runs: the digest is a
+  fixed-budget rolling memory of the distant past, lossy by design.
+  Folded L2 rows get their ``folded_into_summary_id`` stamped so they
+  drop out of :func:`conv.fetch_summaries` in favor of the L3.
 
 The summarizer is injectable via :func:`set_summarizer_for_test` so
 unit tests can exercise the trigger + folding logic without a live
@@ -87,6 +95,14 @@ async def compact_thread(thread_id: UUID) -> None:
                 thread_id=thread_id,
                 user_id=user_id,
                 fold_threshold=settings.l2_fold_threshold,
+                summarizer=summarizer,
+            )
+            await _drain_l3(
+                conn,
+                thread_id=thread_id,
+                user_id=user_id,
+                fold_threshold=settings.l3_fold_threshold,
+                char_cap=settings.l3_char_cap,
                 summarizer=summarizer,
             )
     except Exception:  # noqa: BLE001
@@ -278,6 +294,121 @@ async def _drain_l2(
         )
 
 
+# --- level 3 (single rewritten-in-place digest) ----------------------------
+
+
+async def _drain_l3(
+    conn: asyncpg.Connection,
+    *,
+    thread_id: UUID,
+    user_id: UUID,
+    fold_threshold: int,
+    char_cap: int,
+    summarizer: Summarizer,
+) -> None:
+    """Fold the oldest ``fold_threshold`` un-folded L2s into the thread's
+    **single** L3 digest, rewriting it in place so the summary layer never
+    grows unbounded. Unlike L1/L2, this never inserts more than one row
+    per thread: the existing L3 (if any) is fed back to the summarizer
+    alongside the new L2s and the result overwrites it. Repeats until
+    fewer than ``fold_threshold`` un-folded L2s remain.
+
+    The digest is lossy by design — as new material folds in, the model
+    is asked to keep it within budget, so the oldest detail compresses
+    away. ``char_cap`` is a hard truncation backstop in case the model
+    overruns its token limit; the digest lands in every prompt, so its
+    size must be bounded regardless of model behavior."""
+    while True:
+        l2s = await conn.fetch(
+            """
+            SELECT id, summary_md,
+                   range_start_message_id, range_end_message_id, created_at
+              FROM thread_summaries
+             WHERE thread_id = $1 AND level = 2
+               AND folded_into_summary_id IS NULL
+             ORDER BY created_at ASC, id ASC
+             LIMIT $2
+            """,
+            thread_id, fold_threshold,
+        )
+        if len(l2s) < fold_threshold:
+            return
+
+        # At most one L3 per thread (the invariant this function upholds).
+        l3 = await conn.fetchrow(
+            "SELECT id, summary_md, range_start_message_id"
+            "  FROM thread_summaries WHERE thread_id = $1 AND level = 3",
+            thread_id,
+        )
+
+        items: list[dict] = []
+        if l3 is not None:
+            items.append(
+                {"kind": "level_3_digest", "summary_md": l3["summary_md"]}
+            )
+        items.extend(
+            {
+                "kind": "level_2_summary",
+                "summary_md": r["summary_md"],
+                "created_at": r["created_at"].isoformat(),
+            }
+            for r in l2s
+        )
+
+        digest_md = await summarizer(items, user_id)
+        if not digest_md:
+            log.warning(
+                "workers.compact_thread.l3.empty_summary",
+                thread_id=str(thread_id),
+            )
+            return
+        if len(digest_md) > char_cap:
+            digest_md = digest_md[:char_cap].rstrip() + "\n\n…[digest truncated]"
+
+        # New range spans from the digest's existing start (or the oldest
+        # L2 in this batch, on first creation) through the newest L2.
+        new_range_start = (
+            l3["range_start_message_id"] if l3 is not None
+            else l2s[0]["range_start_message_id"]
+        )
+        new_range_end = l2s[-1]["range_end_message_id"]
+
+        if l3 is not None:
+            l3_id = l3["id"]
+            await conn.execute(
+                "UPDATE thread_summaries"
+                "   SET summary_md = $1,"
+                "       range_start_message_id = $2,"
+                "       range_end_message_id = $3,"
+                "       created_at = NOW()"
+                " WHERE id = $4",
+                digest_md, new_range_start, new_range_end, l3_id,
+            )
+        else:
+            l3_id = await conn.fetchval(
+                """
+                INSERT INTO thread_summaries
+                    (thread_id, level, summary_md,
+                     range_start_message_id, range_end_message_id)
+                VALUES ($1, 3, $2, $3, $4)
+                RETURNING id
+                """,
+                thread_id, digest_md, new_range_start, new_range_end,
+            )
+
+        await conn.execute(
+            "UPDATE thread_summaries SET folded_into_summary_id = $1"
+            " WHERE id = ANY($2::uuid[])",
+            l3_id, [r["id"] for r in l2s],
+        )
+        log.info(
+            "workers.compact_thread.l3.updated",
+            thread_id=str(thread_id),
+            l2_count=len(l2s),
+            rewritten=l3 is not None,
+        )
+
+
 # --- arq job wrapper -------------------------------------------------------
 
 
@@ -324,6 +455,13 @@ _L2_SYSTEM_PROMPT = """You are the **Compactor**, folding several mid-level summ
 Write 4-10 short bullets. Be concrete. The reader is a future agent picking up the thread cold."""
 
 
+_L3_SYSTEM_PROMPT = """You are the **Compactor** maintaining the long-term memory digest of a very long-running chat thread. You are given the CURRENT digest (if one exists) followed by newer mid-level summaries that now need to be absorbed into it. Rewrite the whole thing into a SINGLE consolidated digest.
+
+This digest is fixed-budget: it lands in every future prompt, so it must not grow. Keep the most durable, load-bearing facts — who this user is, standing preferences and context, long-running projects, major decisions and outcomes — and let older, less-important specifics compress away or drop entirely. Recent material deserves more detail than distant material. It is expected and acceptable that the digest becomes vaguer about the distant past over time.
+
+Write tight Markdown, at most ~12 short bullets, grouped sensibly (e.g. "About the user", "Ongoing work", "History"). Be concrete. The reader is a future agent picking up the thread cold. Return ONLY the rewritten digest."""
+
+
 async def _haiku_summarizer(items: list[dict], user_id: UUID) -> str:
     """Production summarizer — Haiku call routed through the existing
     metering wrapper so cost lands in ``token_usage`` attributed to the
@@ -337,11 +475,25 @@ async def _haiku_summarizer(items: list[dict], user_id: UUID) -> str:
     if not items:
         return ""
 
-    is_l2 = items[0].get("kind") == "level_1_summary"
-    system_prompt = _L2_SYSTEM_PROMPT if is_l2 else _L1_SYSTEM_PROMPT
-    user_payload = _format_items_for_prompt(items, is_l2=is_l2)
+    # Route by the kind of the items being folded: L2 summaries or an L3
+    # digest → L3 rewrite; L1 summaries → L2 fold; raw messages → L1.
+    kinds = {it.get("kind") for it in items}
+    if "level_2_summary" in kinds or "level_3_digest" in kinds:
+        mode = "l3"
+    elif "level_1_summary" in kinds:
+        mode = "l2"
+    else:
+        mode = "l1"
 
     settings = get_settings()
+    system_prompt = {
+        "l1": _L1_SYSTEM_PROMPT,
+        "l2": _L2_SYSTEM_PROMPT,
+        "l3": _L3_SYSTEM_PROMPT,
+    }[mode]
+    max_tokens = settings.l3_max_tokens if mode == "l3" else 600
+    user_payload = _format_items_for_prompt(items, mode=mode)
+
     client = get_model_client()
     result = await client.call(
         user_id=user_id,
@@ -349,17 +501,42 @@ async def _haiku_summarizer(items: list[dict], user_id: UUID) -> str:
         model=settings.model_triage,  # Haiku
         messages=[{"role": "user", "content": user_payload}],
         system=system_prompt,
-        max_tokens=600,
+        max_tokens=max_tokens,
     )
     return result.text.strip()
 
 
-def _format_items_for_prompt(items: list[dict], *, is_l2: bool) -> str:
+def _format_items_for_prompt(items: list[dict], *, mode: str) -> str:
     """Render the messages-or-summaries window into a plain-text block
     Haiku can read without confusion. We don't ship the structure as
     JSON because Haiku tends to mirror JSON back as JSON, and we want
     Markdown out."""
-    if is_l2:
+    if mode == "l3":
+        # First item may be the current digest; the rest are new L2s to
+        # absorb. Label them so the model knows what to preserve vs fold.
+        lines: list[str] = []
+        rest = items
+        if items and items[0].get("kind") == "level_3_digest":
+            lines.append("# Current long-term digest\n")
+            lines.append(items[0]["summary_md"])
+            lines.append("")
+            rest = items[1:]
+        else:
+            lines.append("# Current long-term digest\n")
+            lines.append("(none yet — this is the first digest)")
+            lines.append("")
+        lines.append("# New summaries to absorb (chronological)\n")
+        for it in rest:
+            lines.append("---")
+            lines.append(it["summary_md"])
+        lines.append("---")
+        lines.append(
+            "\nRewrite the current digest and the new summaries into one"
+            " consolidated fixed-budget digest."
+        )
+        return "\n".join(lines)
+
+    if mode == "l2":
         lines = ["# Previous summaries (chronological)\n"]
         for it in items:
             lines.append("---")

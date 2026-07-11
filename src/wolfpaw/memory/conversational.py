@@ -239,9 +239,11 @@ async def fetch_summaries(
 ) -> list[ThreadSummary]:
     """Return the active summaries for this thread, oldest range first.
 
-    "Active" means: every level-2 summary, plus every level-1 summary
-    that hasn't been folded into a level-2 yet (NULL ``folded_into_summary_id``).
-    A reader sees each older message-range covered by at most one
+    "Active" means every summary that hasn't been folded into a
+    higher-level one — i.e. ``folded_into_summary_id IS NULL``. That
+    surfaces: the single L3 digest (the top of the ladder, never folded),
+    every L2 not yet folded into the L3, and every L1 not yet folded into
+    an L2. A reader sees each older message-range covered by at most one
     summary — the highest level available for that range.
 
     Returns an empty list when no compaction has happened yet (new
@@ -253,8 +255,8 @@ async def fetch_summaries(
                range_start_message_id, range_end_message_id, created_at
           FROM thread_summaries
          WHERE thread_id = $1
-           AND (level = 2 OR folded_into_summary_id IS NULL)
-         ORDER BY created_at ASC
+           AND folded_into_summary_id IS NULL
+         ORDER BY level DESC, created_at ASC
         """,
         thread_id,
     )

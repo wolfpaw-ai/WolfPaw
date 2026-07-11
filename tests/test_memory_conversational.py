@@ -235,8 +235,11 @@ async def test_fetch_summaries_returns_unfolded_l1_only():
     # L1 alpha (folded) drops out; L1 beta (un-folded) stays; L2 stays.
     contents = {s.summary_md for s in summaries}
     assert contents == {"L1 beta", "L2 covering alpha"}
-    # And the ordering is chronological by created_at.
-    assert [s.summary_md for s in summaries] == ["L1 beta", "L2 covering alpha"]
+    # Ordering is oldest-range-first: the L2 (which covers the older
+    # "alpha" range) precedes the newer un-folded L1. fetch_summaries
+    # orders by level DESC then created_at ASC, since higher levels
+    # always cover strictly older content than surviving lower ones.
+    assert [s.summary_md for s in summaries] == ["L2 covering alpha", "L1 beta"]
 
 
 async def _seed_msg_with_embedding(
