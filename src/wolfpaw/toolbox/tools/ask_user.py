@@ -24,6 +24,7 @@ Executor as the tool's return value.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from wolfpaw.memory import task_events, tasks as tasks_dao
@@ -130,6 +131,30 @@ class AskUserTool(Tool):
                 )
         except Exception:  # noqa: BLE001
             log.warning("tools.ask_user.persist_failed", exc_info=True)
+
+        # Push the question to the user's live channel. Without this the
+        # DB row above is invisible — the client never learns a question
+        # is pending, never POSTs an answer, and the await below hangs to
+        # timeout. This emit is the outbound leg that makes the pause real.
+        if ctx.emit is not None:
+            try:
+                payload = json.dumps({
+                    "question_id": str(pq.id),
+                    "question": question,
+                    "options": options or [],
+                    "urgency": urgency,
+                })
+                result = ctx.emit("ask_user", payload)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # noqa: BLE001 — emit failure shouldn't crash the task
+                log.warning("tools.ask_user.emit_failed", exc_info=True)
+        else:
+            log.warning(
+                "tools.ask_user.no_emit",
+                task_id=str(ctx.task_id),
+                question_id=str(pq.id),
+            )
 
         # Wait for the answer.
         try:

@@ -291,7 +291,7 @@ class TaskService:
         precomputed_plan: Plan | None = None,
         agentic: bool = False,
     ) -> TaskOutcome:
-        ctx = ToolContext(user_id=user_id, task_id=task_id)
+        ctx = ToolContext(user_id=user_id, task_id=task_id, emit=emit)
 
         # Transition to running.
         await self._transition(

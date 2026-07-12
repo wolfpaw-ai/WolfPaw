@@ -22,8 +22,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import UUID
+
+# Channel emit callback: (event, data) → pushed to the user's live stream
+# (e.g. the web SSE queue). Defined here — the lowest layer — so tools can
+# type against it without importing the router/executor (which import this
+# module). Mirrors the `EmitFn` aliases in router.py / executor.py.
+EmitFn = Callable[[str, str], Awaitable[None] | None]
 
 
 class ToolError(Exception):
@@ -47,6 +53,11 @@ class ToolContext:
     # 'slack' | ...). Threads are channel-agnostic, but each persisted
     # message records where it came from via `messages.metadata.channel`.
     channel: str | None = None
+    # Live channel emit callback for tools that must push something to the
+    # user mid-run — notably `ask_user`, which emits an `ask_user` event so
+    # the client can surface the question and POST an answer back. None when
+    # the turn has no live stream (e.g. a subagent with no channel).
+    emit: EmitFn | None = None
 
 
 class Tool(ABC):
