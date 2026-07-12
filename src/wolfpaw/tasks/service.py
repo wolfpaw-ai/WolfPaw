@@ -49,7 +49,6 @@ from wolfpaw.agents.skill_distiller import maybe_distill_skill
 from wolfpaw.memory import procedural, task_events, tasks as tasks_dao
 from wolfpaw.memory.db import acquire
 from wolfpaw.schemas import ExecutionPlan, Plan, PostEvalVerdict
-from wolfpaw.tasks.ask_user_registry import AskUserRegistry, get_registry
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -76,14 +75,12 @@ class TaskService:
         pre_evaluator: PlanPreEvaluatorAgent | None = None,
         post_evaluator: PostEvaluatorAgent | None = None,
         quick: QuickAgent | None = None,
-        registry: AskUserRegistry | None = None,
     ) -> None:
         self._planner = planner
         self._executor = executor
         self._pre_evaluator = pre_evaluator
         self._post_evaluator = post_evaluator
         self._quick = quick
-        self._registry = registry
 
     @property
     def planner(self) -> PlannerAgent:
@@ -104,10 +101,6 @@ class TaskService:
     @property
     def quick(self) -> QuickAgent:
         return self._quick or get_quick_agent()
-
-    @property
-    def registry(self) -> AskUserRegistry:
-        return self._registry or get_registry()
 
     # --- public entry points -------------------------------------------------
 

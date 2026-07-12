@@ -1,18 +1,26 @@
-"""`ask_user` tool — pause/resume flow with stubbed DB writes.
+"""`ask_user` tool — durable pause/resume orchestration, DB + channel stubbed.
 
-Covers: requires ctx.task_id, registers a question, awaits + returns the
-answer, times out cleanly, surfaces input validation."""
+Covers: requires ctx.task_id, input validation, delivery via the live stream
+(web emit) vs a proactive channel push (Telegram), answer return, and timeout.
+The DB layer (`pending_questions` DAO) and channel delivery are monkeypatched
+so this stays a fast unit test; the real LISTEN/NOTIFY wait is exercised by the
+DB-backed suite."""
 
 from __future__ import annotations
 
-import asyncio
+import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-from wolfpaw.tasks.ask_user_registry import AskUserRegistry, get_registry
-from wolfpaw.toolbox.registry import ToolContext, ToolError, get_registry as get_tool_registry
+from wolfpaw.memory.pending_questions import AnswerOutcome
+from wolfpaw.toolbox.registry import (
+    ToolContext,
+    ToolError,
+    get_registry as get_tool_registry,
+)
 
 
 @asynccontextmanager
@@ -20,61 +28,59 @@ async def _fake_acquire():
     yield None
 
 
-@pytest.fixture(autouse=True)
-def _stub_db(monkeypatch):
-    """Stub out the DB writes the tool does on pause / resume / timeout."""
-    transitions: list[str] = []
+@pytest.fixture
+def stub(monkeypatch):
+    """Stub the DB writes + the durable wait. Returns a control object the
+    test tunes (the answer to hand back) and inspects (what got recorded)."""
+    state = SimpleNamespace(
+        transitions=[],
+        created=None,
+        answer_to_return=SimpleNamespace(status="answered", answer="yes"),
+        wait_returns_none=False,
+    )
+
+    async def fake_create(_conn, *, task_id, user_id, question, thread_id=None,
+                          channel=None, options=None, urgency="normal"):
+        state.created = SimpleNamespace(
+            id=uuid4(), question=question, options=options, channel=channel,
+        )
+        return state.created
+
+    async def fake_wait(*, question_id, timeout):
+        return None if state.wait_returns_none else state.answer_to_return
 
     async def fake_mark_awaiting(_conn, *, task_id, reason=None):
-        transitions.append("awaiting_user")
-        return None
+        state.transitions.append("awaiting_user")
 
     async def fake_mark_started(_conn, *, task_id):
-        transitions.append("running")
-        return None
+        state.transitions.append("running")
 
     async def fake_mark_blocked(_conn, *, task_id, reason):
-        transitions.append("blocked")
-        return None
+        state.transitions.append("blocked")
+
+    async def fake_mark_timeout(_conn, *, question_id):
+        state.transitions.append("q_timeout")
 
     async def fake_append_event(_conn, *, task_id, event_type, content=None):
-        transitions.append(f"event:{event_type}")
+        state.transitions.append(f"event:{event_type}")
         return uuid4()
 
-    monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
     monkeypatch.setattr("wolfpaw.toolbox.tools.ask_user.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.toolbox.tools.ask_user.pq_dao.create", fake_create)
+    monkeypatch.setattr("wolfpaw.toolbox.tools.ask_user.pq_dao.wait_for_answer", fake_wait)
+    monkeypatch.setattr("wolfpaw.toolbox.tools.ask_user.pq_dao.mark_timeout", fake_mark_timeout)
     monkeypatch.setattr(
-        "wolfpaw.toolbox.tools.ask_user.tasks_dao.mark_awaiting_user",
-        fake_mark_awaiting,
-    )
+        "wolfpaw.toolbox.tools.ask_user.tasks_dao.mark_awaiting_user", fake_mark_awaiting)
     monkeypatch.setattr(
-        "wolfpaw.toolbox.tools.ask_user.tasks_dao.mark_started",
-        fake_mark_started,
-    )
+        "wolfpaw.toolbox.tools.ask_user.tasks_dao.mark_started", fake_mark_started)
     monkeypatch.setattr(
-        "wolfpaw.toolbox.tools.ask_user.tasks_dao.mark_blocked",
-        fake_mark_blocked,
-    )
+        "wolfpaw.toolbox.tools.ask_user.tasks_dao.mark_blocked", fake_mark_blocked)
     monkeypatch.setattr(
-        "wolfpaw.toolbox.tools.ask_user.task_events.append_event",
-        fake_append_event,
-    )
-
-    yield transitions
+        "wolfpaw.toolbox.tools.ask_user.task_events.append_event", fake_append_event)
+    return state
 
 
-@pytest.fixture
-def fresh_registry(monkeypatch):
-    """Each test gets its own AskUserRegistry so cross-test pollution
-    can't happen."""
-    reg = AskUserRegistry()
-    monkeypatch.setattr(
-        "wolfpaw.toolbox.tools.ask_user.get_registry", lambda: reg,
-    )
-    return reg
-
-
-# --- tests -----------------------------------------------------------------
+# --- validation (no DB needed) ---------------------------------------------
 
 
 async def test_requires_task_id():
@@ -84,91 +90,89 @@ async def test_requires_task_id():
         await tool.run(ctx, question="should I proceed?")
 
 
-async def test_requires_nonempty_question(fresh_registry):
+async def test_requires_nonempty_question():
     tool = get_tool_registry().get("ask_user")
     ctx = ToolContext(user_id=uuid4(), task_id=uuid4())
     with pytest.raises(ToolError, match="question"):
         await tool.run(ctx, question="   ")
 
 
-async def test_options_must_be_list(fresh_registry):
+async def test_options_must_be_list():
     tool = get_tool_registry().get("ask_user")
     ctx = ToolContext(user_id=uuid4(), task_id=uuid4())
     with pytest.raises(ToolError, match="options"):
         await tool.run(ctx, question="?", options="yes")
 
 
-async def test_pause_then_resume_returns_answer(_stub_db, fresh_registry):
+# --- delivery + resume ------------------------------------------------------
+
+
+async def test_emits_to_live_stream_when_present(stub):
+    """Web path: a question with an open stream is emitted as an `ask_user`
+    event (not pushed via a channel)."""
     tool = get_tool_registry().get("ask_user")
-    uid = uuid4()
-    ctx = ToolContext(user_id=uid, task_id=uuid4())
-
-    # Kick off the tool call.
-    tool_task = asyncio.create_task(tool.run(ctx, question="overwrite?"))
-    # Give the tool a chance to register the question.
-    for _ in range(20):
-        await asyncio.sleep(0)
-        if fresh_registry._pending:  # type: ignore[attr-defined]
-            break
-    assert fresh_registry._pending, "tool didn't register a question"  # type: ignore[attr-defined]
-    question_id = next(iter(fresh_registry._pending))  # type: ignore[attr-defined]
-
-    # Submit the answer.
-    await fresh_registry.submit_answer(
-        question_id=question_id, user_id=uid, answer="yes",
-    )
-    result = await tool_task
-    assert result == {"question_id": str(question_id), "answer": "yes"}
-    # Transitions hit: awaiting_user → user_question event → running → user_answer event.
-    assert "awaiting_user" in _stub_db
-    assert "event:user_question" in _stub_db
-    assert "running" in _stub_db
-    assert "event:user_answer" in _stub_db
-
-
-async def test_emits_ask_user_event_before_awaiting(_stub_db, fresh_registry):
-    """The outbound leg: the tool must push an `ask_user` event to the
-    channel so the client learns a question is pending. Without this the
-    question is invisible and the await below just hangs to timeout —
-    the original bug."""
-    import json
-
-    tool = get_tool_registry().get("ask_user")
-    uid = uuid4()
     emitted: list[tuple[str, str]] = []
 
     async def emit(event, data):
         emitted.append((event, data))
 
-    ctx = ToolContext(user_id=uid, task_id=uuid4(), emit=emit)
-    tool_task = asyncio.create_task(
-        tool.run(ctx, question="overwrite notes.md?", options=["yes", "no"])
-    )
-    for _ in range(20):
-        await asyncio.sleep(0)
-        if emitted:
-            break
-    assert emitted, "tool never emitted the question to the channel"
-    event, data = emitted[0]
-    assert event == "ask_user"
-    payload = json.loads(data)
-    question_id = next(iter(fresh_registry._pending))  # type: ignore[attr-defined]
-    assert payload["question_id"] == str(question_id)
+    ctx = ToolContext(user_id=uuid4(), task_id=uuid4(), channel="web", emit=emit)
+    result = await tool.run(
+        ctx, question="overwrite notes.md?", options=["yes", "no"])
+
+    assert emitted and emitted[0][0] == "ask_user"
+    payload = json.loads(emitted[0][1])
     assert payload["question"] == "overwrite notes.md?"
     assert payload["options"] == ["yes", "no"]
+    assert result["answer"] == "yes"
+    assert "awaiting_user" in stub.transitions
+    assert "event:user_question" in stub.transitions
+    assert "running" in stub.transitions
+    assert "event:user_answer" in stub.transitions
 
-    # Resolve so the awaiting task doesn't leak.
-    await fresh_registry.submit_answer(
-        question_id=question_id, user_id=uid, answer="yes",
-    )
-    await tool_task
 
-
-async def test_timeout_marks_blocked_and_raises(_stub_db, fresh_registry):
+async def test_pushes_via_channel_when_no_stream(stub, monkeypatch):
+    """Telegram path: no emit → the question is pushed through the channel's
+    send(), and the options are rendered into the message text."""
     tool = get_tool_registry().get("ask_user")
-    ctx = ToolContext(user_id=uuid4(), task_id=uuid4())
+    sent: list[tuple] = []
+
+    class FakeChannel:
+        async def send(self, user_id, content, **kwargs):
+            sent.append((user_id, content))
+
+    monkeypatch.setattr(
+        "wolfpaw.toolbox.tools.ask_user.get_channel", lambda name: FakeChannel())
+
+    ctx = ToolContext(user_id=uuid4(), task_id=uuid4(), channel="telegram")
+    result = await tool.run(ctx, question="ship it?", options=["yes", "no"])
+
+    assert len(sent) == 1
+    _, content = sent[0]
+    assert "ship it?" in content
+    assert "1. yes" in content and "2. no" in content
+    assert result["answer"] == "yes"
+
+
+async def test_returns_the_answer(stub):
+    tool = get_tool_registry().get("ask_user")
+    stub.answer_to_return = SimpleNamespace(status="answered", answer="the moon")
+    ctx = ToolContext(user_id=uuid4(), task_id=uuid4(), channel="web",
+                      emit=_noop_emit)
+    result = await tool.run(ctx, question="where to?")
+    assert result["answer"] == "the moon"
+
+
+async def test_timeout_marks_blocked_and_raises(stub):
+    tool = get_tool_registry().get("ask_user")
+    stub.wait_returns_none = True
+    ctx = ToolContext(user_id=uuid4(), task_id=uuid4(), channel="web",
+                      emit=_noop_emit)
     with pytest.raises(ToolError, match="timed out"):
-        # 1-second timeout, no answer submitted.
-        await tool.run(ctx, question="?", timeout_seconds=1)
-    assert "blocked" in _stub_db
-    assert "event:user_question_timeout" in _stub_db
+        await tool.run(ctx, question="still there?", timeout_seconds=1)
+    assert "q_timeout" in stub.transitions
+    assert "blocked" in stub.transitions
+
+
+async def _noop_emit(event, data):
+    return None

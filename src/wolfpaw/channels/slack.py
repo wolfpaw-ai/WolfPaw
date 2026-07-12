@@ -55,7 +55,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from wolfpaw.agents.router import get_router
 from wolfpaw.auth.deps import require_user_id
-from wolfpaw.channels import Channel, InboundMessage
+from wolfpaw.channels import Channel, InboundMessage, register_channel
 from wolfpaw.channels.commands import get_dispatcher
 from wolfpaw.channels.slack_client import (
     SlackApiError,
@@ -144,7 +144,7 @@ class SlackChannel(Channel):
         return False
 
 
-_channel = SlackChannel()
+_channel = register_channel(SlackChannel())
 
 
 # --- /install-url (web client → us) --------------------------------------
