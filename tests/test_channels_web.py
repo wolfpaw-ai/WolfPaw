@@ -6,6 +6,7 @@ Auth is bypassed via dependency override so these tests don't need the DB.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from wolfpaw.api import create_app
 from wolfpaw.auth.deps import require_user_id
+from wolfpaw.memory.conversational import Message
 
 
 @asynccontextmanager
@@ -296,3 +298,85 @@ def test_chat_preserves_trace_id_header():
         headers={"x-trace-id": "a" * 32},
     )
     assert r.headers["x-trace-id"] == "a" * 32
+
+
+# --- GET /channels/web/messages (history) ---------------------------------
+
+
+def _msg(thread_id: UUID, role: str, content: str) -> Message:
+    return Message(
+        id=uuid4(), thread_id=thread_id, role=role, content=content,
+        metadata={}, created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_messages_requires_auth():
+    app = create_app()
+    r = TestClient(app).get("/channels/web/messages")
+    assert r.status_code == 401
+
+
+def test_messages_returns_history_page(monkeypatch):
+    thread_id = uuid4()
+    page = [_msg(thread_id, "user", "hi"), _msg(thread_id, "assistant", "yo")]
+    monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_most_recent_thread",
+        lambda _conn, **_kw: _async_return(thread_id),
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.fetch_page",
+        lambda _conn, **_kw: _async_return(page),
+    )
+
+    r = _client().get("/channels/web/messages")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["thread_id"] == str(thread_id)
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "hi"), ("assistant", "yo"),
+    ]
+    assert body["has_more"] is False
+
+
+def test_messages_flags_has_more_and_trims_extra(monkeypatch):
+    """fetch_page over-fetches by one; the endpoint drops the oldest extra
+    and reports has_more."""
+    thread_id = uuid4()
+    # Endpoint asks for limit+1; simulate 3 rows for a limit of 2.
+    page = [
+        _msg(thread_id, "user", "m0"),
+        _msg(thread_id, "assistant", "m1"),
+        _msg(thread_id, "user", "m2"),
+    ]
+    monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_most_recent_thread",
+        lambda _conn, **_kw: _async_return(thread_id),
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.fetch_page",
+        lambda _conn, **_kw: _async_return(page),
+    )
+
+    r = _client().get("/channels/web/messages?limit=2")
+    body = r.json()
+    assert body["has_more"] is True
+    # Oldest extra ("m0") dropped, newest two kept in order.
+    assert [m["content"] for m in body["messages"]] == ["m1", "m2"]
+
+
+def test_messages_empty_when_user_has_no_thread(monkeypatch):
+    monkeypatch.setattr("wolfpaw.memory.db.acquire", _fake_acquire)
+    monkeypatch.setattr("wolfpaw.channels.web.acquire", _fake_acquire)
+    monkeypatch.setattr(
+        "wolfpaw.channels.web.conv.get_most_recent_thread",
+        lambda _conn, **_kw: _async_return(None),
+    )
+
+    r = _client().get("/channels/web/messages")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"thread_id": None, "messages": [], "has_more": False}

@@ -234,6 +234,48 @@ async def fetch_recent(
     return out
 
 
+async def fetch_page(
+    conn: asyncpg.Connection,
+    *,
+    thread_id: UUID,
+    before_created_at: datetime | None = None,
+    before_id: UUID | None = None,
+    limit: int = 30,
+    roles: tuple[str, ...] | None = None,
+) -> list[Message]:
+    """Return up to `limit` messages from a thread in chronological order
+    (oldest first), ending just before the `(before_created_at, before_id)`
+    keyset cursor. With no cursor, returns the newest `limit` messages.
+
+    Built for backwards infinite-scroll in the web UI: pass the oldest
+    currently-shown message's `(created_at, id)` as the cursor to fetch the
+    page immediately before it. Uses keyset (not OFFSET) pagination on the
+    `(created_at, id)` order, so it's stable under concurrent inserts and
+    served by the `messages_thread_idx` index. `roles` optionally restricts
+    the result to given message roles — the chat UI passes
+    `("user", "assistant")` to skip tool/system rows.
+    """
+    conds = ["thread_id = $1"]
+    params: list[Any] = [thread_id]
+    if roles is not None:
+        params.append(list(roles))
+        conds.append(f"role = ANY(${len(params)}::message_role[])")
+    if before_created_at is not None and before_id is not None:
+        params.append(before_created_at)
+        params.append(before_id)
+        conds.append(f"(created_at, id) < (${len(params) - 1}, ${len(params)})")
+    params.append(limit)
+    rows = await conn.fetch(
+        "SELECT id, thread_id, role::text AS role, content, metadata, created_at"
+        f"  FROM messages WHERE {' AND '.join(conds)}"
+        f" ORDER BY created_at DESC, id DESC LIMIT ${len(params)}",
+        *params,
+    )
+    out = [_row_to_message(r) for r in rows]
+    out.reverse()
+    return out
+
+
 async def fetch_summaries(
     conn: asyncpg.Connection, *, thread_id: UUID
 ) -> list[ThreadSummary]:
