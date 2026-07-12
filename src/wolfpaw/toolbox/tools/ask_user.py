@@ -2,34 +2,41 @@
 
 This is how Wolfpaw's "ask before destructive actions" promise becomes
 real instead of aspirational. The Executor invokes `ask_user` mid-plan;
-the task transitions to `awaiting_user`, a `user_question` task_event
-is recorded, the channel pushes the question to the user, and this
-coroutine awaits the answer.
+the task transitions to `awaiting_user`, the question is persisted to the
+`pending_questions` table (the durable source of truth), delivered to the
+user through their channel, and this coroutine waits for the answer.
 
 Requires `ctx.task_id` — `ask_user` only works inside a Task (the state
 machine needs somewhere to sit). Invoked from a plan-only path (no
 task), it returns a `ToolError` so the agent surfaces the misuse rather
 than hanging forever.
 
-The reply path is channel-specific:
-    - web: POST /channels/web/answer with {question_id, answer}
-    - telegram (step 18): next inbound message in the user's thread
-      is treated as the answer
+Delivery is channel-shaped:
+    - live stream present (web SSE, `ctx.emit`): emit an `ask_user` event
+      so the client shows a reply box and POSTs /channels/web/answer.
+    - no stream (Telegram/Slack, `ctx.emit is None`): push the question
+      proactively via the channel's `send()`. The user's next inbound
+      message is matched to this pending question and becomes the answer.
 
-Reply submission resolves the asyncio.Future the tool is awaiting; the
-task is transitioned back to `running` and the answer flows back to the
-Executor as the tool's return value.
+Either way the wait is durable: `pending_questions.wait_for_answer` blocks
+on a Postgres LISTEN/NOTIFY signal, not an in-process future — so the ask
+and the answer can happen in different processes (inline web request vs
+arq worker) and still meet at the row.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
+from uuid import UUID
 
-from wolfpaw.memory import task_events, tasks as tasks_dao
+from wolfpaw.channels import get_channel
+from wolfpaw.memory import (
+    pending_questions as pq_dao,
+    task_events,
+    tasks as tasks_dao,
+)
 from wolfpaw.memory.db import acquire
-from wolfpaw.tasks.ask_user_registry import get_registry
 from wolfpaw.toolbox.registry import (
     Tool,
     ToolContext,
@@ -39,6 +46,20 @@ from wolfpaw.toolbox.registry import (
 from wolfpaw.tracing import get_logger
 
 log = get_logger()
+
+
+def _format_for_push(question: str, options: list[str] | None) -> str:
+    """Render the question for a proactive channel push (Telegram/Slack),
+    where there's no reply-box UI — options become a numbered list the user
+    can answer with free text."""
+    if not options:
+        return question
+    lines = [question, ""]
+    for i, opt in enumerate(options, 1):
+        lines.append(f"{i}. {opt}")
+    lines.append("")
+    lines.append("Reply with your choice.")
+    return "\n".join(lines)
 
 
 @register_tool
@@ -101,19 +122,21 @@ class AskUserTool(Tool):
         urgency = inputs.get("urgency") or "normal"
         timeout = max(1, int(inputs.get("timeout_seconds") or 300))
 
-        registry = get_registry()
-        pq = await registry.register(
-            user_id=ctx.user_id,
-            task_id=ctx.task_id,
-            thread_id=None,
-            question=question,
-            options=options,
-            urgency=str(urgency),
-        )
-
-        # State transition + question_asked event.
+        # Persist the question (source of truth) + mark the task awaiting +
+        # log a timeline event, in one connection.
         try:
             async with acquire() as conn:
+                pq = await pq_dao.create(
+                    conn,
+                    task_id=ctx.task_id,
+                    user_id=ctx.user_id,
+                    thread_id=None,
+                    channel=ctx.channel,
+                    question=question,
+                    options=options,
+                    urgency=str(urgency),
+                    timeout_seconds=timeout,
+                )
                 await tasks_dao.mark_awaiting_user(
                     conn, task_id=ctx.task_id,
                     reason=f"ask_user: {question[:80]}",
@@ -129,40 +152,24 @@ class AskUserTool(Tool):
                         "urgency": urgency,
                     },
                 )
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — can't proceed without the row
             log.warning("tools.ask_user.persist_failed", exc_info=True)
+            raise ToolError(f"couldn't record the question: {e}")
 
-        # Push the question to the user's live channel. Without this the
-        # DB row above is invisible — the client never learns a question
-        # is pending, never POSTs an answer, and the await below hangs to
-        # timeout. This emit is the outbound leg that makes the pause real.
-        if ctx.emit is not None:
-            try:
-                payload = json.dumps({
-                    "question_id": str(pq.id),
-                    "question": question,
-                    "options": options or [],
-                    "urgency": urgency,
-                })
-                result = ctx.emit("ask_user", payload)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:  # noqa: BLE001 — emit failure shouldn't crash the task
-                log.warning("tools.ask_user.emit_failed", exc_info=True)
-        else:
-            log.warning(
-                "tools.ask_user.no_emit",
-                task_id=str(ctx.task_id),
-                question_id=str(pq.id),
-            )
+        # Deliver the question to the user. A live stream takes the emit
+        # path (web SSE); otherwise push proactively via the channel.
+        await self._deliver(ctx, pq.id, question, options, urgency)
 
-        # Wait for the answer.
-        try:
-            answer = await asyncio.wait_for(pq.answer_future, timeout=timeout)
-        except asyncio.TimeoutError:
-            await registry.cancel(pq.id, "timeout")
+        # Wait durably for the answer (LISTEN/NOTIFY, cross-process safe).
+        resolved = await pq_dao.wait_for_answer(
+            question_id=pq.id, timeout=float(timeout),
+        )
+
+        if resolved is None or resolved.status == "pending":
+            # Timed out with no answer.
             try:
                 async with acquire() as conn:
+                    await pq_dao.mark_timeout(conn, question_id=pq.id)
                     await tasks_dao.mark_blocked(
                         conn, task_id=ctx.task_id,
                         reason=f"ask_user timed out after {timeout}s",
@@ -178,6 +185,12 @@ class AskUserTool(Tool):
                 f"ask_user timed out after {timeout}s waiting for a reply"
             )
 
+        if resolved.status != "answered":
+            # Cancelled (task cancelled while awaiting) — surface it.
+            raise ToolError(f"ask_user was {resolved.status} before an answer")
+
+        answer = resolved.answer or ""
+
         # Got an answer. Resume the task.
         try:
             async with acquire() as conn:
@@ -191,3 +204,53 @@ class AskUserTool(Tool):
             log.warning("tools.ask_user.resume_persist_failed", exc_info=True)
 
         return {"question_id": str(pq.id), "answer": answer}
+
+    async def _deliver(
+        self,
+        ctx: ToolContext,
+        question_id: UUID,
+        question: str,
+        options: list[str] | None,
+        urgency: str,
+    ) -> None:
+        """Surface the question to the user. Emit into a live stream if one
+        exists; else push proactively through the originating channel. Best
+        effort — a delivery failure leaves the row pending and the wait will
+        time out rather than crash the task."""
+        if ctx.emit is not None:
+            try:
+                payload = json.dumps({
+                    "question_id": str(question_id),
+                    "question": question,
+                    "options": options or [],
+                    "urgency": urgency,
+                })
+                result = ctx.emit("ask_user", payload)
+                if hasattr(result, "__await__"):
+                    await result
+                return
+            except Exception:  # noqa: BLE001
+                log.warning("tools.ask_user.emit_failed", exc_info=True)
+                return
+
+        channel = get_channel(ctx.channel) if ctx.channel else None
+        if channel is None:
+            log.warning(
+                "tools.ask_user.no_delivery_channel",
+                task_id=str(ctx.task_id),
+                question_id=str(question_id),
+                channel=ctx.channel,
+            )
+            return
+        try:
+            await channel.send(
+                ctx.user_id, _format_for_push(question, options),
+            )
+        except NotImplementedError:
+            # e.g. web with no live stream — no push transport yet.
+            log.warning(
+                "tools.ask_user.channel_no_push",
+                channel=ctx.channel, question_id=str(question_id),
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("tools.ask_user.channel_send_failed", exc_info=True)

@@ -49,7 +49,6 @@ from wolfpaw.agents.skill_distiller import maybe_distill_skill
 from wolfpaw.memory import procedural, task_events, tasks as tasks_dao
 from wolfpaw.memory.db import acquire
 from wolfpaw.schemas import ExecutionPlan, Plan, PostEvalVerdict
-from wolfpaw.tasks.ask_user_registry import AskUserRegistry, get_registry
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -76,14 +75,12 @@ class TaskService:
         pre_evaluator: PlanPreEvaluatorAgent | None = None,
         post_evaluator: PostEvaluatorAgent | None = None,
         quick: QuickAgent | None = None,
-        registry: AskUserRegistry | None = None,
     ) -> None:
         self._planner = planner
         self._executor = executor
         self._pre_evaluator = pre_evaluator
         self._post_evaluator = post_evaluator
         self._quick = quick
-        self._registry = registry
 
     @property
     def planner(self) -> PlannerAgent:
@@ -105,10 +102,6 @@ class TaskService:
     def quick(self) -> QuickAgent:
         return self._quick or get_quick_agent()
 
-    @property
-    def registry(self) -> AskUserRegistry:
-        return self._registry or get_registry()
-
     # --- public entry points -------------------------------------------------
 
     async def create(
@@ -120,6 +113,7 @@ class TaskService:
         title: str,
         description: str | None = None,
         channel_for_completion: str | None = None,
+        channel: str | None = None,
         complexity_hint: str = "moderate",
         parent_task_id: UUID | None = None,
         budget_cents: int | None = None,
@@ -129,6 +123,12 @@ class TaskService:
         event with the inputs the worker will need (content, thread_id,
         complexity_hint live in the event's `content` JSONB so the run
         side can recover them without a separate side-table).
+
+        ``channel`` is the originating channel ('web' | 'telegram' | ...).
+        It's persisted into the pending event and restored in :meth:`run`
+        so ``ask_user`` — which fires deep inside the executor — can push
+        the question back through the same channel the request came in on.
+        Without it a backgrounded task has no way to reach the user.
 
         ``agentic`` set → the run executes as a tool loop (Quick agent's
         engine) instead of the planner→executor pipeline. Scheduled tasks
@@ -155,6 +155,7 @@ class TaskService:
                     "content": content,
                     "thread_id": str(thread_id) if thread_id else None,
                     "complexity_hint": complexity_hint,
+                    **({"channel": channel} if channel else {}),
                     **({"agentic": True} if agentic else {}),
                     **({"parent_task_id": str(parent_task_id)}
                        if parent_task_id else {}),
@@ -185,11 +186,14 @@ class TaskService:
         # Reload + hydrate the run inputs from the pending-event.
         async with acquire() as conn:
             task = await conn.fetchrow(
-                "SELECT id, user_id FROM tasks WHERE id = $1", task_id,
+                "SELECT id, user_id, channel_for_completion"
+                " FROM tasks WHERE id = $1",
+                task_id,
             )
             if task is None:
                 raise ValueError(f"Task {task_id} not found")
             user_id: UUID = task["user_id"]
+            completion_channel: str | None = task["channel_for_completion"]
 
             event_row = await conn.fetchrow(
                 "SELECT content FROM task_events"
@@ -214,8 +218,9 @@ class TaskService:
         thread_id = UUID(thread_id_raw) if thread_id_raw else None
         complexity_hint = ev.get("complexity_hint") or "moderate"
         agentic = bool(ev.get("agentic"))
+        channel = ev.get("channel")
 
-        return await self._run_inner(
+        outcome = await self._run_inner(
             user_id=user_id,
             task_id=task_id,
             thread_id=thread_id,
@@ -223,7 +228,21 @@ class TaskService:
             complexity_hint=complexity_hint,
             emit=emit,
             agentic=agentic,
+            channel=channel,
         )
+        # Backgrounded tasks (worker or inline-fallback) have no live
+        # stream and no caller to hand the answer to — push the result
+        # back through the channel the request came in on. Skipped for
+        # agentic runs: those deliver via the tools their loop calls
+        # (e.g. send_telegram_message), so a completion push would
+        # double-send. See _deliver_completion.
+        if not agentic:
+            await self._deliver_completion(
+                user_id=user_id,
+                channel=completion_channel,
+                outcome=outcome,
+            )
+        return outcome
 
     async def create_and_run(
         self,
@@ -234,6 +253,7 @@ class TaskService:
         title: str,
         description: str | None = None,
         channel_for_completion: str | None = None,
+        channel: str | None = None,
         complexity_hint: str = "moderate",
         emit: EmitFn | None = None,
         parent_task_id: UUID | None = None,
@@ -262,6 +282,7 @@ class TaskService:
             title=title,
             description=description,
             channel_for_completion=channel_for_completion,
+            channel=channel,
             complexity_hint=complexity_hint,
             parent_task_id=parent_task_id,
             budget_cents=budget_cents,
@@ -275,6 +296,7 @@ class TaskService:
             complexity_hint=complexity_hint,
             emit=emit,
             precomputed_plan=precomputed_plan,
+            channel=channel,
         )
 
     # --- internal pipeline ---------------------------------------------------
@@ -290,8 +312,11 @@ class TaskService:
         emit: EmitFn | None,
         precomputed_plan: Plan | None = None,
         agentic: bool = False,
+        channel: str | None = None,
     ) -> TaskOutcome:
-        ctx = ToolContext(user_id=user_id, task_id=task_id, emit=emit)
+        ctx = ToolContext(
+            user_id=user_id, task_id=task_id, emit=emit, channel=channel,
+        )
 
         # Transition to running.
         await self._transition(
@@ -320,6 +345,10 @@ class TaskService:
                     ctx=ctx, thread_id=thread_id,
                     content=content, complexity_hint=complexity_hint,
                     emit=emit,
+                    # Headless (scheduled) runs actually reach the planner via
+                    # the `agentic` quick-loop, not here — but be explicit so
+                    # ask_user planning is only offered when a human can reply.
+                    human_available=not agentic,
                 )
             if plan.id is not None:
                 async with acquire() as conn:
@@ -516,6 +545,46 @@ class TaskService:
             # CASCADE from users wouldn't fire mid-task).
             raise ValueError(f"Task {task_id} disappeared during run")
         return task
+
+    async def _deliver_completion(
+        self, *, user_id: UUID, channel: str | None, outcome: TaskOutcome,
+    ) -> None:
+        """Push a finished task's final answer back through the channel the
+        request came in on.
+
+        Only the backgrounded entry point (`run`, driven by the arq worker or
+        the inline fallback) calls this: those runs have no live stream and no
+        caller to hand the answer to, so without a push the result is computed
+        and silently dropped — the "Telegram acks then goes quiet after
+        answering" bug. `create_and_run` callers (web SSE, inline Telegram)
+        deliver the returned outcome themselves and must NOT double-send.
+
+        Best-effort: a channel with no push transport (web `send` raises
+        NotImplementedError) or a delivery error never fails the task."""
+        if not channel:
+            return
+        answer = (outcome.final_answer or "").strip()
+        if not answer:
+            return
+        from wolfpaw.channels import get_channel
+
+        ch = get_channel(channel)
+        if ch is None:
+            log.warning("tasks.service.completion_no_channel", channel=channel)
+            return
+        try:
+            await ch.send(user_id, answer)
+        except NotImplementedError:
+            # e.g. web — no proactive push transport. HITL web tasks run
+            # inline and stream their own result, so this is expected.
+            log.info(
+                "tasks.service.completion_channel_no_push", channel=channel,
+            )
+        except Exception:  # noqa: BLE001 — never crash the job on delivery
+            log.warning(
+                "tasks.service.completion_delivery_failed",
+                channel=channel, exc_info=True,
+            )
 
 
 async def _maybe_emit(emit: EmitFn | None, event: str, data: str) -> None:

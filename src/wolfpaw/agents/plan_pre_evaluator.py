@@ -167,6 +167,7 @@ class PlanPreEvaluatorAgent:
         content: str,
         plan: Plan,
         past_plans: list[procedural.StoredPlan] | None = None,
+        human_available: bool = True,
     ) -> PreEvalVerdict:
         """Vet a freshly-generated plan. Returns an *approving*
         verdict on any failure to call the model — see the module
@@ -194,7 +195,10 @@ class PlanPreEvaluatorAgent:
             )
 
         try:
-            prompt = _build_eval_prompt(content, plan, past_plans or [])
+            prompt = _build_eval_prompt(
+                content, plan, past_plans or [],
+                human_available=human_available,
+            )
             system = await build_for_agent(
                 user_id=ctx.user_id, agent_role=_AGENT_ROLE,
             )
@@ -330,6 +334,7 @@ async def plan_with_pre_evaluation(
     content: str,
     complexity_hint: str,
     emit: EmitFn | None = None,
+    human_available: bool = True,
 ) -> tuple[Plan, PreEvalVerdict, bool]:
     """Run the Planner, vet via the Pre-Evaluator, retry once on
     rejection. Returns ``(final_plan, verdict, retried)`` — ``retried``
@@ -346,11 +351,13 @@ async def plan_with_pre_evaluation(
     plan, plan_ctx = await planner.plan(
         ctx=ctx, thread_id=thread_id,
         content=content, complexity_hint=complexity_hint,
+        human_available=human_available,
     )
 
     verdict = await pre_evaluator.evaluate(
         ctx=ctx, content=content, plan=plan,
         past_plans=plan_ctx.past_plans,
+        human_available=human_available,
     )
     await _maybe_emit(emit, "pre_eval", _summarize_verdict(verdict, attempt=1))
 
@@ -367,6 +374,7 @@ async def plan_with_pre_evaluation(
         ctx=ctx, thread_id=thread_id,
         content=content, complexity_hint=complexity_hint,
         revision_diagnosis=verdict.diagnosis,
+        human_available=human_available,
     )
     # Don't re-evaluate the second pass — ship whatever the Planner
     # produced. Emit a follow-up pre_eval event so the SSE consumer
@@ -412,8 +420,29 @@ def _summarize_verdict(verdict: PreEvalVerdict, *, attempt: int) -> str:
 
 def _build_eval_prompt(
     content: str, plan: Plan, past_plans: list[procedural.StoredPlan],
+    *, human_available: bool = True,
 ) -> str:
+    # Authoritative execution-context line, mirroring the Planner's. Without
+    # it, a retrieved score≥80 scheduled plan (whose `query` carries a "no
+    # human available" preamble) makes the evaluator reject legitimate
+    # `ask_user` steps as un-runnable. State the current reality up front.
+    if human_available:
+        exec_context = (
+            "# Execution context (authoritative)\n"
+            "This run is INTERACTIVE — a human is present and will answer"
+            " `ask_user` prompts. A plan that uses `ask_user` to gather"
+            " missing input (a URL, a choice, a confirmation) is CORRECT,"
+            " not a defect. Do NOT penalize `ask_user`, and ignore any past"
+            " plan below that assumes no human is available."
+        )
+    else:
+        exec_context = (
+            "# Execution context (authoritative)\n"
+            "This run is HEADLESS (scheduled/background) — no human can"
+            " answer. A plan that pauses on `ask_user` cannot complete here."
+        )
     lines: list[str] = [
+        exec_context, "",
         "# User request", content, "",
         "# Plan to evaluate",
         f"Summary: {plan.summary}",

@@ -80,7 +80,9 @@ class FakePlanner:
         self._plan_ctx = plan_ctx
         self.calls: list[dict] = []
 
-    async def plan(self, *, ctx, thread_id, content, complexity_hint="moderate"):
+    async def plan(self, *, ctx, thread_id, content, complexity_hint="moderate",
+                   revision_diagnosis=None, replan_from=None,
+                   human_available=True):
         self.calls.append({
             "content": content, "complexity_hint": complexity_hint,
             "thread_id": thread_id,
@@ -132,7 +134,8 @@ class FakePreEvaluator:
         ]
         self.calls: list[dict] = []
 
-    async def evaluate(self, *, ctx, content, plan, past_plans=None):
+    async def evaluate(self, *, ctx, content, plan, past_plans=None,
+                       human_available=True):
         self.calls.append({
             "content": content, "plan_id": plan.id,
             "past_plans_count": len(past_plans or []),
@@ -448,7 +451,8 @@ async def test_pre_eval_rejects_then_planner_runs_second_pass():
 
         async def plan(self, *, ctx, thread_id, content,
                        complexity_hint="moderate",
-                       revision_diagnosis=None):
+                       revision_diagnosis=None, replan_from=None,
+                       human_available=True):
             self.calls.append({
                 "content": content,
                 "revision_diagnosis": revision_diagnosis,
@@ -638,7 +642,8 @@ async def test_pre_eval_retry_emits_two_pre_eval_events():
 
         async def plan(self, *, ctx, thread_id, content,
                        complexity_hint="moderate",
-                       revision_diagnosis=None):
+                       revision_diagnosis=None, replan_from=None,
+                       human_available=True):
             self.calls.append({"diag": revision_diagnosis})
             return self._plans.pop(0), _empty_plan_ctx()
 

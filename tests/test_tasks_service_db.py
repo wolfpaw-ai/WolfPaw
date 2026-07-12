@@ -9,6 +9,7 @@ Skipped without WOLFPAW_TEST_DATABASE_URL."""
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -74,7 +75,8 @@ class FakePlanner:
     calls: list[dict] = field(default_factory=list)
 
     async def plan(self, *, ctx, thread_id, content, complexity_hint,
-                   revision_diagnosis=None):
+                   revision_diagnosis=None, replan_from=None,
+                   human_available=True):
         self.calls.append({
             "user_id": ctx.user_id, "task_id": ctx.task_id,
             "thread_id": thread_id, "content": content,
@@ -102,7 +104,8 @@ class FakePreEvaluator:
 
     calls: list[dict] = field(default_factory=list)
 
-    async def evaluate(self, *, ctx, content, plan, past_plans=None):
+    async def evaluate(self, *, ctx, content, plan, past_plans=None,
+                       human_available=True):
         self.calls.append({"plan_summary": plan.summary})
         return PreEvalVerdict(
             approved=True, achieves_objective=True,
@@ -121,7 +124,8 @@ class FakeExecutor:
             plan=plan,
             results=[
                 StepResult(
-                    step_id="s1", status=StepStatus.COMPLETED,
+                    step_id="s1", kind="reasoning",
+                    status=StepStatus.COMPLETED,
                     output="t", error=None,
                 )
             ],
@@ -203,6 +207,13 @@ async def test_create_returns_pending_task_without_running_pipeline():
     finally:
         await conn.close()
     payload = ev["content"]
+    # A raw asyncpg connection has no JSONB→dict codec registered, so the
+    # column arrives as text; append_event also stores it pre-serialized, so
+    # it can be double-encoded. Decode until we reach the dict (mirrors the
+    # DAO's own defensive posture, which the app connection's codec makes a
+    # single hop in production).
+    while isinstance(payload, str):
+        payload = json.loads(payload)
     assert payload["content"] == "research X long-term"
     assert payload["complexity_hint"] == "ambitious"
     assert payload["thread_id"] is None

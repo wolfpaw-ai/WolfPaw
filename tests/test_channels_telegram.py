@@ -313,10 +313,16 @@ def test_webhook_linked_user_free_form_sends_markdown_v2(monkeypatch, fake_teleg
         async def handle(self, *, ctx, thread_id, content, emit=None):
             return "The answer is **42** (final)."
 
+    async def fake_open_q(_conn, *, user_id):
+        return None  # no pending question → free-form goes to the router
+
     monkeypatch.setattr(channel_links, "find_user", fake_find_user)
     monkeypatch.setattr(
         "wolfpaw.channels.telegram._resolve_telegram_thread",
         fake_resolve_thread,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.telegram.pq_dao.get_open_for_user", fake_open_q,
     )
     monkeypatch.setattr(
         "wolfpaw.channels.telegram.get_router", lambda: FakeRouter(),
@@ -343,6 +349,67 @@ def test_webhook_linked_user_free_form_sends_markdown_v2(monkeypatch, fake_teleg
     # **42** → *42*  and  (final). → \(final\)\.
     assert "*42*" in sent["text"]
     assert "\\(final\\)\\." in sent["text"]
+
+
+def test_webhook_answers_pending_question_instead_of_new_turn(
+    monkeypatch, fake_telegram,
+):
+    """A linked user with a task paused on `ask_user`: their next message is
+    recorded as the answer (mark_answered) and the router is NOT invoked."""
+    from types import SimpleNamespace
+
+    from wolfpaw.memory.pending_questions import AnswerOutcome
+
+    bound_user = uuid4()
+    open_q = SimpleNamespace(id=uuid4())
+    answered = {}
+    router_called = {"hit": False}
+
+    async def fake_find_user(_conn, *, channel, external_id):
+        return bound_user
+
+    async def fake_open_q(_conn, *, user_id):
+        return open_q
+
+    async def fake_mark_answered(_conn, *, question_id, user_id, answer):
+        answered.update(question_id=question_id, user_id=user_id, answer=answer)
+        return AnswerOutcome.ANSWERED
+
+    class FakeRouter:
+        async def handle(self, *, ctx, thread_id, content, emit=None):
+            router_called["hit"] = True
+            return "should not be called"
+
+    monkeypatch.setattr(channel_links, "find_user", fake_find_user)
+    monkeypatch.setattr(
+        "wolfpaw.channels.telegram.pq_dao.get_open_for_user", fake_open_q,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.telegram.pq_dao.mark_answered", fake_mark_answered,
+    )
+    monkeypatch.setattr(
+        "wolfpaw.channels.telegram.get_router", lambda: FakeRouter(),
+    )
+
+    app = create_app()
+    client = TestClient(app)
+    r = client.post(
+        "/channels/telegram/webhook",
+        json=_message_update(text="use https://example.com"),
+    )
+    assert r.status_code == 200
+
+    async def _wait():
+        for _ in range(50):
+            if fake_telegram.sent:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.get_event_loop().run_until_complete(_wait())
+    assert answered["answer"] == "use https://example.com"
+    assert answered["question_id"] == open_q.id
+    assert router_called["hit"] is False
+    assert "continuing" in fake_telegram.sent[-1]["text"].lower()
 
 
 def test_webhook_malformed_json_doesnt_500(fake_telegram):

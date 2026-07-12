@@ -30,7 +30,11 @@ from wolfpaw.agents.plan_pre_evaluator import (
     get_pre_evaluator_agent,
     plan_with_pre_evaluation,
 )
-from wolfpaw.agents.planner import PlannerAgent, get_planner_agent
+from wolfpaw.agents.planner import (
+    PlannerAgent,
+    _requires_task_context,
+    get_planner_agent,
+)
 from wolfpaw.agents.post_evaluator import (
     PostEvaluatorAgent,
     get_post_evaluator_agent,
@@ -222,7 +226,19 @@ class Router:
 
         settings = get_settings()
         title = _title_from_content(content)
-        if settings.workers_enabled:
+        # A plan that pauses to ask the user (an `ask_user` or `tool_creator`
+        # step) can only complete on a channel that can reach the user
+        # mid-run. On a streaming channel (web) that means the live SSE
+        # stream — a backgrounded task has no stream and web has no proactive
+        # push, so the question would never be delivered. Keep such plans
+        # inline (emit present) so `ask_user` emits into the open stream.
+        # Push channels (Telegram, emit=None) background fine: `ask_user`
+        # delivers via the channel's `send()`.
+        needs_live_user = _requires_task_context(plan.steps)
+        run_inline = not settings.workers_enabled or (
+            needs_live_user and emit is not None
+        )
+        if not run_inline:
             from wolfpaw.workers.queue import enqueue_run_task
 
             task = await self.task_service.create(
@@ -231,7 +247,8 @@ class Router:
                 content=content,
                 title=title,
                 description=content,
-                channel_for_completion="web",
+                channel_for_completion=ctx.channel or "web",
+                channel=ctx.channel,
                 complexity_hint=complexity_hint,
             )
             await _maybe_emit(emit, "task", str(task.id))
@@ -248,7 +265,8 @@ class Router:
                 content=content,
                 title=title,
                 description=content,
-                channel_for_completion="web",
+                channel_for_completion=ctx.channel or "web",
+                channel=ctx.channel,
                 complexity_hint=complexity_hint,
                 emit=emit,
                 precomputed_plan=plan,

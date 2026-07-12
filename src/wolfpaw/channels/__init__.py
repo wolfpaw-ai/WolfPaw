@@ -44,3 +44,41 @@ class Channel(ABC):
     @abstractmethod
     def supports_streaming(self) -> bool:
         """True iff this channel can deliver partial responses incrementally."""
+
+
+# --- channel registry ------------------------------------------------------
+#
+# `ask_user` needs to resolve a Channel instance by name to push a question
+# proactively (Telegram/Slack) when there's no live stream to emit into. Each
+# concrete channel registers its singleton at import; `get_channel` also does
+# a lazy import of the known built-ins so it works in a worker process that
+# never loaded the FastAPI routers.
+
+_CHANNELS: dict[str, Channel] = {}
+
+_BUILTIN_CHANNEL_MODULES = {
+    "web": "wolfpaw.channels.web",
+    "telegram": "wolfpaw.channels.telegram",
+    "slack": "wolfpaw.channels.slack",
+}
+
+
+def register_channel(channel: Channel) -> Channel:
+    """Register a channel singleton under its `name`. Called at module import."""
+    _CHANNELS[channel.name] = channel
+    return channel
+
+
+def get_channel(name: str) -> Channel | None:
+    """Return the registered channel for `name`, or None. Lazily imports the
+    matching built-in module (which self-registers) if it isn't loaded yet."""
+    channel = _CHANNELS.get(name)
+    if channel is not None:
+        return channel
+    module = _BUILTIN_CHANNEL_MODULES.get(name)
+    if module is None:
+        return None
+    import importlib
+
+    importlib.import_module(module)
+    return _CHANNELS.get(name)

@@ -42,7 +42,7 @@ from starlette.responses import Response
 
 from wolfpaw.agents.router import get_router
 from wolfpaw.auth.deps import require_user_id
-from wolfpaw.channels import Channel, InboundMessage
+from wolfpaw.channels import Channel, InboundMessage, register_channel
 from wolfpaw.channels.commands import get_dispatcher
 from wolfpaw.channels.telegram_client import TelegramClient, get_telegram_client
 from wolfpaw.channels.telegram_markdown import to_markdown_v2
@@ -52,7 +52,11 @@ from wolfpaw.channels.telegram_tokens import (
     issue as issue_link_token,
 )
 from wolfpaw.config import get_settings
-from wolfpaw.memory import channel_links, conversational as conv
+from wolfpaw.memory import (
+    channel_links,
+    conversational as conv,
+    pending_questions as pq_dao,
+)
 from wolfpaw.memory.db import acquire
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
@@ -97,7 +101,7 @@ class TelegramChannel(Channel):
         return False  # Telegram is push, not streaming
 
 
-_channel = TelegramChannel()
+_channel = register_channel(TelegramChannel())
 
 
 async def _user_telegram_link(conn, user_id: UUID):
@@ -295,6 +299,30 @@ async def _handle_inbound(
         cmd_result = await get_dispatcher().dispatch(inbound)
         if cmd_result is not None:
             await client.send_message(chat_id=tg_chat_id, text=cmd_result.text)
+            return
+
+        # If a task is paused waiting on `ask_user`, this message IS the
+        # answer — resolve the pending question instead of starting a new
+        # turn. (Slash commands already returned above, so they still work
+        # as an escape hatch while a question is pending.)
+        async with acquire() as conn:
+            open_q = await pq_dao.get_open_for_user(conn, user_id=user_id)
+            if open_q is not None:
+                outcome = await pq_dao.mark_answered(
+                    conn, question_id=open_q.id,
+                    user_id=user_id, answer=content,
+                )
+        if open_q is not None:
+            if outcome is pq_dao.AnswerOutcome.ANSWERED:
+                await client.send_message(
+                    chat_id=tg_chat_id, text="Got it — continuing.",
+                )
+            else:
+                # Raced with another reply; nothing more to do.
+                await client.send_message(
+                    chat_id=tg_chat_id,
+                    text="That question was already answered.",
+                )
             return
 
         # Resolve or extend the user's most-recent Telegram thread.

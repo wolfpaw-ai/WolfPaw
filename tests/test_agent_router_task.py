@@ -70,7 +70,8 @@ def _stub_persistence(monkeypatch):
     from wolfpaw.schemas import PreEvalVerdict
 
     class _ApprovingPreEval:
-        async def evaluate(self, *, ctx, content, plan, past_plans=None):
+        async def evaluate(self, *, ctx, content, plan, past_plans=None,
+                           human_available=True):
             return PreEvalVerdict(
                 approved=True, achieves_objective=True,
                 simplifiable=False, better_than_past_plans=True,
@@ -123,7 +124,8 @@ class FakePlanner:
     plan_obj: Plan
 
     async def plan(self, *, ctx, thread_id, content, complexity_hint="moderate",
-                   revision_diagnosis=None):
+                   revision_diagnosis=None, replan_from=None,
+                   human_available=True):
         return self.plan_obj, _empty_plan_ctx()
 
 
@@ -339,6 +341,107 @@ async def test_plan_task_path_persists_user_and_ack_or_answer(_stub_persistence)
     contents = [a["content"] for a in appended]
     assert roles == ["user", "assistant"]
     assert contents == ["watch X", "result"]
+
+
+def _plan_hitl() -> Plan:
+    """A task plan that pauses on `ask_user` — `_requires_task_context`
+    picks it up via the ask_user tool's `requires_task_context` flag."""
+    return Plan(
+        query="x", summary="ask then act",
+        steps=[
+            Step(
+                id="s1", kind="functional", tool="ask_user",
+                description="ask the user for a URL",
+                inputs={"question": "what's the URL?"},
+            ),
+            Step(id="s2", kind="reasoning", description="summarize the site"),
+        ],
+        is_task=True, model_used="claude-sonnet-4-6", id=uuid4(),
+    )
+
+
+async def test_hitl_plan_stays_inline_on_web_even_with_workers_on(monkeypatch):
+    """A plan with an `ask_user` step must NOT background on a streaming
+    channel (web, emit present): the question is delivered through the
+    live SSE stream, which a backgrounded task doesn't have. Router calls
+    create_and_run (not create + enqueue) and threads the originating
+    channel through for delivery."""
+    from wolfpaw.config import get_settings
+
+    monkeypatch.setenv("WOLFPAW_WORKERS_ENABLED", "true")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    enqueued: list = []
+
+    async def fake_enqueue_run_task(task_id):
+        enqueued.append(task_id)
+
+    monkeypatch.setattr(
+        "wolfpaw.workers.queue.enqueue_run_task", fake_enqueue_run_task,
+    )
+
+    svc = FakeTaskService(final_answer="asked and answered")
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=FakePlanner(plan_obj=_plan_hitl()), executor=FakeExecutor(),
+        post_evaluator=FakePostEvaluator(),
+        task_service=svc,
+    )
+
+    async def emit(event, data):
+        pass
+
+    ctx = ToolContext(user_id=uuid4(), channel="web")
+    text = await router.handle(
+        ctx=ctx, thread_id=uuid4(),
+        content="ask me for a URL then summarize it", emit=emit,
+    )
+    assert enqueued == []
+    assert svc.create_calls == []
+    assert len(svc.create_and_run_calls) == 1
+    assert svc.create_and_run_calls[0]["channel"] == "web"
+    assert text == "asked and answered"
+
+
+async def test_hitl_plan_backgrounds_on_push_channel(monkeypatch):
+    """On a push channel (Telegram: emit=None) a HITL plan backgrounds
+    normally — `ask_user` delivers via the channel's send(). The
+    originating channel is still threaded into create() so the worker
+    can reach the user."""
+    from wolfpaw.config import get_settings
+
+    monkeypatch.setenv("WOLFPAW_WORKERS_ENABLED", "true")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    enqueued: list = []
+
+    async def fake_enqueue_run_task(task_id):
+        enqueued.append(task_id)
+
+    monkeypatch.setattr(
+        "wolfpaw.workers.queue.enqueue_run_task", fake_enqueue_run_task,
+    )
+
+    svc = FakeTaskService()
+    router = Router(
+        triage=FakeTriage(
+            TriageVerdict(route="plan", complexity="moderate", reasoning="r"),
+        ),
+        planner=FakePlanner(plan_obj=_plan_hitl()), executor=FakeExecutor(),
+        post_evaluator=FakePostEvaluator(),
+        task_service=svc,
+    )
+    ctx = ToolContext(user_id=uuid4(), channel="telegram")
+    await router.handle(
+        ctx=ctx, thread_id=uuid4(),
+        content="ask me for a URL then summarize it", emit=None,
+    )
+    assert svc.create_and_run_calls == []
+    assert len(svc.create_calls) == 1
+    assert svc.create_calls[0]["channel"] == "telegram"
+    assert len(enqueued) == 1
 
 
 async def test_plan_task_path_propagates_emit_callback():

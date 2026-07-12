@@ -27,15 +27,10 @@ from starlette.responses import StreamingResponse
 
 from wolfpaw.agents.router import Router, get_router
 from wolfpaw.auth.deps import require_user_id
-from wolfpaw.channels import Channel, InboundMessage
+from wolfpaw.channels import Channel, InboundMessage, register_channel
 from wolfpaw.channels.commands import get_dispatcher
-from wolfpaw.memory import conversational as conv
+from wolfpaw.memory import conversational as conv, pending_questions as pq_dao
 from wolfpaw.memory.db import acquire
-from wolfpaw.tasks.ask_user_registry import (
-    AlreadyAnswered,
-    UnknownQuestion,
-    get_registry as get_ask_user_registry,
-)
 from wolfpaw.toolbox.registry import ToolContext
 from wolfpaw.tracing import get_logger
 
@@ -90,7 +85,7 @@ class WebChannel(Channel):
         return True
 
 
-_web_channel = WebChannel()
+_web_channel = register_channel(WebChannel())
 
 
 def _sse_event(event: str, data: str) -> bytes:
@@ -282,15 +277,17 @@ async def answer(
 ) -> None:
     """Resolve a pending `ask_user` question. The web client POSTs here
     when the user types their answer to a question that was emitted as
-    an `ask_user` SSE event during a task."""
-    registry = get_ask_user_registry()
-    try:
-        await registry.submit_answer(
+    an `ask_user` SSE event during a task. Writes the answer to
+    `pending_questions`, which wakes the waiting task (possibly in another
+    process) via NOTIFY."""
+    async with acquire() as conn:
+        outcome = await pq_dao.mark_answered(
+            conn,
             question_id=payload.question_id,
             user_id=user_id,
             answer=payload.answer,
         )
-    except UnknownQuestion:
+    if outcome is pq_dao.AnswerOutcome.UNKNOWN:
         raise HTTPException(404, "no such pending question")
-    except AlreadyAnswered:
+    if outcome is pq_dao.AnswerOutcome.ALREADY:
         raise HTTPException(409, "question already answered")
