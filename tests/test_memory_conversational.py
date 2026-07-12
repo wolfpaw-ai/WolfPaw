@@ -194,6 +194,44 @@ async def test_fetch_recent_isolates_per_thread():
     assert [m.content for m in await _with_conn(conv.fetch_recent, thread_id=b, n=20)] == ["in B"]
 
 
+async def test_fetch_page_walks_backwards_via_cursor():
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+    for i in range(5):
+        await _with_conn(conv.append, thread_id=tid, role="user", content=f"m{i}")
+    # No cursor → newest page, still chronological within the page.
+    page1 = await _with_conn(conv.fetch_page, thread_id=tid, limit=2)
+    assert [m.content for m in page1] == ["m3", "m4"]
+    # Cursor = oldest loaded message → the page immediately before it.
+    page2 = await _with_conn(
+        conv.fetch_page, thread_id=tid,
+        before_created_at=page1[0].created_at, before_id=page1[0].id, limit=2,
+    )
+    assert [m.content for m in page2] == ["m1", "m2"]
+    page3 = await _with_conn(
+        conv.fetch_page, thread_id=tid,
+        before_created_at=page2[0].created_at, before_id=page2[0].id, limit=2,
+    )
+    assert [m.content for m in page3] == ["m0"]
+
+
+async def test_fetch_page_filters_to_requested_roles():
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+    for role, text in [
+        ("user", "u1"), ("tool", "t1"), ("assistant", "a1"), ("system", "s1"),
+    ]:
+        await _with_conn(conv.append, thread_id=tid, role=role, content=text)
+    got = await _with_conn(
+        conv.fetch_page, thread_id=tid, roles=("user", "assistant"), limit=20,
+    )
+    assert [(m.role, m.content) for m in got] == [
+        ("user", "u1"), ("assistant", "a1"),
+    ]
+
+
 # --- step 22: tiered memory ------------------------------------------------
 
 

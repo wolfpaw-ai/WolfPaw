@@ -127,3 +127,16 @@ export interface TelegramLinkResponse {
   url: string;
   expires_in_minutes: number;
 }
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: string;
+}
+
+export interface ChatHistoryPage {
+  thread_id: string | null;
+  messages: ChatMessage[];
+  has_more: boolean;
+}
