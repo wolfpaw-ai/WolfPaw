@@ -43,6 +43,10 @@ class ToolContext:
     user_id: UUID
     task_id: UUID | None = None
     trace_id: str | None = None
+    # Originating channel of the current turn ('web' | 'telegram' |
+    # 'slack' | ...). Threads are channel-agnostic, but each persisted
+    # message records where it came from via `messages.metadata.channel`.
+    channel: str | None = None
 
 
 class Tool(ABC):

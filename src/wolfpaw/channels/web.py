@@ -17,6 +17,7 @@ needs websockets and isn't on the v1 roadmap.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any, AsyncIterator
 from uuid import UUID
 
@@ -50,6 +51,21 @@ class ChatRequest(BaseModel):
 class AnswerRequest(BaseModel):
     question_id: UUID
     answer: str
+
+
+class ChatMessage(BaseModel):
+    id: UUID
+    role: str
+    content: str
+    created_at: datetime
+
+
+class MessagesResponse(BaseModel):
+    # None thread_id + empty messages means the user has no thread yet
+    # (brand-new account or right after a /reset that never got a message).
+    thread_id: UUID | None
+    messages: list[ChatMessage]
+    has_more: bool
 
 
 class WebChannel(Channel):
@@ -99,7 +115,7 @@ async def _run_router_into_queue(
         async def emit(event: str, data: str) -> None:
             await queue.put((event, data))
 
-        ctx = ToolContext(user_id=user_id)
+        ctx = ToolContext(user_id=user_id, channel=_web_channel.name)
         text = await router.handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=emit,
         )
@@ -145,8 +161,9 @@ async def chat(
         # If the client supplied a thread_id, honor it (validated against
         # the user's threads inside get_or_create_thread). If not — a
         # new device, fresh browser, or a tab that lost its in-memory
-        # threadId — continue the user's most-recent web thread so the
-        # conversation history follows them across devices. `/reset`
+        # threadId — continue the user's most-recent thread (any channel)
+        # so the conversation follows them across devices and channels.
+        # `/reset`
         # mints a new thread server-side, which becomes the "most
         # recent" pickup point for the next message.
         async with acquire() as conn:
@@ -161,7 +178,6 @@ async def chat(
                 existing = await conv.get_most_recent_thread(
                     conn,
                     user_id=user_id,
-                    channel=_web_channel.name,
                 )
                 if existing is not None:
                     thread_id = existing
@@ -199,6 +215,64 @@ async def chat(
         yield _sse_event("done", "")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.get("/messages", response_model=MessagesResponse)
+async def messages(
+    user_id: UUID = Depends(require_user_id),
+    thread_id: UUID | None = None,
+    before: datetime | None = None,
+    before_id: UUID | None = None,
+    limit: int = 30,
+) -> MessagesResponse:
+    """Paginated raw chat history for the web UI's infinite scroll.
+
+    With no `thread_id`, resolves the user's most-recent thread (the same
+    thread `/chat` continues), so a page refresh shows the ongoing
+    conversation. `before` + `before_id` form a keyset cursor: pass the
+    oldest message currently on screen to fetch the page just before it.
+    Messages come back oldest-first; `has_more` says whether older
+    messages remain to scroll back to.
+    """
+    limit = max(1, min(limit, 100))
+    async with acquire() as conn:
+        if thread_id is not None:
+            owned = await conn.fetchrow(
+                "SELECT id FROM threads WHERE id = $1 AND user_id = $2",
+                thread_id, user_id,
+            )
+            if owned is None:
+                raise HTTPException(404, "no such thread")
+            resolved: UUID | None = thread_id
+        else:
+            resolved = await conv.get_most_recent_thread(conn, user_id=user_id)
+        if resolved is None:
+            return MessagesResponse(thread_id=None, messages=[], has_more=False)
+        # Over-fetch by one to detect whether an older page exists.
+        rows = await conv.fetch_page(
+            conn,
+            thread_id=resolved,
+            before_created_at=before,
+            before_id=before_id,
+            limit=limit + 1,
+            roles=("user", "assistant"),
+        )
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[-limit:]  # drop the oldest extra; list is chronological
+    return MessagesResponse(
+        thread_id=resolved,
+        messages=[
+            ChatMessage(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                created_at=m.created_at,
+            )
+            for m in rows
+        ],
+        has_more=has_more,
+    )
 
 
 @router.post("/answer", status_code=204)

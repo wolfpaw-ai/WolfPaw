@@ -3,6 +3,7 @@
 // no Authorization header to manage on the client.
 
 import type {
+  ChatHistoryPage,
   Schedule,
   Task,
   TaskDetail,
@@ -147,6 +148,32 @@ export const telegram = {
     return call<TelegramLinkResponse>(
       "/channels/telegram/link-token",
       { method: "POST", body: "{}" },
+    );
+  },
+};
+
+// --- chat history -------------------------------------------------------
+
+export const chat = {
+  // Paginated raw message history for the chat surface. Omit `threadId`
+  // to load the user's most-recent thread (page refresh). Pass the oldest
+  // shown message's `created_at`/`id` as the cursor to page backwards.
+  async history(
+    opts: {
+      threadId?: string | null;
+      before?: string;
+      beforeId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<ChatHistoryPage> {
+    const p = new URLSearchParams();
+    if (opts.threadId) p.set("thread_id", opts.threadId);
+    if (opts.before) p.set("before", opts.before);
+    if (opts.beforeId) p.set("before_id", opts.beforeId);
+    if (opts.limit) p.set("limit", String(opts.limit));
+    const qs = p.toString();
+    return call<ChatHistoryPage>(
+      `/channels/web/messages${qs ? "?" + qs : ""}`,
     );
   },
 };

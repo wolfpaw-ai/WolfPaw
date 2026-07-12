@@ -488,7 +488,7 @@ async def _handle_freeform(
         async with acquire() as conn:
             thread_id = await _resolve_slack_thread(conn, user_id)
 
-        ctx = ToolContext(user_id=user_id)
+        ctx = ToolContext(user_id=user_id, channel="slack")
         final = await get_router().handle(
             ctx=ctx, thread_id=thread_id, content=content, emit=None,
         )
@@ -507,11 +507,12 @@ async def _handle_freeform(
 
 
 async def _resolve_slack_thread(conn, user_id: UUID) -> UUID:
-    """Same pattern as Telegram + web: a single rolling thread per user,
-    extended on each new inbound. `/reset` mints a new one which then
-    becomes the "most recent" pickup point."""
+    """Same pattern as Telegram + web: a single rolling channel-agnostic
+    thread per user, extended on each new inbound (so a Slack message can
+    continue a conversation started on web). `/reset` mints a new one
+    which then becomes the "most recent" pickup point."""
     existing = await conv.get_most_recent_thread(
-        conn, user_id=user_id, channel="slack",
+        conn, user_id=user_id,
     )
     if existing is not None:
         return existing

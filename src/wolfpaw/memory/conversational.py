@@ -195,23 +195,26 @@ async def get_most_recent_thread(
     conn: asyncpg.Connection,
     *,
     user_id: UUID,
-    channel: ChannelName,
 ) -> UUID | None:
-    """Return the user's most-recent thread on this channel, or None
-    if they have no thread on this channel yet.
+    """Return the user's most-recent thread across *all* channels, or
+    None if they have no thread yet.
 
-    Used by channels for cross-device thread continuity — when a client
-    opens chat without a stored `thread_id` (new browser, new device,
-    new tab), the channel resolves to the user's last conversation
-    rather than minting a fresh thread every time. `/reset` is the
-    explicit escape hatch — it always mints a new thread, which then
-    becomes "most recent" for the next message.
+    Channel-agnostic by design: a user has one continuous conversation
+    that follows them between web, Telegram, Slack, etc. When any client
+    opens chat without a stored `thread_id` (new device, fresh browser,
+    an inbound Telegram/Slack message), it resolves to the user's single
+    most-recent thread regardless of which channel last touched it, so a
+    conversation started in one channel continues in the next. The
+    originating channel of each individual message is preserved in
+    `messages.metadata.channel` for provenance. `/reset` is the explicit
+    escape hatch — it always mints a new thread, which then becomes "most
+    recent" for the next message.
     """
     return await conn.fetchval(
         "SELECT id FROM threads"
-        " WHERE user_id = $1 AND channel = $2::channel"
+        " WHERE user_id = $1"
         " ORDER BY created_at DESC LIMIT 1",
-        user_id, channel,
+        user_id,
     )
 
 
@@ -231,14 +234,58 @@ async def fetch_recent(
     return out
 
 
+async def fetch_page(
+    conn: asyncpg.Connection,
+    *,
+    thread_id: UUID,
+    before_created_at: datetime | None = None,
+    before_id: UUID | None = None,
+    limit: int = 30,
+    roles: tuple[str, ...] | None = None,
+) -> list[Message]:
+    """Return up to `limit` messages from a thread in chronological order
+    (oldest first), ending just before the `(before_created_at, before_id)`
+    keyset cursor. With no cursor, returns the newest `limit` messages.
+
+    Built for backwards infinite-scroll in the web UI: pass the oldest
+    currently-shown message's `(created_at, id)` as the cursor to fetch the
+    page immediately before it. Uses keyset (not OFFSET) pagination on the
+    `(created_at, id)` order, so it's stable under concurrent inserts and
+    served by the `messages_thread_idx` index. `roles` optionally restricts
+    the result to given message roles — the chat UI passes
+    `("user", "assistant")` to skip tool/system rows.
+    """
+    conds = ["thread_id = $1"]
+    params: list[Any] = [thread_id]
+    if roles is not None:
+        params.append(list(roles))
+        conds.append(f"role = ANY(${len(params)}::message_role[])")
+    if before_created_at is not None and before_id is not None:
+        params.append(before_created_at)
+        params.append(before_id)
+        conds.append(f"(created_at, id) < (${len(params) - 1}, ${len(params)})")
+    params.append(limit)
+    rows = await conn.fetch(
+        "SELECT id, thread_id, role::text AS role, content, metadata, created_at"
+        f"  FROM messages WHERE {' AND '.join(conds)}"
+        f" ORDER BY created_at DESC, id DESC LIMIT ${len(params)}",
+        *params,
+    )
+    out = [_row_to_message(r) for r in rows]
+    out.reverse()
+    return out
+
+
 async def fetch_summaries(
     conn: asyncpg.Connection, *, thread_id: UUID
 ) -> list[ThreadSummary]:
     """Return the active summaries for this thread, oldest range first.
 
-    "Active" means: every level-2 summary, plus every level-1 summary
-    that hasn't been folded into a level-2 yet (NULL ``folded_into_summary_id``).
-    A reader sees each older message-range covered by at most one
+    "Active" means every summary that hasn't been folded into a
+    higher-level one — i.e. ``folded_into_summary_id IS NULL``. That
+    surfaces: the single L3 digest (the top of the ladder, never folded),
+    every L2 not yet folded into the L3, and every L1 not yet folded into
+    an L2. A reader sees each older message-range covered by at most one
     summary — the highest level available for that range.
 
     Returns an empty list when no compaction has happened yet (new
@@ -250,8 +297,8 @@ async def fetch_summaries(
                range_start_message_id, range_end_message_id, created_at
           FROM thread_summaries
          WHERE thread_id = $1
-           AND (level = 2 OR folded_into_summary_id IS NULL)
-         ORDER BY created_at ASC
+           AND folded_into_summary_id IS NULL
+         ORDER BY level DESC, created_at ASC
         """,
         thread_id,
     )
@@ -263,40 +310,185 @@ async def search_relevant(
     *,
     thread_id: UUID,
     query_embedding: list[float],
-    k: int = 5,
+    k: int = 15,
     exclude_recent_n: int = 20,
+    recency_weight: float = 0.15,
+    half_life_days: float = 30.0,
+    window: int = 2,
+    max_distance: float = 2.0,
 ) -> list[Message]:
-    """Top-k semantically-relevant older messages from this thread,
-    ranked by cosine similarity to ``query_embedding``.
+    """Recency-weighted top-``k`` semantic recall from this thread,
+    returned as small chronological windows around each hit.
 
-    The most recent ``exclude_recent_n`` messages are excluded so the
-    Planner doesn't get duplicate context from the verbatim window — it
-    already fetched those via :func:`fetch_recent`. Messages without
-    embeddings (embedding fired-and-forgot but never landed, or rows
-    that pre-date step 22) are skipped automatically by the
-    ``message_embeddings`` join.
+    ``max_distance`` is an optional relevance floor: hits whose raw cosine
+    distance to the query exceeds it are dropped *before* ranking, so a
+    query with only a few genuinely-relevant messages doesn't dredge up
+    ``k`` loosely-related ones. Cosine distance runs 0 (identical) → 2
+    (opposite); the default 2.0 admits everything (top-k, the Planner's
+    behavior). Callers that need precision (e.g. `delete_memories`) pass a
+    tighter value.
+
+    Hits are ranked by a blend of semantic distance and recency::
+
+        score = (embedding <=> query)
+                - recency_weight * 0.5 ^ (age_days / half_life_days)
+
+    Lower score surfaces first. The recency term is bounded by
+    ``recency_weight`` (its max, for a brand-new message) and decays with
+    a half-life of ``half_life_days`` — so a recent-and-relevant message
+    outranks an ancient-and-equally-relevant one without letting recency
+    override a strong semantic match. ``half_life_days <= 0`` disables the
+    bonus (pure cosine).
+
+    For each of the top-``k`` hits we also pull the ``window`` messages on
+    either side (by thread order) so recalled context reads as a coherent
+    snippet rather than an isolated line; neighbors are included even if
+    they were never embedded. The most recent ``exclude_recent_n`` messages
+    are excluded — both as hits and as neighbors — since the verbatim
+    window already covers them. Results come back in chronological order.
+
+    Messages without embeddings are skipped as *hits* (the
+    ``message_embeddings`` join) but can still appear as *neighbors*.
 
     Returns an empty list if no embeddings exist for this thread yet.
     """
     rows = await conn.fetch(
         """
-        WITH recent AS (
+        WITH ordered AS (
+            SELECT m.id, m.thread_id, m.role, m.content, m.metadata,
+                   m.created_at,
+                   ROW_NUMBER() OVER (ORDER BY m.created_at ASC, m.id ASC) AS rn
+              FROM messages m
+             WHERE m.thread_id = $1
+        ),
+        recent AS (
             SELECT id
               FROM messages
              WHERE thread_id = $1
              ORDER BY created_at DESC, id DESC
              LIMIT $4
+        ),
+        hits AS (
+            SELECT o.rn,
+                   (e.embedding <=> $2)
+                     - COALESCE(
+                         $5 * POWER(
+                             0.5,
+                             EXTRACT(EPOCH FROM (NOW() - o.created_at))
+                                 / 86400.0 / NULLIF($6, 0)
+                         ),
+                         0
+                       ) AS score
+              FROM ordered o
+              JOIN message_embeddings e ON e.message_id = o.id
+             WHERE o.id NOT IN (SELECT id FROM recent)
+               AND (e.embedding <=> $2) <= $8
+             ORDER BY score ASC
+             LIMIT $3
+        ),
+        window_rns AS (
+            SELECT DISTINCT o.rn
+              FROM ordered o
+              JOIN hits h ON o.rn BETWEEN h.rn - $7 AND h.rn + $7
         )
-        SELECT m.id, m.thread_id, m.role::text AS role, m.content,
-               m.metadata, m.created_at
-          FROM message_embeddings e
-          JOIN messages m ON m.id = e.message_id
-         WHERE m.thread_id = $1
-           AND m.id NOT IN (SELECT id FROM recent)
-         ORDER BY e.embedding <=> $2
-         LIMIT $3
+        SELECT o.id, o.thread_id, o.role::text AS role, o.content,
+               o.metadata, o.created_at
+          FROM ordered o
+          JOIN window_rns w ON o.rn = w.rn
+         WHERE o.id NOT IN (SELECT id FROM recent)
+         ORDER BY o.created_at ASC, o.id ASC
         """,
         thread_id, query_embedding, k, exclude_recent_n,
+        recency_weight, half_life_days, window, max_distance,
+    )
+    return [_row_to_message(r) for r in rows]
+
+
+async def search_user_messages(
+    conn: asyncpg.Connection,
+    *,
+    user_id: UUID,
+    query_embedding: list[float],
+    k: int = 25,
+    recency_weight: float = 0.0,
+    half_life_days: float = 30.0,
+    window: int = 0,
+    max_distance: float = 2.0,
+    exclude_recent_thread_id: UUID | None = None,
+    exclude_recent_n: int = 0,
+) -> list[Message]:
+    """Like :func:`search_relevant` but scoped to the *whole user* — every
+    thread they own, not one.
+
+    A user's memory is one continuous thing (threads are just channel-
+    agnostic containers, and a user may have several from legacy per-channel
+    splits or `/reset`). Recall therefore spans all of them: it shouldn't go
+    blind to a topic just because it was last discussed in a different
+    thread. Neighbor windows and the recency term stay *within* each
+    message's own thread (``PARTITION BY thread_id``). Results come back
+    grouped by thread, chronological within.
+
+    ``exclude_recent_thread_id`` + ``exclude_recent_n`` drop the newest
+    ``exclude_recent_n`` messages of *that one thread* — used by the Planner
+    to avoid duplicating the current thread's verbatim window (which it
+    already loaded via :func:`fetch_recent`). Other threads are never
+    excluded. Leave unset (the tools' deliberate mode) to search everything.
+    """
+    rows = await conn.fetch(
+        """
+        WITH ordered AS (
+            SELECT m.id, m.thread_id, m.role, m.content, m.metadata,
+                   m.created_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY m.thread_id
+                       ORDER BY m.created_at ASC, m.id ASC
+                   ) AS rn
+              FROM messages m
+              JOIN threads t ON t.id = m.thread_id
+             WHERE t.user_id = $1
+        ),
+        recent AS (
+            SELECT id FROM messages
+             WHERE thread_id = $8
+             ORDER BY created_at DESC, id DESC
+             LIMIT $9
+        ),
+        hits AS (
+            SELECT o.thread_id, o.rn,
+                   (e.embedding <=> $2)
+                     - COALESCE(
+                         $4 * POWER(
+                             0.5,
+                             EXTRACT(EPOCH FROM (NOW() - o.created_at))
+                                 / 86400.0 / NULLIF($5, 0)
+                         ),
+                         0
+                       ) AS score
+              FROM ordered o
+              JOIN message_embeddings e ON e.message_id = o.id
+             WHERE (e.embedding <=> $2) <= $6
+               AND o.id NOT IN (SELECT id FROM recent)
+             ORDER BY score ASC
+             LIMIT $3
+        ),
+        window_rns AS (
+            SELECT DISTINCT o.thread_id, o.rn
+              FROM ordered o
+              JOIN hits h
+                ON o.thread_id = h.thread_id
+               AND o.rn BETWEEN h.rn - $7 AND h.rn + $7
+        )
+        SELECT o.id, o.thread_id, o.role::text AS role, o.content,
+               o.metadata, o.created_at
+          FROM ordered o
+          JOIN window_rns w
+            ON o.thread_id = w.thread_id AND o.rn = w.rn
+         WHERE o.id NOT IN (SELECT id FROM recent)
+         ORDER BY o.thread_id, o.created_at ASC, o.id ASC
+        """,
+        user_id, query_embedding, k,
+        recency_weight, half_life_days, max_distance, window,
+        exclude_recent_thread_id, max(0, exclude_recent_n),
     )
     return [_row_to_message(r) for r in rows]
 

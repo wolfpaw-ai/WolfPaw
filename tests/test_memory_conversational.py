@@ -63,6 +63,14 @@ async def _with_conn(fn, *args, **kwargs):
     dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
     conn = await asyncpg.connect(dsn=dsn)
     try:
+        # Register the same vector + jsonb codecs the app pool installs on
+        # acquire, so DAO calls that bind a query embedding
+        # (search_relevant) or read a jsonb `metadata` column behave
+        # exactly as they do in production. Raw test conns must do it
+        # themselves.
+        from wolfpaw.memory.db import _setup_connection
+
+        await _setup_connection(conn)
         return await fn(conn, *args, **kwargs)
     finally:
         await conn.close()
@@ -186,6 +194,44 @@ async def test_fetch_recent_isolates_per_thread():
     assert [m.content for m in await _with_conn(conv.fetch_recent, thread_id=b, n=20)] == ["in B"]
 
 
+async def test_fetch_page_walks_backwards_via_cursor():
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+    for i in range(5):
+        await _with_conn(conv.append, thread_id=tid, role="user", content=f"m{i}")
+    # No cursor → newest page, still chronological within the page.
+    page1 = await _with_conn(conv.fetch_page, thread_id=tid, limit=2)
+    assert [m.content for m in page1] == ["m3", "m4"]
+    # Cursor = oldest loaded message → the page immediately before it.
+    page2 = await _with_conn(
+        conv.fetch_page, thread_id=tid,
+        before_created_at=page1[0].created_at, before_id=page1[0].id, limit=2,
+    )
+    assert [m.content for m in page2] == ["m1", "m2"]
+    page3 = await _with_conn(
+        conv.fetch_page, thread_id=tid,
+        before_created_at=page2[0].created_at, before_id=page2[0].id, limit=2,
+    )
+    assert [m.content for m in page3] == ["m0"]
+
+
+async def test_fetch_page_filters_to_requested_roles():
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+    for role, text in [
+        ("user", "u1"), ("tool", "t1"), ("assistant", "a1"), ("system", "s1"),
+    ]:
+        await _with_conn(conv.append, thread_id=tid, role=role, content=text)
+    got = await _with_conn(
+        conv.fetch_page, thread_id=tid, roles=("user", "assistant"), limit=20,
+    )
+    assert [(m.role, m.content) for m in got] == [
+        ("user", "u1"), ("assistant", "a1"),
+    ]
+
+
 # --- step 22: tiered memory ------------------------------------------------
 
 
@@ -235,8 +281,11 @@ async def test_fetch_summaries_returns_unfolded_l1_only():
     # L1 alpha (folded) drops out; L1 beta (un-folded) stays; L2 stays.
     contents = {s.summary_md for s in summaries}
     assert contents == {"L1 beta", "L2 covering alpha"}
-    # And the ordering is chronological by created_at.
-    assert [s.summary_md for s in summaries] == ["L1 beta", "L2 covering alpha"]
+    # Ordering is oldest-range-first: the L2 (which covers the older
+    # "alpha" range) precedes the newer un-folded L1. fetch_summaries
+    # orders by level DESC then created_at ASC, since higher levels
+    # always cover strictly older content than surviving lower ones.
+    assert [s.summary_md for s in summaries] == ["L2 covering alpha", "L1 beta"]
 
 
 async def _seed_msg_with_embedding(
@@ -345,5 +394,108 @@ async def test_search_relevant_isolates_per_thread():
         thread_id=b, query_embedding=query, k=5, exclude_recent_n=0,
     )
     assert [h.content for h in hits] == ["in B"]
+
+
+async def test_search_user_messages_spans_threads_and_excludes_current_recent():
+    """User-scoped search reaches every thread the user owns, and can drop
+    the current thread's verbatim window without touching other threads."""
+    from datetime import datetime, timedelta, timezone
+
+    from wolfpaw.embeddings.stub import StubEmbedder
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    a = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+    embedder = StubEmbedder(dimensions=1024)
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    await _seed_msg_with_embedding(
+        dsn, a, "target alpha", created_at=base, embedder=embedder)
+    await _seed_msg_with_embedding(
+        dsn, a, "filler one", created_at=base + timedelta(seconds=1),
+        embedder=embedder)
+    await _seed_msg_with_embedding(
+        dsn, a, "filler two", created_at=base + timedelta(seconds=2),
+        embedder=embedder)
+
+    q = (await embedder.embed_one("target alpha")).vectors[0]
+    # Excluding the newest 2 of thread `a` still leaves the oldest ("target
+    # alpha") searchable.
+    hits = await _with_conn(
+        conv.search_user_messages, user_id=uid, query_embedding=q,
+        k=5, window=0, max_distance=0.75,
+        exclude_recent_thread_id=a, exclude_recent_n=2,
+    )
+    assert [h.content for h in hits] == ["target alpha"]
+    # Excluding the newest 3 (all of thread `a`) drops it too.
+    hits2 = await _with_conn(
+        conv.search_user_messages, user_id=uid, query_embedding=q,
+        k=5, window=0, max_distance=0.75,
+        exclude_recent_thread_id=a, exclude_recent_n=3,
+    )
+    assert hits2 == []
+
+
+async def test_search_relevant_returns_neighbor_windows():
+    """A single hit is returned with `window` neighbors on either side (by
+    thread order), in chronological order, for conversational coherence."""
+    from datetime import datetime, timedelta, timezone
+
+    from wolfpaw.embeddings.stub import StubEmbedder
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+
+    embedder = StubEmbedder(dimensions=1024)
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    for i, c in enumerate(["m0", "m1", "m2", "m3", "m4", "m5", "m6"]):
+        await _seed_msg_with_embedding(
+            dsn, tid, c, created_at=base + timedelta(seconds=i), embedder=embedder,
+        )
+
+    # Exact match on the middle message; window=2 pulls the two messages
+    # on each side. recency_weight=0 keeps the exact match deterministic.
+    query = (await embedder.embed_one("m3")).vectors[0]
+    hits = await _with_conn(
+        conv.search_relevant,
+        thread_id=tid, query_embedding=query, k=1, exclude_recent_n=0,
+        window=2, recency_weight=0.0,
+    )
+    assert [h.content for h in hits] == ["m1", "m2", "m3", "m4", "m5"]
+
+
+async def test_search_relevant_recency_breaks_ties():
+    """Two equally-relevant messages (identical content → identical vector)
+    tie on cosine distance; the recency bonus surfaces the newer one."""
+    from datetime import datetime, timedelta, timezone
+
+    from wolfpaw.embeddings.stub import StubEmbedder
+
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    uid = await _seed_user(dsn)
+    tid = await _with_conn(conv.get_or_create_thread, user_id=uid, channel="web")
+
+    embedder = StubEmbedder(dimensions=1024)
+    now = datetime.now(timezone.utc)
+    old_id = await _seed_msg_with_embedding(
+        dsn, tid, "same topic", created_at=now - timedelta(days=365),
+        embedder=embedder,
+    )
+    new_id = await _seed_msg_with_embedding(
+        dsn, tid, "same topic", created_at=now - timedelta(days=1),
+        embedder=embedder,
+    )
+
+    query = (await embedder.embed_one("same topic")).vectors[0]
+    # k=1, window=0 → exactly the single top-scoring message. Both have
+    # cosine distance 0, so recency alone decides — the newer wins.
+    hits = await _with_conn(
+        conv.search_relevant,
+        thread_id=tid, query_embedding=query, k=1, exclude_recent_n=0,
+        window=0, recency_weight=0.15, half_life_days=30.0,
+    )
+    assert len(hits) == 1
+    assert hits[0].id == new_id
+    assert hits[0].id != old_id
 
 

@@ -25,6 +25,7 @@ from wolfpaw.toolbox.tools import (  # noqa: F401
     list_schedules,
     list_tables,
     read_doc,
+    recall_memory,
     run_python,
     sandbox_read_file,
     sandbox_write_file,

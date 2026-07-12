@@ -37,6 +37,12 @@ The three write tools above catch `asyncpg.UndefinedColumnError` / `UndefinedTab
 - **`list_docs`** — enumerate the user's workspace docs (latest version per filename) with size + version + mime + created_at. No args. Cheap — no Storage round-trip.
 - **`search_docs`** — semantic search by *content*. Embeds the query, runs ANN search against `workspace_files.embedding`, returns ranked filenames + similarity scores. The agent then `read_doc`s the hits it wants.
 
+### Conversational memory
+
+- **`recall_memory`** — deliberate, age-blind deep recall over the user's *entire* memory — **all their threads**, not just the current one (vs. the Planner's automatic recency-weighted, current-thread recall). For when the user reaches back — "remember when we talked about …". Embeds the query, runs `conv.search_user_messages` (`recency_weight=0`, loose relevance floor, per-thread neighbor windows), returns matching older messages. Contract: the agent must **restate** what it finds so the recalled material re-enters the conversation (and thus working memory) as a normal persisted turn.
+
+  *(A confirmation-gated `delete_memories` / "forgetting" tool is planned but not built — deletion + summary-scrub is deferred; see the memory-improvement plan.)*
+
 ### Sandbox
 
 - **`run_python`** — execute Python in the task's sandbox; state persists across calls.

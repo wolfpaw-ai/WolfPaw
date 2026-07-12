@@ -293,11 +293,17 @@ class PlannerAgent:
                 if thread_id is not None else []
             )
             vector_recall = (
-                await conv.search_relevant(
+                await conv.search_user_messages(
                     conn,
-                    thread_id=thread_id,
+                    user_id=ctx.user_id,
                     query_embedding=query_embedding,
                     k=settings.vector_recall_k,
+                    recency_weight=settings.vector_recall_recency_weight,
+                    half_life_days=settings.vector_recall_half_life_days,
+                    window=settings.vector_recall_window,
+                    # Recall spans all the user's threads, but still skip the
+                    # current thread's verbatim window — fetch_recent has it.
+                    exclude_recent_thread_id=thread_id,
                     exclude_recent_n=settings.recent_window_size,
                 )
                 if thread_id is not None and query_embedding is not None
