@@ -113,6 +113,7 @@ class TaskService:
         title: str,
         description: str | None = None,
         channel_for_completion: str | None = None,
+        channel: str | None = None,
         complexity_hint: str = "moderate",
         parent_task_id: UUID | None = None,
         budget_cents: int | None = None,
@@ -122,6 +123,12 @@ class TaskService:
         event with the inputs the worker will need (content, thread_id,
         complexity_hint live in the event's `content` JSONB so the run
         side can recover them without a separate side-table).
+
+        ``channel`` is the originating channel ('web' | 'telegram' | ...).
+        It's persisted into the pending event and restored in :meth:`run`
+        so ``ask_user`` — which fires deep inside the executor — can push
+        the question back through the same channel the request came in on.
+        Without it a backgrounded task has no way to reach the user.
 
         ``agentic`` set → the run executes as a tool loop (Quick agent's
         engine) instead of the planner→executor pipeline. Scheduled tasks
@@ -148,6 +155,7 @@ class TaskService:
                     "content": content,
                     "thread_id": str(thread_id) if thread_id else None,
                     "complexity_hint": complexity_hint,
+                    **({"channel": channel} if channel else {}),
                     **({"agentic": True} if agentic else {}),
                     **({"parent_task_id": str(parent_task_id)}
                        if parent_task_id else {}),
@@ -207,6 +215,7 @@ class TaskService:
         thread_id = UUID(thread_id_raw) if thread_id_raw else None
         complexity_hint = ev.get("complexity_hint") or "moderate"
         agentic = bool(ev.get("agentic"))
+        channel = ev.get("channel")
 
         return await self._run_inner(
             user_id=user_id,
@@ -216,6 +225,7 @@ class TaskService:
             complexity_hint=complexity_hint,
             emit=emit,
             agentic=agentic,
+            channel=channel,
         )
 
     async def create_and_run(
@@ -227,6 +237,7 @@ class TaskService:
         title: str,
         description: str | None = None,
         channel_for_completion: str | None = None,
+        channel: str | None = None,
         complexity_hint: str = "moderate",
         emit: EmitFn | None = None,
         parent_task_id: UUID | None = None,
@@ -255,6 +266,7 @@ class TaskService:
             title=title,
             description=description,
             channel_for_completion=channel_for_completion,
+            channel=channel,
             complexity_hint=complexity_hint,
             parent_task_id=parent_task_id,
             budget_cents=budget_cents,
@@ -268,6 +280,7 @@ class TaskService:
             complexity_hint=complexity_hint,
             emit=emit,
             precomputed_plan=precomputed_plan,
+            channel=channel,
         )
 
     # --- internal pipeline ---------------------------------------------------
@@ -283,8 +296,11 @@ class TaskService:
         emit: EmitFn | None,
         precomputed_plan: Plan | None = None,
         agentic: bool = False,
+        channel: str | None = None,
     ) -> TaskOutcome:
-        ctx = ToolContext(user_id=user_id, task_id=task_id, emit=emit)
+        ctx = ToolContext(
+            user_id=user_id, task_id=task_id, emit=emit, channel=channel,
+        )
 
         # Transition to running.
         await self._transition(
@@ -313,6 +329,10 @@ class TaskService:
                     ctx=ctx, thread_id=thread_id,
                     content=content, complexity_hint=complexity_hint,
                     emit=emit,
+                    # Headless (scheduled) runs actually reach the planner via
+                    # the `agentic` quick-loop, not here — but be explicit so
+                    # ask_user planning is only offered when a human can reply.
+                    human_available=not agentic,
                 )
             if plan.id is not None:
                 async with acquire() as conn:

@@ -74,7 +74,8 @@ class FakePlanner:
     calls: list[dict] = field(default_factory=list)
 
     async def plan(self, *, ctx, thread_id, content, complexity_hint,
-                   revision_diagnosis=None):
+                   revision_diagnosis=None, replan_from=None,
+                   human_available=True):
         self.calls.append({
             "user_id": ctx.user_id, "task_id": ctx.task_id,
             "thread_id": thread_id, "content": content,
@@ -102,7 +103,8 @@ class FakePreEvaluator:
 
     calls: list[dict] = field(default_factory=list)
 
-    async def evaluate(self, *, ctx, content, plan, past_plans=None):
+    async def evaluate(self, *, ctx, content, plan, past_plans=None,
+                       human_available=True):
         self.calls.append({"plan_summary": plan.summary})
         return PreEvalVerdict(
             approved=True, achieves_objective=True,

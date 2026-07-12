@@ -242,6 +242,7 @@ class PlannerAgent:
         complexity_hint: str = "moderate",
         revision_diagnosis: str | None = None,
         replan_from: ReplanContext | None = None,
+        human_available: bool = True,
     ) -> tuple[Plan, PlanContext]:
         """Generate a Plan. `thread_id=None` means no conversational history
         to load — used by subagent tasks (step 16) which run with a fresh
@@ -364,7 +365,14 @@ class PlannerAgent:
             user_tools=user_tools,
             connected_integrations=connected_integrations,
         )
-        role_with_context = _AGENT_ROLE
+        # Authoritative fact about THIS run — stated up front so it wins over
+        # any retrieved past plan that was created in the other mode. Past
+        # plans are injected as reusable context below; a scheduled run's
+        # "no human available" framing must never bleed into an interactive
+        # plan (or vice-versa). See _execution_context_block.
+        role_with_context = (
+            _execution_context_block(human_available) + "\n\n" + _AGENT_ROLE
+        )
         if revision_diagnosis:
             role_with_context = (
                 _format_revision_block(revision_diagnosis) + "\n\n"
@@ -445,6 +453,32 @@ def _price_voyage(input_tokens: int) -> int:
 
     cents = (input_tokens * _VOYAGE_MICROCENTS_PER_MTOK) / 1_000_000
     return max(0, ceil(cents))
+
+
+def _execution_context_block(human_available: bool) -> str:
+    """Authoritative statement of whether a human can answer mid-plan. Sits
+    at the very front of the system prompt so it overrides any retrieved past
+    plan created in the other execution mode. This is the guard against a
+    scheduled run's "no human available" framing bleeding into an interactive
+    plan (which was stripping legitimate `ask_user` steps)."""
+    if human_available:
+        return (
+            "## Execution context (authoritative)\n"
+            "This request is running INTERACTIVELY: the user is present and"
+            " WILL answer follow-up questions. When the request needs input"
+            " you don't have — a URL, a choice, a confirmation before a"
+            " destructive or ambiguous action — include an `ask_user` step."
+            " Do NOT invent values, silently skip the ask, or refuse for"
+            " lack of input. Ignore any retrieved past plan that assumes no"
+            " human is available; that framing does not apply to this run."
+        )
+    return (
+        "## Execution context (authoritative)\n"
+        "This request is running HEADLESS (a scheduled/background job): there"
+        " is no human available to answer questions. Do NOT include"
+        " `ask_user` steps. Act on the instruction with the information"
+        " available, or stop if it genuinely cannot proceed."
+    )
 
 
 def _format_revision_block(diagnosis: str) -> str:

@@ -14,6 +14,7 @@ import pytest
 
 from wolfpaw.agents.plan_pre_evaluator import (
     PlanPreEvaluatorAgent,
+    _build_eval_prompt,
     plan_with_pre_evaluation,
 )
 from wolfpaw.memory import procedural
@@ -297,10 +298,12 @@ class _FakePlannerForHelper:
         self.calls: list[dict] = []
 
     async def plan(self, *, ctx, thread_id, content,
-                   complexity_hint="moderate", revision_diagnosis=None):
+                   complexity_hint="moderate", revision_diagnosis=None,
+                   replan_from=None, human_available=True):
         self.calls.append({
             "content": content,
             "revision_diagnosis": revision_diagnosis,
+            "human_available": human_available,
         })
         from wolfpaw.agents.planner import PlanContext
 
@@ -319,8 +322,12 @@ class _FakePreEvaluator:
     def __post_init__(self):
         self.calls = []
 
-    async def evaluate(self, *, ctx, content, plan, past_plans=None):
-        self.calls.append({"plan_summary": plan.summary})
+    async def evaluate(self, *, ctx, content, plan, past_plans=None,
+                       human_available=True):
+        self.calls.append({
+            "plan_summary": plan.summary,
+            "human_available": human_available,
+        })
         return self.verdicts.pop(0)
 
 
@@ -588,3 +595,37 @@ async def test_plan_with_pre_evaluation_ships_second_plan_unconditionally():
     assert plan is p2
     assert retried is True
     assert len(pre.calls) == 1, "second plan must NOT be re-evaluated"
+
+
+# --- execution-context guidance (ask_user vs headless) ---------------------
+
+
+def test_eval_prompt_states_human_available_when_interactive():
+    prompt = _build_eval_prompt("do a thing", _plan(), [], human_available=True)
+    assert "INTERACTIVE" in prompt
+    assert "ask_user" in prompt and "not a defect" in prompt
+
+
+def test_eval_prompt_states_headless_when_no_human():
+    prompt = _build_eval_prompt("do a thing", _plan(), [], human_available=False)
+    assert "HEADLESS" in prompt
+    assert "no human" in prompt.lower()
+
+
+async def test_helper_forwards_human_available_to_planner_and_evaluator():
+    """The interactive/headless signal must reach BOTH the planner and the
+    pre-evaluator — that's what overrides a polluted past plan."""
+    planner = _FakePlannerForHelper([_plan()])
+    pre = _FakePreEvaluator(verdicts=[
+        PreEvalVerdict(
+            approved=True, achieves_objective=True,
+            simplifiable=False, better_than_past_plans=True, diagnosis="ok",
+        ),
+    ])
+    await plan_with_pre_evaluation(
+        planner=planner, pre_evaluator=pre,
+        ctx=ToolContext(user_id=uuid4()), thread_id=None,
+        content="q", complexity_hint="moderate", human_available=False,
+    )
+    assert planner.calls[0]["human_available"] is False
+    assert pre.calls[0]["human_available"] is False
