@@ -16,9 +16,18 @@ import {
   useRef,
   useState,
 } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { askUser, chat } from "../api/client";
 import type { ChatMessage } from "../api/types";
 import { streamChat, SseEvent } from "./sseClient";
+
+// Render user-supplied links in a new tab, never leaking the opener.
+const MD_COMPONENTS = {
+  a: (props: JSX.IntrinsicElements["a"]) => (
+    <a {...props} target="_blank" rel="noopener noreferrer" />
+  ),
+};
 
 interface Turn {
   id: number;
@@ -333,7 +342,20 @@ export function ChatPage() {
                 </ul>
               </details>
             )}
-            <pre className="turn-text">{t.text}</pre>
+            {t.role === "user" ? (
+              // User text is plain — preserve their line breaks, but don't
+              // interpret stray markdown characters they typed.
+              <div className="turn-text turn-plain">{t.text}</div>
+            ) : (
+              <div className="turn-text turn-md">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={MD_COMPONENTS}
+                >
+                  {t.text}
+                </ReactMarkdown>
+              </div>
+            )}
           </article>
         ))}
       </div>
