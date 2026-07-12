@@ -247,7 +247,7 @@ class Router:
                 content=content,
                 title=title,
                 description=content,
-                channel_for_completion="web",
+                channel_for_completion=ctx.channel or "web",
                 channel=ctx.channel,
                 complexity_hint=complexity_hint,
             )
@@ -265,7 +265,7 @@ class Router:
                 content=content,
                 title=title,
                 description=content,
-                channel_for_completion="web",
+                channel_for_completion=ctx.channel or "web",
                 channel=ctx.channel,
                 complexity_hint=complexity_hint,
                 emit=emit,

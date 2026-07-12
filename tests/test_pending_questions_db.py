@@ -37,6 +37,9 @@ async def _fresh_db(monkeypatch):
         await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         await apply_sql_file(conn, migrations_dir() / "001_init.sql")
         await apply_sql_file(conn, migrations_dir() / "019_pending_questions.sql")
+        await apply_sql_file(
+            conn, migrations_dir() / "020_pending_question_expiry.sql",
+        )
     finally:
         await conn.close()
     await close_pool()
@@ -147,3 +150,32 @@ async def test_get_open_for_user_finds_pending():
         await pq_dao.mark_answered(
             conn, question_id=pq.id, user_id=user_id, answer="done")
         assert await pq_dao.get_open_for_user(conn, user_id=user_id) is None
+
+
+async def test_get_open_for_user_ignores_expired():
+    """A stranded 'pending' question past its expiry must NOT be returned —
+    otherwise the user's next unrelated message gets swallowed as an answer
+    to a question nobody is waiting on (and their real request never routes)."""
+    dsn = os.environ["WOLFPAW_TEST_DATABASE_URL"]
+    user_id, task_id = await _seed_task(dsn)
+    from wolfpaw.memory.db import acquire
+
+    # A short-lived question, then push it past expiry.
+    async with acquire() as conn:
+        pq = await pq_dao.create(
+            conn, task_id=task_id, user_id=user_id,
+            question="which url?", channel="telegram", timeout_seconds=1,
+        )
+        # Still open right after creation.
+        assert (await pq_dao.get_open_for_user(conn, user_id=user_id)).id == pq.id
+        # Force it past expiry (avoid a real sleep).
+        await conn.execute(
+            "UPDATE pending_questions SET expires_at = NOW() - INTERVAL '1 second'"
+            " WHERE id = $1",
+            pq.id,
+        )
+        assert await pq_dao.get_open_for_user(conn, user_id=user_id) is None
+        # The row is still 'pending' — expiry excludes it from routing without
+        # mutating status (a late answer via /answer can still resolve it).
+        still = await pq_dao.get(conn, question_id=pq.id)
+        assert still is not None and still.status == "pending"

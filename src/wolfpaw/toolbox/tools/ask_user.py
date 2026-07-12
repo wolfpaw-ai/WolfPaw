@@ -135,6 +135,7 @@ class AskUserTool(Tool):
                     question=question,
                     options=options,
                     urgency=str(urgency),
+                    timeout_seconds=timeout,
                 )
                 await tasks_dao.mark_awaiting_user(
                     conn, task_id=ctx.task_id,

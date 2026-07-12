@@ -186,11 +186,14 @@ class TaskService:
         # Reload + hydrate the run inputs from the pending-event.
         async with acquire() as conn:
             task = await conn.fetchrow(
-                "SELECT id, user_id FROM tasks WHERE id = $1", task_id,
+                "SELECT id, user_id, channel_for_completion"
+                " FROM tasks WHERE id = $1",
+                task_id,
             )
             if task is None:
                 raise ValueError(f"Task {task_id} not found")
             user_id: UUID = task["user_id"]
+            completion_channel: str | None = task["channel_for_completion"]
 
             event_row = await conn.fetchrow(
                 "SELECT content FROM task_events"
@@ -217,7 +220,7 @@ class TaskService:
         agentic = bool(ev.get("agentic"))
         channel = ev.get("channel")
 
-        return await self._run_inner(
+        outcome = await self._run_inner(
             user_id=user_id,
             task_id=task_id,
             thread_id=thread_id,
@@ -227,6 +230,19 @@ class TaskService:
             agentic=agentic,
             channel=channel,
         )
+        # Backgrounded tasks (worker or inline-fallback) have no live
+        # stream and no caller to hand the answer to — push the result
+        # back through the channel the request came in on. Skipped for
+        # agentic runs: those deliver via the tools their loop calls
+        # (e.g. send_telegram_message), so a completion push would
+        # double-send. See _deliver_completion.
+        if not agentic:
+            await self._deliver_completion(
+                user_id=user_id,
+                channel=completion_channel,
+                outcome=outcome,
+            )
+        return outcome
 
     async def create_and_run(
         self,
@@ -529,6 +545,46 @@ class TaskService:
             # CASCADE from users wouldn't fire mid-task).
             raise ValueError(f"Task {task_id} disappeared during run")
         return task
+
+    async def _deliver_completion(
+        self, *, user_id: UUID, channel: str | None, outcome: TaskOutcome,
+    ) -> None:
+        """Push a finished task's final answer back through the channel the
+        request came in on.
+
+        Only the backgrounded entry point (`run`, driven by the arq worker or
+        the inline fallback) calls this: those runs have no live stream and no
+        caller to hand the answer to, so without a push the result is computed
+        and silently dropped — the "Telegram acks then goes quiet after
+        answering" bug. `create_and_run` callers (web SSE, inline Telegram)
+        deliver the returned outcome themselves and must NOT double-send.
+
+        Best-effort: a channel with no push transport (web `send` raises
+        NotImplementedError) or a delivery error never fails the task."""
+        if not channel:
+            return
+        answer = (outcome.final_answer or "").strip()
+        if not answer:
+            return
+        from wolfpaw.channels import get_channel
+
+        ch = get_channel(channel)
+        if ch is None:
+            log.warning("tasks.service.completion_no_channel", channel=channel)
+            return
+        try:
+            await ch.send(user_id, answer)
+        except NotImplementedError:
+            # e.g. web — no proactive push transport. HITL web tasks run
+            # inline and stream their own result, so this is expected.
+            log.info(
+                "tasks.service.completion_channel_no_push", channel=channel,
+            )
+        except Exception:  # noqa: BLE001 — never crash the job on delivery
+            log.warning(
+                "tasks.service.completion_delivery_failed",
+                channel=channel, exc_info=True,
+            )
 
 
 async def _maybe_emit(emit: EmitFn | None, event: str, data: str) -> None:

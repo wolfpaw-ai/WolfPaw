@@ -40,9 +40,11 @@ def stub(monkeypatch):
     )
 
     async def fake_create(_conn, *, task_id, user_id, question, thread_id=None,
-                          channel=None, options=None, urgency="normal"):
+                          channel=None, options=None, urgency="normal",
+                          timeout_seconds=300):
         state.created = SimpleNamespace(
             id=uuid4(), question=question, options=options, channel=channel,
+            timeout_seconds=timeout_seconds,
         )
         return state.created
 

@@ -55,6 +55,7 @@ class PendingQuestion:
     answer: str | None
     created_at: datetime
     answered_at: datetime | None
+    expires_at: datetime | None = None
 
 
 class AnswerOutcome(str, Enum):
@@ -82,6 +83,7 @@ def _row_to_question(row: asyncpg.Record) -> PendingQuestion:
         answer=row["answer"],
         created_at=row["created_at"],
         answered_at=row["answered_at"],
+        expires_at=row.get("expires_at"),
     )
 
 
@@ -95,17 +97,26 @@ async def create(
     channel: str | None = None,
     options: list[str] | None = None,
     urgency: str = "normal",
+    timeout_seconds: int = 300,
 ) -> PendingQuestion:
-    """Insert a new pending question and return it."""
+    """Insert a new pending question and return it.
+
+    ``expires_at`` is stamped to now + ``timeout_seconds`` (the same window
+    `ask_user` waits) so `get_open_for_user` stops matching this row once the
+    wait is abandoned — a stranded 'pending' row must not swallow the user's
+    later, unrelated messages."""
     row = await conn.fetchrow(
         """
         INSERT INTO pending_questions
-            (task_id, user_id, thread_id, channel, question, options, urgency)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+            (task_id, user_id, thread_id, channel, question, options,
+             urgency, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7,
+                NOW() + ($8 * INTERVAL '1 second'))
         RETURNING *
         """,
         task_id, user_id, thread_id, channel, question,
         json.dumps(list(options) if options else []), urgency,
+        max(1, int(timeout_seconds)),
     )
     return _row_to_question(row)
 
@@ -123,13 +134,21 @@ async def get(
 async def get_open_for_user(
     conn: asyncpg.Connection, *, user_id: UUID,
 ) -> PendingQuestion | None:
-    """Return the user's oldest still-pending question, or None. Used by the
-    Telegram inbound path to decide whether the next message is an answer."""
+    """Return the user's oldest still-open question, or None. Used by the
+    Telegram inbound path to decide whether the next message is an answer.
+
+    "Open" means `pending` AND not past its `expires_at` — an abandoned wait
+    (worker died before the timeout handler ran) leaves a stranded 'pending'
+    row that must NOT capture unrelated later messages. NULL `expires_at`
+    (legacy rows written before the column existed) never matches, which is
+    the safe default: better to route the message as a fresh turn than to
+    swallow it into a dead question."""
     row = await conn.fetchrow(
         """
         SELECT * FROM pending_questions
          WHERE user_id = $1 AND status = 'pending'
-         ORDER BY created_at
+           AND expires_at > NOW()
+         ORDER BY expires_at
          LIMIT 1
         """,
         user_id,
