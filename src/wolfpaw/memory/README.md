@@ -2,6 +2,12 @@
 
 Postgres access + the agent-facing memory subsystems. Every DAO in here is consumed by [`agents/`](../agents/README.md) (for reading context and writing outcomes) and by [`toolbox/`](../toolbox/README.md) (for read-only retrieval inside tools). Top-level placement is in the [root README](../../../README.md).
 
+## Overview
+
+![WolfPaw agentic memory: raw message storage feeds a verbatim recent window, an async L1→L2→L3 compaction ladder, and per-turn semantic recall — all converging on a roughly constant-size prompt.](wolfpaw-memory.png)
+
+The whole subsystem exists to assemble a **roughly constant-size prompt** no matter how long the conversation runs: the last 20 messages verbatim, the active summary tiers, and per-turn semantic recall of the most relevant older raw messages. The two diagrams below drill into the compaction ladder specifically.
+
 ## Files
 
 - **`db.py`** — process-wide asyncpg pool. `get_pool()` lazily creates it from `WOLFPAW_DATABASE_URL`; `acquire()` is the standard `async with acquire() as conn` context manager every DAO uses. Registers pgvector types and a JSONB codec (`json.dumps`/`json.loads`) on each connection so callers can pass dicts directly. Provides `migrations_dir()` + `apply_sql_file(conn, path)` for tests and dev bootstrap.
@@ -46,6 +52,43 @@ flowchart TD
 ```
 
 Plus async work that fires after the response is sent: workers/jobs/compact_thread.py runs L1 → L2 → L3 compaction when a thread crosses the trigger threshold (see [`workers/README.md`](../workers/README.md)). L1 folds ~20 raw messages; L2 folds ~10 L1s; L3 folds ~10 L2s into a **single, rewritten-in-place** digest so the summary layer stays O(1) in the prompt no matter how long the conversation runs.
+
+## Diagram — the compaction ladder
+
+`compact_thread(thread_id)` is enqueued after every `conv.append` and runs one **drain pass** (`_drain_l1` → `_drain_l2` → `_drain_l3`) once the response is out. Each level is a loop with its own trigger; every fold re-checks the threshold, so a single pass drains the whole backlog and concurrent invocations just no-op. All summaries are written by **Haiku** (`model_triage`, agent `compactor`). Folded child rows aren't deleted — their `folded_into_summary_id` is stamped so `fetch_summaries` (which selects `folded_into_summary_id IS NULL`) surfaces only the highest active level.
+
+```mermaid
+flowchart TD
+    Append["conv.append (user + final turn)"] -->|enqueue after response| Drain{{"compact_thread: one drain pass"}}
+
+    Drain --> L1G{"_drain_l1<br/>COUNT(messages) ≥ 40?"}
+    L1G -->|no| Done([idle — below threshold])
+    L1G -->|yes| L1F["Summarize oldest 20 messages<br/>outside the recent-20 window &<br/>not already covered by an L1<br/>· Haiku, 3–8 bullets, max_tokens 600"]
+    L1F --> L1I[("INSERT thread_summaries<br/>level 1 · range_start/end msg id")]
+    L1I -->|"loop while ≥20 uncovered-older remain"| L1G
+
+    L1I --> L2G{"_drain_l2<br/>≥10 un-folded L1s?"}
+    L2G -->|no| L3G
+    L2G -->|yes| L2F["Fold oldest 10 L1s → one L2<br/>· Haiku, 4–10 bullets, max_tokens 600"]
+    L2F --> L2I[("INSERT level 2<br/>+ stamp folded_into_summary_id<br/>on the 10 child L1s")]
+    L2I -->|"loop while ≥10 un-folded L1s"| L2G
+
+    L2I --> L3G{"_drain_l3<br/>≥10 un-folded L2s?"}
+    L3G -->|no| Active
+    L3G -->|yes| L3F["Feed CURRENT L3 digest + oldest 10 L2s<br/>→ rewrite ONE digest in place<br/>· Haiku, ≤12 bullets, max_tokens 1200<br/>· hard char cap 6000 backstop"]
+    L3F --> L3I[("UPDATE the single level-3 row<br/>(or INSERT first one)<br/>+ stamp folded_into_summary_id<br/>on the 10 child L2s")]
+    L3I -->|"loop while ≥10 un-folded L2s"| L3G
+
+    L3I --> Active[["fetch_summaries →<br/>active tiers only<br/>(folded_into_summary_id IS NULL):<br/>single L3 + un-folded L2s + un-folded L1s"]]
+    Active --> Prompt(["Summary layer in every prompt — O(1)"])
+
+    classDef pg fill:#0f172a,stroke:#a78bfa,color:#f9fafb;
+    class L1I,L2I,L3I pg;
+    classDef trig fill:#1e1b4b,stroke:#a78bfa,color:#f9fafb;
+    class L1G,L2G,L3G trig;
+```
+
+L1 and L2 **accumulate** rows (many summaries can be active at once); L3 is the ceiling — at most one row per thread, **rewritten in place** each fold so the current digest is fed back in and the oldest detail compresses away. That single fixed-budget digest is what bounds the summary layer to O(1) in the prompt no matter how long the conversation runs — lossy about the distant past by design. Thresholds (`≥40`, `10`, `10`) and budgets (`1200` tok / `6000` ch) are the `WOLFPAW_*` knobs in the tables below.
 
 ## Tuning conversational memory
 
