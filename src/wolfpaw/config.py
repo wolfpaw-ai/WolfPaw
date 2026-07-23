@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     model_executor: str = "claude-sonnet-4-6"
     model_post_evaluator: str = "claude-haiku-4-5"
 
+    # Output-token ceiling for every model call that doesn't override it.
+    # This is not just a length cap on prose: a tool call's arguments are
+    # generated as output tokens too, so a `write_doc` whose content is a
+    # multi-page document has to fit inside this budget or the tool_use block
+    # is truncated mid-JSON. The old value of 1024 silently broke any tool
+    # call carrying a real document.
+    model_max_tokens: int = 8192
+
     # Model-call tracing → `model_call_logs`. On by default: this is the only
     # record of *failed* calls, which `token_usage` never sees.
     trace_sink_enabled: bool = True

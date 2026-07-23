@@ -100,7 +100,9 @@ class ModelClient:
         model: str,
         messages: list[dict],
         system: str | None = None,
-        max_tokens: int = 1024,
+        # None → the `WOLFPAW_MODEL_MAX_TOKENS` default. Resolved here rather
+        # than as a literal default so one config change moves every agent.
+        max_tokens: int | None = None,
         prompt_version_id: UUID | None = None,
         task_id: UUID | None = None,
         request_id: str | None = None,
@@ -108,6 +110,9 @@ class ModelClient:
         **kwargs: Any,
     ) -> ModelCallResult:
         await self._enforcer.check_can_spend(user_id)
+
+        if max_tokens is None:
+            max_tokens = get_settings().model_max_tokens
 
         create_kwargs: dict[str, Any] = {
             "model": model,

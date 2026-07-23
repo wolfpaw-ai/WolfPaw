@@ -363,3 +363,75 @@ async def test_only_visible_turns_persisted(agent_env):
     persisted = agent_env.threads[thread_id]
     assert [m["role"] for m in persisted] == ["user", "assistant"]
     assert persisted[-1]["content"] == "It's 2."
+
+
+# --- truncation ------------------------------------------------------------
+
+
+async def test_truncated_tool_call_is_not_reported_as_success(agent_env):
+    """Regression: saving a document silently did nothing.
+
+    When a tool call's arguments run past `max_tokens`, Anthropic returns
+    `stop_reason="max_tokens"` and a `tool_use` block whose `input` JSON was
+    cut off mid-generation — here a `write_doc` with a filename and no
+    content. The agent used to fall through to `return result.text`, which is
+    the preamble the model emitted *before* starting the call ("I'll save
+    that for you"), so the user was told it worked and no file existed.
+
+    The truncated call must not run, and the reply must not claim success.
+    """
+    fake = FakeAnthropic([
+        FakeTurn(
+            content=[
+                _text("I'll save that for you."),
+                # Truncated: filename survived, content never made it out.
+                _tool_use("write_doc", {"filename": "resume-01.md"}, "tu_t"),
+            ],
+            stop_reason="max_tokens",
+        ),
+    ])
+    agent = QuickAgent(model_client=ModelClient(anthropic=fake))
+    ctx = ToolContext(user_id=uuid4())
+    thread_id = uuid4()
+    agent_env.threads[thread_id] = []
+
+    text = await agent.handle(
+        ctx=ctx, thread_id=thread_id, content="save my resume",
+    )
+
+    assert "write_doc" in text
+    assert "nothing was saved" in text
+    # The misleading preamble must not be what the user is left with.
+    assert text != "I'll save that for you."
+    # And the truncated call must never have been dispatched.
+    assert len(fake.calls) == 1
+
+
+async def test_truncated_prose_is_labelled_rather_than_passed_off(agent_env):
+    fake = FakeAnthropic([
+        FakeTurn(content=[_text("Here is the first half")],
+                 stop_reason="max_tokens"),
+    ])
+    agent = QuickAgent(model_client=ModelClient(anthropic=fake))
+    ctx = ToolContext(user_id=uuid4())
+    thread_id = uuid4()
+    agent_env.threads[thread_id] = []
+
+    text = await agent.handle(ctx=ctx, thread_id=thread_id, content="write an essay")
+    assert text.startswith("Here is the first half")
+    assert "truncated" in text
+
+
+async def test_model_calls_use_the_configured_token_budget(agent_env):
+    """The budget has to be big enough for a tool call carrying a document —
+    1024 was not, which is what truncated the write_doc above."""
+    fake = FakeAnthropic([
+        FakeTurn(content=[_text("hi")], stop_reason="end_turn"),
+    ])
+    agent = QuickAgent(model_client=ModelClient(anthropic=fake))
+    ctx = ToolContext(user_id=uuid4())
+    thread_id = uuid4()
+    agent_env.threads[thread_id] = []
+
+    await agent.handle(ctx=ctx, thread_id=thread_id, content="hi")
+    assert fake.calls[-1]["max_tokens"] >= 8192
