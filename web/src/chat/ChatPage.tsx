@@ -34,19 +34,34 @@ interface Turn {
   role: "user" | "assistant" | "system";
   text: string;
   events: TimelineEntry[];
-  // Wall-clock time the assistant turn finished, e.g. "10:42:23 p.m."
+  // When the assistant turn finished, e.g. "July 7 at 12:29 a.m."
   // Only set on assistant turns.
   time?: string;
 }
 
-// Format a clock time like "10:42:23 p.m." — 12-hour, seconds, lowercase
-// meridiem with periods. Hour is not zero-padded; minutes/seconds are.
-function formatClockTime(d: Date): string {
+// Format a turn timestamp like "July 7 at 12:29 a.m." — month name, day,
+// 12-hour clock to the minute, lowercase meridiem with periods. Hour is not
+// zero-padded; minutes are. No seconds: this marks when a reply landed in a
+// conversation, and second-level precision is noise at that scale.
+function formatTurnTime(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const meridiem = d.getHours() < 12 ? "a.m." : "p.m.";
   const hour12 = d.getHours() % 12 || 12;
-  return `${hour12}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${meridiem}`;
+  const month = d.toLocaleString("en-US", { month: "long" });
+  // Year only when it isn't the current one — "July 7, 2025" vs "July 7".
+  const year =
+    d.getFullYear() === new Date().getFullYear() ? "" : `, ${d.getFullYear()}`;
+  return `${month} ${d.getDate()}${year} at ${hour12}:${pad(d.getMinutes())} ${meridiem}`;
 }
+
+// A "round" is one user message plus its assistant reply, so the initial
+// fetch asks for twice this many rows. Kept deliberately small: on open you
+// want the conversation you're in, not the whole backlog. Scrolling up pages
+// in more, in larger chunks — by then the user is deliberately reading back
+// and round-trips cost more than rows do.
+const INITIAL_ROUNDS = 10;
+const INITIAL_LIMIT = INITIAL_ROUNDS * 2;
+const PAGE_LIMIT = 30;
 
 interface TimelineEntry {
   kind: string;
@@ -80,6 +95,9 @@ export function ChatPage() {
   // Set right before a prepend so the layout effect restores scroll
   // position instead of yanking to the bottom.
   const preserveScroll = useRef<{ height: number; top: number } | null>(null);
+  // Whether the first paint of restored history has been anchored to the
+  // bottom yet. See the layout effect below.
+  const didInitialScroll = useRef(false);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -94,6 +112,22 @@ export function ChatPage() {
       preserveScroll.current = null;
       return;
     }
+    if (!didInitialScroll.current) {
+      // Nothing rendered yet — wait for the history load rather than
+      // burning the one-shot anchor on an empty scroller.
+      if (turns.length === 0) return;
+      // Jump, don't animate. A smooth scroll starts from the top and takes
+      // hundreds of milliseconds, during which the restored rows are still
+      // settling to their final heights — so it chases a scrollHeight that
+      // keeps moving and stops partway up the backlog. That's what left the
+      // view stranded mid-thread on open. An instant assignment lands on
+      // the newest message before the first frame is shown.
+      el.scrollTop = el.scrollHeight;
+      didInitialScroll.current = true;
+      return;
+    }
+    // Steady state: new turns arriving during a live conversation animate,
+    // so the movement reads as the thread advancing rather than a jump cut.
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [turns]);
 
@@ -108,7 +142,7 @@ export function ChatPage() {
       events: [],
       time:
         m.role === "assistant"
-          ? formatClockTime(new Date(m.created_at))
+          ? formatTurnTime(new Date(m.created_at))
           : undefined,
     };
   }, []);
@@ -118,7 +152,7 @@ export function ChatPage() {
     let cancelled = false;
     (async () => {
       try {
-        const page = await chat.history({ limit: 30 });
+        const page = await chat.history({ limit: INITIAL_LIMIT });
         if (cancelled) return;
         if (page.thread_id) setThreadId(page.thread_id);
         if (page.messages.length > 0) {
@@ -151,7 +185,7 @@ export function ChatPage() {
         threadId,
         before: cursor.before,
         beforeId: cursor.beforeId,
-        limit: 30,
+        limit: PAGE_LIMIT,
       });
       if (page.messages.length > 0) {
         const older = page.messages.map(msgToTurn);
@@ -224,7 +258,7 @@ export function ChatPage() {
       } finally {
         setBusy(false);
         // Stamp the assistant turn with its completion time.
-        const finishedAt = formatClockTime(new Date());
+        const finishedAt = formatTurnTime(new Date());
         setTurns((prev) =>
           prev.map((t) =>
             t.id === assistantId ? { ...t, time: finishedAt } : t,
