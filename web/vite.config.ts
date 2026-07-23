@@ -18,6 +18,7 @@ export default defineConfig({
       "/tasks": proxyTarget,
       "/schedules": proxyTarget,
       "/usage": proxyTarget,
+      "/monitor": proxyTarget,
       "/me": proxyTarget,
       "/health": proxyTarget,
     },

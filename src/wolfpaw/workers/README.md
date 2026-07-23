@@ -20,6 +20,7 @@ Thin arq-shaped wrappers that unpack stringified UUIDs back into typed args and 
 - **`run_task.py`** — `run_task_job(task_id)` drives [`tasks/service.py`](../tasks/README.md)'s `TaskService.run(task_id)` end-to-end: Planner → Pre-Eval → Executor → Post-Eval → terminal transition + spent-cents rollup.
 - **`channel_dispatch.py`** — `telegram_dispatch_job` and `slack_dispatch_job`. Free-form inbound messages from Telegram + Slack route here so the webhook can return 200 fast and the actual agent work happens off the response path.
 - **`sleep_cycle.py`** — weekly memory maintenance: re-score old plans, consolidate near-duplicate Skills (`mark_superseded` against the survivor), GC orphan threads. Gated on `WOLFPAW_SLEEP_CYCLE_ENABLED`.
+- **`prune_traces.py`** — daily retention + partition maintenance for `model_call_logs` (see [`metering/`](../metering/README.md)). Provisions this month's and next month's partitions, then drops any whose whole range predates `WOLFPAW_TRACE_RETENTION_DAYS`. Dropping a partition returns the disk immediately, where a bulk `DELETE` on a table that wide would just hand autovacuum a large pointless job. No config gate — trace retention should never silently stop running — but it is the one cron whose *absence* has a consequence: partitions are only provisioned a month ahead, so a worker down for weeks across a month boundary means trace writes start failing. The model calls themselves are unaffected; the sink swallows its own errors.
 
 ## Flow — enqueue + run
 
