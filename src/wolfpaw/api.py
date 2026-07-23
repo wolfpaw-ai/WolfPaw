@@ -23,6 +23,7 @@ from wolfpaw.integrations.notion.routes import router as notion_router
 from wolfpaw.memory.db import close_pool
 from wolfpaw.workers.queue import close_pool as close_queue_pool
 from wolfpaw.metering import usage_report as _usage_report  # noqa: F401 — registers /usage
+from wolfpaw.metering.monitor_routes import router as monitor_router
 from wolfpaw.metering.routes import router as usage_router
 from wolfpaw import toolbox as _toolbox  # noqa: F401 — registers v1 tool set
 from wolfpaw.persona.routes import router as persona_router
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(schedules_router)
     app.include_router(usage_router)
+    app.include_router(monitor_router)
     app.include_router(dropbox_router)
     app.include_router(notion_router)
     app.include_router(microsoft_router)

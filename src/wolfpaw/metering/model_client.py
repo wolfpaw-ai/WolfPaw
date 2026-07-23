@@ -2,11 +2,15 @@
 
 Order of operations:
     1. Enforcer.check_can_spend     (no-op in v1; raises OverCap from step 24)
-    2. LangSmith trace context      (no-op if disabled)
+    2. Trace-sink run context       (writes model_call_logs; no-op if disabled)
     3. anthropic.messages.create
     4. Cost computation via `pricing.get_active_price` + `compute_cost_cents`
     5. token_usage row via `recorder.record_usage`
     6. Return ModelCallResult
+
+Steps 3–5 all run *inside* the trace context, so a failure at any of them —
+not just an Anthropic error — is captured as an errored run. `token_usage`
+still only records successful calls; `model_call_logs` records every attempt.
 
 The Anthropic client is injectable so tests can pass a fake without making
 real API calls. `get_model_client()` builds the production singleton from
@@ -21,11 +25,11 @@ from uuid import UUID
 from wolfpaw.config import get_settings
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.enforcer import Enforcer, get_enforcer
-from wolfpaw.metering.langsmith_client import LangSmithClient, get_langsmith_client
 from wolfpaw.metering.pricing import compute_cost_cents, get_active_price
 from wolfpaw.metering.recorder import record_usage
+from wolfpaw.metering.trace_sink import TraceSink, get_trace_sink
 from wolfpaw.metering.types import ModelCallResult, TokenCounts
-from wolfpaw.tracing import get_logger, get_trace_id
+from wolfpaw.tracing import get_logger
 
 log = get_logger()
 
@@ -59,17 +63,34 @@ def _extract_text(raw: Any) -> str:
     return "".join(pieces)
 
 
+def _trace_params(create_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The knobs worth keeping on the trace row — everything except the two
+    bulky fields already stored in their own columns (`messages`, `system`)
+    and the tool schemas, which are large, static, and identical across every
+    call by a given agent. Tool *names* are kept because "which tools was this
+    call offered" is a real debugging question."""
+    skip = {"messages", "system", "model", "tools"}
+    params = {k: v for k, v in create_kwargs.items() if k not in skip}
+    tools = create_kwargs.get("tools")
+    if isinstance(tools, list):
+        params["tool_names"] = [
+            t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+            for t in tools
+        ]
+    return params
+
+
 class ModelClient:
     def __init__(
         self,
         *,
         anthropic: _AnthropicLike,
         enforcer: Enforcer | None = None,
-        langsmith: LangSmithClient | None = None,
+        traces: TraceSink | None = None,
     ) -> None:
         self._anthropic = anthropic
         self._enforcer = enforcer or get_enforcer()
-        self._langsmith = langsmith or get_langsmith_client()
+        self._traces = traces or get_trace_sink()
 
     async def call(
         self,
@@ -83,53 +104,66 @@ class ModelClient:
         prompt_version_id: UUID | None = None,
         task_id: UUID | None = None,
         request_id: str | None = None,
+        attempt: int = 1,
         **kwargs: Any,
     ) -> ModelCallResult:
         await self._enforcer.check_can_spend(user_id)
 
-        async with self._langsmith.trace(
-            agent=agent,
-            model=model,
-            trace_id=get_trace_id(),
-            prompt_version_id=prompt_version_id,
-        ):
-            create_kwargs: dict[str, Any] = {
-                "model": model,
-                "max_tokens": max_tokens,
-                "messages": messages,
-                **kwargs,
-            }
-            if system is not None:
-                create_kwargs["system"] = system
-            raw = await self._anthropic.messages.create(**create_kwargs)
+        create_kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            **kwargs,
+        }
+        if system is not None:
+            create_kwargs["system"] = system
 
-        usage = _extract_usage(raw)
-        async with acquire() as conn:
-            price = await get_active_price(conn, model)
-        if price is None:
-            log.warning("model.price.missing", model=model)
-            cost_cents = 0
-        else:
-            cost_cents = compute_cost_cents(price, usage)
-
-        await record_usage(
+        async with self._traces.trace(
             user_id=user_id,
             agent=agent,
             model=model,
-            usage=usage,
-            cost_cents=cost_cents,
+            messages=messages,
+            system=system,
+            params=_trace_params(create_kwargs),
             prompt_version_id=prompt_version_id,
             task_id=task_id,
             request_id=request_id,
-        )
+            attempt=attempt,
+        ) as run:
+            raw = await self._anthropic.messages.create(**create_kwargs)
+            text = _extract_text(raw)
+            run.mark_response(raw, text=text)
 
-        return ModelCallResult(
-            text=_extract_text(raw),
-            usage=usage,
-            cost_cents=cost_cents,
-            model=model,
-            raw=raw,
-        )
+            usage = _extract_usage(raw)
+            async with acquire() as conn:
+                price = await get_active_price(conn, model)
+            if price is None:
+                log.warning("model.price.missing", model=model)
+                cost_cents = 0
+            else:
+                cost_cents = compute_cost_cents(price, usage)
+
+            usage_id = await record_usage(
+                user_id=user_id,
+                agent=agent,
+                model=model,
+                usage=usage,
+                cost_cents=cost_cents,
+                prompt_version_id=prompt_version_id,
+                task_id=task_id,
+                request_id=request_id,
+            )
+            run.mark_cost(
+                usage=usage, cost_cents=cost_cents, token_usage_id=usage_id
+            )
+
+            return ModelCallResult(
+                text=text,
+                usage=usage,
+                cost_cents=cost_cents,
+                model=model,
+                raw=raw,
+            )
 
 
 _client: ModelClient | None = None

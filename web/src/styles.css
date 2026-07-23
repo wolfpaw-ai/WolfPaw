@@ -166,3 +166,86 @@ ol.events pre { background: #f0f0f0; padding: 0.4rem 0.6rem; border-radius: 4px;
 .usage-period { margin-bottom: 2rem; }
 ul.by-agent { list-style: none; padding: 0; }
 ul.by-agent li { padding: 0.2rem 0; }
+
+/* --- monitoring -------------------------------------------------------- */
+
+.monitor-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: 0.6rem;
+  color: var(--fg-muted);
+}
+.monitor-filter input { margin: 0; }
+
+/* Health tiles. Wraps rather than scrolls so a narrow window reflows. */
+.monitor-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+.monitor-stats .stat {
+  flex: 1 1 8rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+}
+.monitor-stats .stat-label {
+  display: block;
+  font-size: 0.8em;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.monitor-stats .stat-value { font-size: 1.4em; font-weight: 600; }
+.monitor-stats .stat-bad { border-color: var(--error); }
+.monitor-stats .stat-bad .stat-value { color: var(--error); }
+
+/* Failing rows are tinted rather than coloured text-only, so the eye lands
+   on them when scanning a long trace list. */
+table.data tr.row-bad td { background: color-mix(in srgb, var(--error) 7%, transparent); }
+table.data tr.row-open td { font-weight: 600; }
+table.data tr.row-detail td { background: var(--bg); }
+table.data tr[class*="row-"] { cursor: pointer; }
+
+.monitor-message {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  word-break: break-word;
+}
+
+.trace-calls { margin: 0.5rem 0; padding-left: 1.2rem; }
+.trace-call { margin: 0.4rem 0; }
+.trace-call-bad { color: var(--error); }
+.trace-call .link-button { text-align: left; }
+
+.trace-payloads {
+  margin: 0.4rem 0 0.8rem;
+  padding-left: 0.8rem;
+  border-left: 2px solid var(--border);
+  color: var(--fg);
+}
+.trace-payloads h4 {
+  margin: 0.6rem 0 0.2rem;
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+/* Payloads can be huge; cap the height and scroll inside the block so one
+   long prompt can't push the rest of the trace off-screen. */
+.trace-payloads pre {
+  margin: 0;
+  padding: 0.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 20rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+}
+.notice { color: var(--warn); margin: 0.3rem 0; font-size: 0.9em; }

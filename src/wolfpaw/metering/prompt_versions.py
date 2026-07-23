@@ -2,7 +2,7 @@
 
 Each `token_usage` row references the version active at the time of the call,
 so we can ask "what did planner v8 do that v7 didn't" in raw SQL or via
-LangSmith eval datasets.
+eval datasets.
 """
 
 from __future__ import annotations

@@ -31,7 +31,18 @@ class Settings(BaseSettings):
     model_executor: str = "claude-sonnet-4-6"
     model_post_evaluator: str = "claude-haiku-4-5"
 
-    langsmith_enabled: bool = False
+    # Model-call tracing → `model_call_logs`. On by default: this is the only
+    # record of *failed* calls, which `token_usage` never sees.
+    trace_sink_enabled: bool = True
+    # Per-call cap on stored request+response payload bytes. Anything longer is
+    # clipped and the row is flagged `truncated`. Keeps one pathological
+    # 500k-token prompt from dominating the table.
+    trace_payload_max_bytes: int = 64_000
+    # Retention for the fat payload rows, in days. Metering rows in
+    # `token_usage` are unaffected and keep their own (much longer) lifetime.
+    # Enforced by dropping whole monthly partitions, so the effective cutoff
+    # rounds up to the end of the month containing `now - N days`.
+    trace_retention_days: int = 14
 
     database_url: str = "postgresql://localhost/wolfpaw"
     redis_url: str = "redis://localhost:6379/0"

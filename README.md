@@ -212,7 +212,7 @@ flowchart TD
     Final --> User
 
     Channels -.- Auth["<b>auth/</b><br/>magic-link sessions"]:::pkg
-    Agents -.->|"every model call"| Metering["<b>metering/</b><br/>ModelClient + cost + LangSmith"]:::pkg
+    Agents -.->|"every model call"| Metering["<b>metering/</b><br/>ModelClient + cost + traces"]:::pkg
     Agents -.->|"every prompt"| Persona["<b>persona/</b><br/>Soul + User File"]:::pkg
     Agents -.->|"query embeddings"| Embeddings["<b>embeddings/</b><br/>Voyage / Stub"]:::pkg
 
@@ -240,7 +240,7 @@ Read top-to-bottom:
 2. **[`agents/`](src/wolfpaw/agents/README.md)** owns the Router → Triage → (Quick | Plan) pipeline. Plan path runs Pre-Evaluator → Executor → Post-Evaluator and may emit a new Skill at the end. Self-healing lives here too: when a step fails, the Executor first tries to repair the inputs via a cheap model call, then asks the Planner for a continuation plan if that doesn't unblock.
 3. **[`tasks/`](src/wolfpaw/tasks/README.md)** wraps the plan pipeline in a persistent Task row when the Planner decides the work needs a long-running lifecycle (deliverables, monitoring, `ask_user` pauses). With workers enabled, [`workers/`](src/wolfpaw/workers/README.md) runs the task off the request thread.
 4. **[`toolbox/`](src/wolfpaw/toolbox/README.md)** is where every functional step ends up. Tools speak to [`memory/`](src/wolfpaw/memory/README.md) (Postgres + pgvector), [`storage/`](src/wolfpaw/storage/README.md) (file bytes), [`sandbox/`](src/wolfpaw/sandbox/README.md) (Python execution), [`workspace/`](src/wolfpaw/workspace/README.md) (catalog rows + embeddings), and [`integrations/`](src/wolfpaw/integrations/README.md) (OAuth-gated external services).
-5. **Cross-cutting:** every model call funnels through [`metering/`](src/wolfpaw/metering/README.md) (pricing, recording, LangSmith). Every system prompt is assembled by [`persona/`](src/wolfpaw/persona/README.md) (Soul + User File). Query / document embeddings come from [`embeddings/`](src/wolfpaw/embeddings/README.md).
+5. **Cross-cutting:** every model call funnels through [`metering/`](src/wolfpaw/metering/README.md) (pricing, recording, trace log). Every system prompt is assembled by [`persona/`](src/wolfpaw/persona/README.md) (Soul + User File). Query / document embeddings come from [`embeddings/`](src/wolfpaw/embeddings/README.md).
 
 Detailed class-level views (5 axes, ~200 lines of Mermaid) live in [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md). The full architectural drawing is [`WolfPaw_01.pdf`](WolfPaw_01.pdf).
 

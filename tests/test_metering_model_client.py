@@ -9,6 +9,7 @@ wrapper against a real DB.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -16,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from wolfpaw.metering.model_client import ModelClient
+from wolfpaw.metering.trace_sink import ModelRun
 from wolfpaw.metering.types import ModelPrice, TokenCounts
 
 
@@ -121,3 +123,89 @@ async def test_call_propagates_anthropic_errors(_mock_db):
         )
     # Recorder must NOT fire on failure — we don't bill for failed calls.
     _mock_db["recorder"].assert_not_awaited()
+
+
+class _RecordingSink:
+    """Captures the runs a call produces, so tests can assert on what the
+    trace sink would have written without touching Postgres."""
+
+    def __init__(self) -> None:
+        self.runs: list = []
+
+    @asynccontextmanager
+    async def trace(self, **kwargs):
+        run = ModelRun(
+            run_id=uuid4(),
+            parent_run_id=None,
+            user_id=kwargs["user_id"],
+            agent=kwargs["agent"],
+            model=kwargs["model"],
+            request_params=kwargs.get("params") or {},
+        )
+        self.runs.append(run)
+        try:
+            yield run
+        except BaseException as exc:
+            run.mark_error(exc)
+            raise
+
+
+async def test_failed_call_produces_an_errored_run(_mock_db):
+    """`token_usage` sees nothing when a call fails; the trace run is the
+    only record that the attempt happened at all."""
+    fake = _FakeAnthropic(_fake_anthropic_response())
+    fake.messages.create = AsyncMock(side_effect=RuntimeError("overloaded"))
+    sink = _RecordingSink()
+    client = ModelClient(anthropic=fake, traces=sink)
+
+    with pytest.raises(RuntimeError):
+        await client.call(
+            user_id=uuid4(),
+            agent="quick",
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+    _mock_db["recorder"].assert_not_awaited()
+    assert len(sink.runs) == 1
+    assert sink.runs[0].status == "error"
+    assert sink.runs[0].error_type == "RuntimeError"
+
+
+async def test_successful_call_populates_the_run(_mock_db):
+    sink = _RecordingSink()
+    client = ModelClient(anthropic=_FakeAnthropic(_fake_anthropic_response()), traces=sink)
+    await client.call(
+        user_id=uuid4(),
+        agent="quick",
+        model="claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=512,
+    )
+    run = sink.runs[0]
+    assert run.status == "ok"
+    assert run.response_text == "hello"
+    assert run.usage.input_tokens == 10
+    assert run.cost_cents >= 1
+    assert run.token_usage_id is not None
+    assert run.latency_ms is not None
+    # Params ride along, minus the bulky fields that have their own columns.
+    assert run.request_params["max_tokens"] == 512
+    assert "messages" not in run.request_params
+
+
+async def test_tool_schemas_are_reduced_to_names(_mock_db):
+    """Full tool schemas are large, static, and identical across every call
+    by an agent — only the names are worth storing per row."""
+    sink = _RecordingSink()
+    client = ModelClient(anthropic=_FakeAnthropic(_fake_anthropic_response()), traces=sink)
+    await client.call(
+        user_id=uuid4(),
+        agent="executor",
+        model="claude-sonnet-4-6",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "http_get", "input_schema": {"big": "x" * 5000}}],
+    )
+    params = sink.runs[0].request_params
+    assert params["tool_names"] == ["http_get"]
+    assert "tools" not in params

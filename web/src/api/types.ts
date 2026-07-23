@@ -140,3 +140,77 @@ export interface ChatHistoryPage {
   messages: ChatMessage[];
   has_more: boolean;
 }
+
+// --- monitoring ---------------------------------------------------------
+
+export type MonitorWindow = "1h" | "24h" | "7d" | "30d";
+
+export interface MonitorAgentStat {
+  agent: string;
+  calls: number;
+  errors: number;
+  cost_cents: number;
+  p50_latency_ms: number | null;
+  p95_latency_ms: number | null;
+}
+
+export interface MonitorErrorStat {
+  error_type: string;
+  error_message: string;
+  agent: string;
+  count: number;
+  last_seen: string;
+}
+
+export interface MonitorSummary {
+  window: MonitorWindow;
+  since: string;
+  calls: number;
+  errors: number;
+  error_rate: number;
+  cost_cents: number;
+  p50_latency_ms: number | null;
+  p95_latency_ms: number | null;
+  by_agent: MonitorAgentStat[];
+  top_errors: MonitorErrorStat[];
+}
+
+export interface MonitorTrace {
+  trace_id: string;
+  started_at: string;
+  ended_at: string;
+  calls: number;
+  errors: number;
+  cost_cents: number;
+  total_latency_ms: number;
+  agents: string[];
+  task_id: string | null;
+}
+
+/** One model call. Payload fields are only populated by the trace
+ *  drill-down endpoint; the list views omit them to keep responses small. */
+export interface MonitorCall {
+  id: string;
+  run_id: string;
+  parent_run_id: string | null;
+  trace_id: string | null;
+  task_id: string | null;
+  agent: string;
+  model: string;
+  status: "ok" | "error";
+  attempt: number;
+  created_at: string;
+  latency_ms: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cost_cents: number;
+  stop_reason: string | null;
+  error_type: string | null;
+  error_message: string | null;
+  truncated: boolean;
+  system_prompt?: string | null;
+  request_messages?: unknown;
+  request_params?: unknown;
+  response_content?: unknown;
+  response_text?: string | null;
+}

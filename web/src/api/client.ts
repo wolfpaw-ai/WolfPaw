@@ -4,6 +4,10 @@
 
 import type {
   ChatHistoryPage,
+  MonitorCall,
+  MonitorSummary,
+  MonitorTrace,
+  MonitorWindow,
   Schedule,
   Task,
   TaskDetail,
@@ -108,6 +112,29 @@ export const schedules = {
 export const usage = {
   async get(scope: UsageScope = "default"): Promise<UsageReport> {
     return call<UsageReport>(`/usage?scope=${scope}`);
+  },
+};
+
+// --- monitoring ---------------------------------------------------------
+
+export const monitor = {
+  async summary(window: MonitorWindow = "24h"): Promise<MonitorSummary> {
+    return call<MonitorSummary>(`/monitor/summary?window=${window}`);
+  },
+  async traces(
+    window: MonitorWindow = "24h",
+    opts: { errors?: boolean; agent?: string } = {},
+  ): Promise<MonitorTrace[]> {
+    const q = new URLSearchParams({ window });
+    if (opts.errors) q.set("errors", "true");
+    if (opts.agent) q.set("agent", opts.agent);
+    return call<MonitorTrace[]>(`/monitor/traces?${q}`);
+  },
+  async trace(traceId: string): Promise<MonitorCall[]> {
+    return call<MonitorCall[]>(`/monitor/traces/${encodeURIComponent(traceId)}`);
+  },
+  async errors(window: MonitorWindow = "24h"): Promise<MonitorCall[]> {
+    return call<MonitorCall[]>(`/monitor/errors?window=${window}`);
   },
 };
 

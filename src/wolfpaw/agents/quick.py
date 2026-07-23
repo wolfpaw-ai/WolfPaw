@@ -6,7 +6,7 @@ Triage lands, the web channel pipes every non-slash message through
 this agent directly.
 
 Loop shape: load recent thread history → append new user turn →
-call ModelClient (which records tokens + traces in LangSmith) → if the
+call ModelClient (which records tokens + writes a trace run) → if the
 response contains tool_use blocks, run them, append tool_result blocks,
 loop. Cap iterations so a misbehaving agent can't burn budget forever.
 

@@ -64,8 +64,15 @@ Set in `.env`:
   `WOLFPAW_TELEGRAM_WEBHOOK_SECRET` — to enable the Telegram channel.
   Requires HTTPS at your webhook URL; put a TLS-terminating reverse proxy
   in front of nginx (see "Behind a real domain" below).
-- `WOLFPAW_LANGSMITH_ENABLED=true` + `LANGSMITH_API_KEY` —
-  per-call replay + prompt-version diffs in LangSmith.
+- `WOLFPAW_TRACE_SINK_ENABLED` (default `true`) — per-call request/response
+  logging to the `model_call_logs` table. This is the only record of *failed*
+  model calls, so leave it on unless you have a specific reason not to.
+  `WOLFPAW_TRACE_RETENTION_DAYS` (default `14`) sets how long payloads are
+  kept — enforced by dropping monthly partitions, so the real cutoff rounds up
+  to a month boundary. `WOLFPAW_TRACE_PAYLOAD_MAX_BYTES` (default `64000`)
+  caps per-call payload size. Nothing leaves your deployment. Note that
+  retention is enforced by a daily job in the arq worker — if you run the API
+  without the worker, traces accumulate indefinitely.
 - `WOLFPAW_E2B_API_KEY` (plus `WOLFPAW_SANDBOX_BACKEND=e2b`) — managed
   sandbox provider. The default `subprocess` backend is fine for
   single-user self-host but is **not a security boundary**.
