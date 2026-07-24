@@ -11,6 +11,8 @@
   --error: #c53030;
   --success: #2f855a;
   --warn: #b7791f;
+  --bg-code: #f0f0f0;   /* inline/code-block background; themed below */
+  color-scheme: light dark;   /* themes native controls (scrollbars, form widgets) */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 14px;
   line-height: 1.5;
@@ -89,7 +91,7 @@ label > * { margin-top: 0.2rem; }
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: 6px; padding: 0.8rem 1rem;
 }
-.turn-user { background: #eef4fc; }
+.turn-user { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .turn-role { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.85em; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
 .turn-time { text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .turn-text { font-size: 14px; }
@@ -105,8 +107,8 @@ label > * { margin-top: 0.2rem; }
 .turn-md h1 { font-size: 1.4em; }
 .turn-md h2 { font-size: 1.25em; }
 .turn-md h3 { font-size: 1.1em; }
-.turn-md code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 3px; }
-.turn-md pre { background: #f0f0f0; padding: 0.6rem 0.8rem; border-radius: 4px; margin: 0.5rem 0; white-space: pre; overflow-x: auto; }
+.turn-md code { background: var(--bg-code); padding: 0.05rem 0.3rem; border-radius: 3px; }
+.turn-md pre { background: var(--bg-code); padding: 0.6rem 0.8rem; border-radius: 4px; margin: 0.5rem 0; white-space: pre; overflow-x: auto; }
 .turn-md pre code { background: none; padding: 0; }
 .turn-md blockquote { margin: 0.5rem 0; padding-left: 0.8rem; border-left: 3px solid var(--border); color: var(--fg-muted); }
 .turn-md table { border-collapse: collapse; margin: 0.5rem 0; display: block; overflow-x: auto; }
@@ -114,12 +116,12 @@ label > * { margin-top: 0.2rem; }
 .turn-md a { color: var(--accent); }
 .turn-md img { max-width: 100%; }
 .turn-events { font-size: 0.85em; color: var(--fg-muted); margin: 0.3rem 0 0.5rem 0; }
-.turn-events code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 3px; }
+.turn-events code { background: var(--bg-code); padding: 0.05rem 0.3rem; border-radius: 3px; }
 .turn-events ul { margin: 0.3rem 0; padding-left: 1.4rem; }
 
 .chat-ask-user {
   max-width: 48rem; margin: 0 auto; padding: 0.8rem 1rem;
-  background: #fffbea; border-top: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent); border-top: 2px solid var(--warn);
 }
 .chat-ask-user input { margin: 0.3rem 0; }
 .chat-ask-user button { margin-top: 0.3rem; }
@@ -139,16 +141,18 @@ table.data tr.totals td { font-weight: 600; border-top: 2px solid var(--border);
 
 /* ---- Status pills ---- */
 .status { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.85em; }
-.status-pending { background: #f0f0f0; color: var(--fg-muted); }
-.status-running { background: #e0eaff; color: var(--accent); }
-.status-awaiting_user { background: #fff3d6; color: var(--warn); }
-.status-blocked { background: #ffe2e2; color: var(--error); }
-.status-completed { background: #e0f5e9; color: var(--success); }
-.status-failed { background: #ffe2e2; color: var(--error); }
-.status-cancelled { background: #f0f0f0; color: var(--fg-muted); }
-.status-active { background: #e0eaff; color: var(--accent); }
-.status-paused { background: #fff3d6; color: var(--warn); }
-.status-done { background: #e0f5e9; color: var(--success); }
+/* Backgrounds are a light wash of each pill's own text color, so they track
+   the theme automatically instead of being pinned to light pastels. */
+.status-pending { background: color-mix(in srgb, var(--fg-muted) 18%, transparent); color: var(--fg-muted); }
+.status-running { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.status-awaiting_user { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.status-blocked { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
+.status-completed { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.status-failed { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
+.status-cancelled { background: color-mix(in srgb, var(--fg-muted) 18%, transparent); color: var(--fg-muted); }
+.status-active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.status-paused { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.status-done { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
 
 /* ---- Task detail ---- */
 dl.metadata { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 1rem 0; }
@@ -156,9 +160,9 @@ dl.metadata dt { color: var(--fg-muted); font-size: 0.9em; }
 dl.metadata dd { margin: 0; }
 ol.events { padding-left: 1.4rem; }
 ol.events li { margin-bottom: 0.8rem; }
-ol.events code { background: #f0f0f0; padding: 0.05rem 0.3rem; border-radius: 3px; }
+ol.events code { background: var(--bg-code); padding: 0.05rem 0.3rem; border-radius: 3px; }
 ol.events .event-time { color: var(--fg-muted); font-size: 0.85em; margin-left: 0.6rem; }
-ol.events pre { background: #f0f0f0; padding: 0.4rem 0.6rem; border-radius: 4px; margin-top: 0.3rem; }
+ol.events pre { background: var(--bg-code); padding: 0.4rem 0.6rem; border-radius: 4px; margin-top: 0.3rem; }
 
 /* ---- Usage tabs ---- */
 .tabs { display: flex; gap: 0.3rem; margin: 1rem 0; }
@@ -249,3 +253,24 @@ table.data tr[class*="row-"] { cursor: pointer; }
   font-size: 0.85em;
 }
 .notice { color: var(--warn); margin: 0.3rem 0; font-size: 0.9em; }
+
+/* ---- Dark mode ----
+   Follows the browser/OS setting via prefers-color-scheme. The whole UI is
+   driven by these variables (and color-mix over them), so overriding the
+   palette here flips every surface, tint, and status pill with no per-rule
+   dark styles. Semantic colors are lightened so text and washes stay legible
+   on a dark background. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e6e6;
+    --fg-muted: #9aa0a6;
+    --bg: #17181a;
+    --bg-card: #212226;
+    --border: #34363b;
+    --accent: #6aa3e0;
+    --error: #ef8a8a;
+    --success: #7fc99b;
+    --warn: #dcb46b;
+    --bg-code: #2b2c30;
+  }
+}
