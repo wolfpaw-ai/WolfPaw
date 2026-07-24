@@ -6,6 +6,7 @@ import { VerifyPage } from "./auth/VerifyPage";
 import { ChatPage } from "./chat/ChatPage";
 import { FilesPage } from "./files/FilesPage";
 import { AppLayout } from "./layout/AppLayout";
+import { MonitorPage } from "./monitor/MonitorPage";
 import { ProfilePage } from "./profile/ProfilePage";
 import { SchedulesPage } from "./schedules/SchedulesPage";
 import { TaskDetailPage } from "./tasks/TaskDetailPage";
@@ -35,6 +36,7 @@ export function App() {
             <Route path="/schedules" element={<SchedulesPage />} />
             <Route path="/files" element={<FilesPage />} />
             <Route path="/usage" element={<UsagePage />} />
+            <Route path="/monitor" element={<MonitorPage />} />
             <Route path="/profile" element={<ProfilePage />} />
           </Route>
 

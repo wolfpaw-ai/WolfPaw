@@ -26,7 +26,7 @@ The summarizer is injectable via :func:`set_summarizer_for_test` so
 unit tests can exercise the trigger + folding logic without a live
 Anthropic key. The production summarizer routes through the existing
 :class:`ModelClient` so the call shows up in ``token_usage`` /
-LangSmith under ``agent='compactor'``.
+``model_call_logs`` under ``agent='compactor'``.
 
 Caller-side rules:
 

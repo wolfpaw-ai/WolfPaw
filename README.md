@@ -63,7 +63,7 @@ Wolfpaw is channel-native: you reach it where you already work.
 
 ### Channels
 
-- **Web chat** — sign in at your deployment's URL, type in the chat box. Replies stream live. The React app under [`web/`](web/) ships chat + task list + workspace files + usage dashboard + profile editor + Telegram / Slack link minting.
+- **Web chat** — sign in at your deployment's URL, type in the chat box. Replies stream live. The React app under [`web/`](web/) ships chat + task list + workspace files + usage dashboard + monitoring dashboard + profile editor + Telegram / Slack link minting.
 - **Telegram** — DM your bot after linking your account from web (deep-link onboarding: tap the link generated from `/me/profile`). Operators provision the bot via @BotFather and set `WOLFPAW_TELEGRAM_BOT_TOKEN` + `WOLFPAW_TELEGRAM_WEBHOOK_SECRET`.
 - **Slack** — workspace install via OAuth (create your app from [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml), then "Connect Slack" from the web app's profile page). `/wolfpaw <text>` slash command and DMs to the bot both go through the agent pipeline.
 - **Email** *(roadmap)* — forward to a per-user alias on your deployment's domain; Wolfpaw reads, plans, and drafts a reply back to your verified inbox. Never sends on your behalf.
@@ -98,6 +98,10 @@ When a step fails with a recoverable tool error (e.g. "column doesn't exist — 
 ### Cost control
 
 Every model call and every sandbox-second is metered. The OSS app ships with a no-op `Enforcer` (every user runs as `tier="dev"`, metering on but no gating) — the `subscriptions` + `tier_limits` + `cost_notifications` schema is in place so operators can wire in a real enforcer + billing provider without migrations. `/usage` is the always-on receipt regardless of whether enforcement is wired.
+
+### Observability
+
+Every model call also writes a trace row: system prompt, messages in, response, latency, token counts, and — critically — the exception when the call *failed*. `token_usage` only ever sees successful calls, so the trace log is the only record that a failed attempt happened at all. The **Monitoring** tab (`/monitor`) reads it back as error rate, p50/p95 latency and per-agent breakdowns, a list of traces (one per inbound prompt), and a drill-down into every call inside one. Payloads are partitioned monthly and expire on their own short clock (`WOLFPAW_TRACE_RETENTION_DAYS`, default 14) while the cost rows keep a much longer history. Nothing leaves your deployment — there is no third-party tracing vendor in the path. See [`metering/README.md`](src/wolfpaw/metering/README.md).
 
 ### Running Wolfpaw
 
@@ -212,7 +216,7 @@ flowchart TD
     Final --> User
 
     Channels -.- Auth["<b>auth/</b><br/>magic-link sessions"]:::pkg
-    Agents -.->|"every model call"| Metering["<b>metering/</b><br/>ModelClient + cost + LangSmith"]:::pkg
+    Agents -.->|"every model call"| Metering["<b>metering/</b><br/>ModelClient + cost + traces"]:::pkg
     Agents -.->|"every prompt"| Persona["<b>persona/</b><br/>Soul + User File"]:::pkg
     Agents -.->|"query embeddings"| Embeddings["<b>embeddings/</b><br/>Voyage / Stub"]:::pkg
 
@@ -240,7 +244,7 @@ Read top-to-bottom:
 2. **[`agents/`](src/wolfpaw/agents/README.md)** owns the Router → Triage → (Quick | Plan) pipeline. Plan path runs Pre-Evaluator → Executor → Post-Evaluator and may emit a new Skill at the end. Self-healing lives here too: when a step fails, the Executor first tries to repair the inputs via a cheap model call, then asks the Planner for a continuation plan if that doesn't unblock.
 3. **[`tasks/`](src/wolfpaw/tasks/README.md)** wraps the plan pipeline in a persistent Task row when the Planner decides the work needs a long-running lifecycle (deliverables, monitoring, `ask_user` pauses). With workers enabled, [`workers/`](src/wolfpaw/workers/README.md) runs the task off the request thread.
 4. **[`toolbox/`](src/wolfpaw/toolbox/README.md)** is where every functional step ends up. Tools speak to [`memory/`](src/wolfpaw/memory/README.md) (Postgres + pgvector), [`storage/`](src/wolfpaw/storage/README.md) (file bytes), [`sandbox/`](src/wolfpaw/sandbox/README.md) (Python execution), [`workspace/`](src/wolfpaw/workspace/README.md) (catalog rows + embeddings), and [`integrations/`](src/wolfpaw/integrations/README.md) (OAuth-gated external services).
-5. **Cross-cutting:** every model call funnels through [`metering/`](src/wolfpaw/metering/README.md) (pricing, recording, LangSmith). Every system prompt is assembled by [`persona/`](src/wolfpaw/persona/README.md) (Soul + User File). Query / document embeddings come from [`embeddings/`](src/wolfpaw/embeddings/README.md).
+5. **Cross-cutting:** every model call funnels through [`metering/`](src/wolfpaw/metering/README.md) (pricing, recording, trace log). Every system prompt is assembled by [`persona/`](src/wolfpaw/persona/README.md) (Soul + User File). Query / document embeddings come from [`embeddings/`](src/wolfpaw/embeddings/README.md).
 
 Detailed class-level views (5 axes, ~200 lines of Mermaid) live in [`docs/uml_class_diagram.md`](docs/uml_class_diagram.md). The full architectural drawing is [`WolfPaw_01.pdf`](WolfPaw_01.pdf).
 
@@ -288,6 +292,10 @@ wolfpaw/
     016_schedules.sql                # scheduled/recurring task rows
     017_l3_digest.sql                # L3 summary level (single rewritten-in-place digest)
     018_message_embeddings_hnsw.sql  # swap message_embeddings ivfflat → hnsw
+    019_pending_questions.sql        # durable human-in-the-loop (ask_user)
+    020_pending_question_expiry.sql  # expiry on pending questions
+    021_model_call_logs.sql          # per-attempt model-call trace log,
+                                     #   monthly partitions
   src/wolfpaw/
     api.py                           # FastAPI app — mounts every router below
     config.py                        # env, model IDs, feature flags, backend selection
@@ -306,7 +314,7 @@ wolfpaw/
                                      #   procedural, skills, task_events, channel_links,
                                      #   slack_workspaces  [README]
     metering/                        # cost recording, prompt versions, ModelClient,
-                                     #   /usage  [README]
+                                     #   model-call trace log, /usage, /monitor  [README]
     persona/                         # Soul loader, UserProfile DAO, system-prompt
                                      #   builder, /me/profile  [README]
     sandbox/                         # Sandbox ABC, Subprocess/Docker/E2B,
@@ -342,8 +350,9 @@ The v1 build order ran 21 steps and is shipped end-to-end. v2 extends with self-
 - **v2 integrations (phase C, partial)** — Dropbox app-folder, Notion workspace, Microsoft Outlook Calendar. Google Calendar (#31) and Gmail readonly (#33) are deferred pending Google verification.
 - **v3 reliability + memory** — full row-level CRUD on user SQL tables, schema introspection (`list_tables`, `describe_table`) with column-hint errors on failure, document semantic search (`list_docs`, `search_docs` over embedded `workspace_files`), self-healing recovery on `ToolError` (step-level input repair + one mid-plan replan with the Planner).
 - **v4 unified long-running memory** — one channel-agnostic conversation per user (web / Telegram / Slack share a single thread, with per-message channel provenance), a size-capped **L3 digest** that folds L2s into a single rewritten-in-place summary so the prompt stays flat no matter how long the conversation runs, **recency-weighted vector recall** that returns each hit wrapped in neighbor messages for coherence, an **HNSW** index on `message_embeddings` for recall that stays fast as the thread grows, plus **`recall_memory`** — a deliberate, age-blind, all-threads deep-recall tool ("remember when we talked about X"). All knobs are env-tunable — see [`memory/README.md`](src/wolfpaw/memory/README.md#tuning-conversational-memory).
+- **v5 observability** — per-attempt model-call trace log (`model_call_logs`) capturing prompts, responses, latency and failures, with `run_id` / `parent_run_id` preserving sub-agent nesting; a `/monitor` API and **Monitoring** tab over it (health tiles, failure breakdown by type + agent, trace drill-down); monthly partitioning with a daily retention job so payloads expire without a bulk `DELETE`. Replaced the LangSmith dependency — traces stay in your own Postgres.
 
-**Roadmap (not yet built):** confirm-gated "delete memories about X" / forgetting tool (deletion + summary-scrub deferred), proactive task-completion push to the user's preferred channel (#37), Slack `app_mention` + threads (#35), Telegram inline keyboards (#36), email forwarding intake, full-fat usage dashboard, OpenTelemetry tracing, entity / knowledge-base memory.
+**Roadmap (not yet built):** confirm-gated "delete memories about X" / forgetting tool (deletion + summary-scrub deferred), proactive task-completion push to the user's preferred channel (#37), Slack `app_mention` + threads (#35), Telegram inline keyboards (#36), email forwarding intake, full-fat usage dashboard, OpenTelemetry tracing (cross-process; in-process call nesting already lands via `run_id` / `parent_run_id`), entity / knowledge-base memory.
 
 **Tests:** `pytest` runs ~460 unit tests in under a minute; another ~160 DB-gated tests skip without a `WOLFPAW_TEST_DATABASE_URL`. CI deploys via `git pull && docker compose up -d --build && docker compose restart web` (the `restart web` ensures nginx flushes its upstream DNS).
 

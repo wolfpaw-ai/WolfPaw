@@ -31,7 +31,26 @@ class Settings(BaseSettings):
     model_executor: str = "claude-sonnet-4-6"
     model_post_evaluator: str = "claude-haiku-4-5"
 
-    langsmith_enabled: bool = False
+    # Output-token ceiling for every model call that doesn't override it.
+    # This is not just a length cap on prose: a tool call's arguments are
+    # generated as output tokens too, so a `write_doc` whose content is a
+    # multi-page document has to fit inside this budget or the tool_use block
+    # is truncated mid-JSON. The old value of 1024 silently broke any tool
+    # call carrying a real document.
+    model_max_tokens: int = 8192
+
+    # Model-call tracing → `model_call_logs`. On by default: this is the only
+    # record of *failed* calls, which `token_usage` never sees.
+    trace_sink_enabled: bool = True
+    # Per-call cap on stored request+response payload bytes. Anything longer is
+    # clipped and the row is flagged `truncated`. Keeps one pathological
+    # 500k-token prompt from dominating the table.
+    trace_payload_max_bytes: int = 64_000
+    # Retention for the fat payload rows, in days. Metering rows in
+    # `token_usage` are unaffected and keep their own (much longer) lifetime.
+    # Enforced by dropping whole monthly partitions, so the effective cutoff
+    # rounds up to the end of the month containing `now - N days`.
+    trace_retention_days: int = 14
 
     database_url: str = "postgresql://localhost/wolfpaw"
     redis_url: str = "redis://localhost:6379/0"

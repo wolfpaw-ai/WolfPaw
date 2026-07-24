@@ -7,7 +7,7 @@ React + Vite SPA for Wolfpaw — step 19. Talks to the FastAPI backend in `src/w
 ```
 web/
   package.json
-  vite.config.ts        # dev proxy: /auth, /channels, /workspace, /tasks, /usage, /me, /health → :8000
+  vite.config.ts        # dev proxy: /auth, /channels, /workspace, /tasks, /usage, /monitor, /me, /health → :8000
   tsconfig.json
   index.html
   src/
@@ -33,6 +33,9 @@ web/
       ProfilePage.tsx   # User File editor + Telegram link minting
     usage/
       UsagePage.tsx     # /usage tabs (default / today / month / all)
+    monitor/
+      MonitorPage.tsx   # model-call observability: health tiles, failure
+                        # breakdown, trace list → per-call drill-down
     layout/
       AppLayout.tsx     # nav + <Outlet />
       Nav.tsx

@@ -14,6 +14,7 @@ export function Nav() {
         <li><NavLink to="/schedules">Scheduled</NavLink></li>
         <li><NavLink to="/files">Files</NavLink></li>
         <li><NavLink to="/usage">Usage</NavLink></li>
+        <li><NavLink to="/monitor">Monitoring</NavLink></li>
         <li><NavLink to="/profile">Profile</NavLink></li>
       </ul>
       {state.status === "signed_in" && (

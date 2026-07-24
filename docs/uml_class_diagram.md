@@ -420,7 +420,7 @@ classDiagram
 
 ## View 5 — Model client, metering, observability, identity
 
-Every model call funnels through a single `ModelClient` wrapper that enforces cap, records usage, traces to LangSmith, and stamps the active prompt version on the row. Identity & billing classes are included for completeness — they live below the agent layer but every agent class transits through them.
+Every model call funnels through a single `ModelClient` wrapper that enforces cap, records usage, writes a trace run to `model_call_logs`, and stamps the active prompt version on the row. Identity & billing classes are included for completeness — they live below the agent layer but every agent class transits through them.
 
 ```mermaid
 classDiagram
@@ -453,16 +453,25 @@ classDiagram
         +str content_hash
         +dict content_template
     }
-    class LangSmithClient {
+    class PostgresTraceSink {
         +bool enabled
-        +trace(agent, model, trace_id, prompt_version_id) ContextManager
+        +trace(user_id, agent, model, messages, system, ...) ContextManager~ModelRun~
+    }
+    class ModelRun {
+        +UUID run_id
+        +UUID parent_run_id
+        +str status
+        +mark_response(raw, text)
+        +mark_cost(usage, cost_cents, token_usage_id)
+        +mark_error(exc)
     }
     class CostNotifier {
         +maybe_send(user_id, cost_cents)
     }
 
     ModelClient --> Enforcer : pre-check
-    ModelClient --> LangSmithClient : wrap
+    ModelClient --> PostgresTraceSink : wrap
+    PostgresTraceSink ..> ModelRun : yields
     ModelClient --> Recorder : post-record
     ModelClient --> Pricing : compute cost
     ModelClient --> PromptVersionStore : resolve version
@@ -596,5 +605,5 @@ Quick reference: every block in `WolfPaw_00.pdf` and its corresponding class(es)
 | Sleep Cycle | `SleepCycle` | v2 |
 | Response | rendered via `Channel.send()` | v1 |
 | (implicit) Sandbox | `Sandbox`, `E2BSandbox`, `DockerSandbox`, `CredentialProxy` | v1 |
-| (implicit) Model calls | `ModelClient`, `Enforcer`, `Recorder`, `Pricing`, `PromptVersionStore`, `LangSmithClient` | v1 |
+| (implicit) Model calls | `ModelClient`, `Enforcer`, `Recorder`, `Pricing`, `PromptVersionStore`, `PostgresTraceSink` | v1 |
 | (implicit) Tasks | `Task`, `TaskStatus`, `TaskEvent`, `Artifact` | v1 |

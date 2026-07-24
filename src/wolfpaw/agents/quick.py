@@ -6,7 +6,7 @@ Triage lands, the web channel pipes every non-slash message through
 this agent directly.
 
 Loop shape: load recent thread history → append new user turn →
-call ModelClient (which records tokens + traces in LangSmith) → if the
+call ModelClient (which records tokens + writes a trace run) → if the
 response contains tool_use blocks, run them, append tool_result blocks,
 loop. Cap iterations so a misbehaving agent can't burn budget forever.
 
@@ -263,6 +263,40 @@ class QuickAgent:
             messages.append({"role": "assistant", "content": assistant_blocks})
 
             stop = getattr(raw, "stop_reason", None)
+            if stop == "max_tokens":
+                # The model ran out of output budget mid-generation. If it was
+                # partway through a tool call, the `input` JSON is truncated —
+                # `write_doc` arrives with a filename and no content — so the
+                # call must NOT be executed.
+                #
+                # The dangerous part is what used to happen next: this fell
+                # through to `return result.text`, which is the preamble the
+                # model emitted before starting the tool call ("I'll save that
+                # for you"). The user got a confident success message and no
+                # file. Never report success off the back of a truncated turn.
+                partial = [
+                    getattr(b, "name", "?")
+                    for b in assistant_blocks
+                    if _block_type(b) == "tool_use"
+                ]
+                log.warning(
+                    "agents.quick.max_tokens_truncated",
+                    user_id=str(ctx.user_id),
+                    partial_tools=partial,
+                    iteration=iteration,
+                )
+                if partial:
+                    return (
+                        f"I started to call `{partial[0]}` but hit my output"
+                        " length limit before finishing, so nothing was saved."
+                        " This usually means the content was too large for one"
+                        " response — try sending it in smaller pieces, or ask"
+                        " an operator to raise WOLFPAW_MODEL_MAX_TOKENS."
+                    )
+                # Plain prose that got cut off is still worth returning, but
+                # say so rather than passing it off as a complete answer.
+                return (result.text or "") + "\n\n_(response truncated —" \
+                    " hit the output length limit)_"
             if stop != "tool_use":
                 return result.text or ""
 

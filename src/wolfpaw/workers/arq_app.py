@@ -25,6 +25,8 @@ Job registration:
 - ``dispatch_schedules_job`` — per-minute schedule dispatcher: claims due
   ``schedules`` rows and spawns a Task per schedule. No-ops unless
   ``WOLFPAW_SCHEDULES_ENABLED=true``; safe to keep registered everywhere.
+- ``prune_traces_job`` — daily ``model_call_logs`` partition maintenance:
+  provision next month, drop partitions past the retention window.
 
 Adding a new job: define it in ``workers/jobs/`` (taking ``_ctx, ...``
 as the arq signature), import it here, and append to
@@ -50,6 +52,7 @@ from wolfpaw.workers.jobs.compact_thread import (
     embed_workspace_file_job,
 )
 from wolfpaw.workers.jobs.dispatch_schedules import dispatch_schedules_job
+from wolfpaw.workers.jobs.prune_traces import prune_traces_job
 from wolfpaw.workers.jobs.run_task import run_task_job
 from wolfpaw.workers.jobs.sleep_cycle import sleep_cycle_job
 
@@ -82,6 +85,7 @@ class WorkerSettings:
         slack_dispatch_job,
         sleep_cycle_job,
         dispatch_schedules_job,
+        prune_traces_job,
     ]
     cron_jobs = [
         # Weekly Sleep Cycle — Sunday 03:00 UTC. The job itself gates on
@@ -104,6 +108,19 @@ class WorkerSettings:
             dispatch_schedules_job,
             name="dispatch_schedules",
             second=0,
+        ),
+        # Trace retention — daily at 04:00 UTC. Provisions next month's
+        # `model_call_logs` partition and drops any whose range has aged out
+        # past WOLFPAW_TRACE_RETENTION_DAYS. Idempotent, so a missed run (or
+        # several) self-corrects on the next tick — but note that partitions
+        # are provisioned only a month ahead, so a worker down for weeks
+        # across a month boundary will start failing trace writes (the model
+        # calls themselves are unaffected).
+        cron(
+            prune_traces_job,
+            name="prune_traces",
+            hour=4,
+            minute=0,
         ),
     ]
     on_startup = _on_startup
