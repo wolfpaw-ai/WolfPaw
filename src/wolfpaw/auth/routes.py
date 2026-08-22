@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
 
+from wolfpaw.auth.allowlist import email_allowed
 from wolfpaw.auth.deps import require_user_id
 from wolfpaw.auth.email_backend import EmailBackend, get_email_backend
 from wolfpaw.auth.tokens import (
@@ -45,6 +46,11 @@ async def request_magic_link(
     email_backend: EmailBackend = Depends(get_email_backend),
 ) -> dict:
     settings = get_settings()
+    if not email_allowed(payload.email):
+        # Same 202 as the happy path, and no token row: a caller can't
+        # distinguish an allowlisted address from a rejected one.
+        log.info("auth.magic_link.rejected", email=payload.email)
+        return {"status": "ok"}
     plain, hashed = new_magic_link_token()
     expires_at = datetime.now(timezone.utc) + timedelta(
         minutes=settings.magic_link_ttl_minutes
@@ -87,6 +93,11 @@ async def verify_magic_link(token: str, response: Response) -> VerifyResponse:
                 raise HTTPException(400, "token already used")
             if row["expires_at"] <= datetime.now(timezone.utc):
                 raise HTTPException(400, "token expired")
+            if not email_allowed(row["email"]):
+                # Belt-and-braces: catches a token minted before the address
+                # was dropped from the allowlist.
+                log.info("auth.verify.rejected", email=row["email"])
+                raise HTTPException(400, "invalid token")
             await conn.execute(
                 "UPDATE magic_link_tokens SET used_at = NOW() WHERE id = $1",
                 row["id"],

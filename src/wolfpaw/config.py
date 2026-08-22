@@ -103,8 +103,22 @@ class Settings(BaseSettings):
     magic_link_ttl_minutes: int = 15
     session_ttl_days: int = 30
     session_cookie_name: str = "wp_session"
-    email_backend: str = "console"            # "console" | "ses" (later)
+    email_backend: str = "console"            # "console" | "ses"
     web_base_url: str = "http://localhost:3000"
+
+    # SES (used only when email_backend == "ses"). Credentials come from the
+    # standard AWS chain — on EC2 that means an instance role, so nothing
+    # secret has to live in .env. `ses_from_email` must be an address (or
+    # be under a domain) you've verified in the SES console.
+    ses_region: str = "us-east-1"
+    ses_from_email: str = ""
+    ses_configuration_set: str = ""           # optional, for bounce tracking
+
+    # Sign-in allowlist. Comma-separated addresses; empty (the default)
+    # leaves sign-up open, which is what a single-user self-host wants.
+    # Set it to pin a deployment to a known set of people — every other
+    # address gets the same silent 202, so it can't be probed.
+    allowed_emails: str = ""
 
     # Model client
     anthropic_api_key: str = ""
