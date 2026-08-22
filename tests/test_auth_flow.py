@@ -68,7 +68,7 @@ def _extract_token(body: str) -> str:
     Matches on the query param rather than a word index — the previous
     `body.split()[3]` indexing broke the moment the copy changed.
     """
-    m = re.search(r"/auth/verify\?token=(\S+)", body)
+    m = re.search(r"/signin/verify\?token=(\S+)", body)
     assert m is not None, f"no verify URL in body: {body!r}"
     return m.group(1)
 
@@ -79,7 +79,7 @@ async def test_magic_link_end_to_end():
     assert r.status_code == 202
     assert len(captured.sent) == 1
     body = captured.sent[0]["body"]
-    assert "/auth/verify?token=" in body
+    assert "/signin/verify?token=" in body
     token = _extract_token(body)
 
     # Verify mints a session cookie + creates the user.

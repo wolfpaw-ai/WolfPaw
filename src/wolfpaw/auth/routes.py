@@ -63,7 +63,12 @@ async def request_magic_link(
             hashed,
             expires_at,
         )
-    verify_url = f"{settings.web_base_url}/auth/verify?token={plain}"
+    # Link to the SPA route, not the API endpoint. `/signin/verify` renders
+    # a "Signing you in…" page that POSTs the token to `/auth/verify`,
+    # refreshes the auth context, then lands on /chat. Pointing the email
+    # straight at the API works — it sets the cookie — but leaves the user
+    # staring at a raw JSON body with no way forward.
+    verify_url = f"{settings.web_base_url}/signin/verify?token={plain}"
     await email_backend.send(
         to=payload.email,
         subject="Your Wolfpaw sign-in link",
