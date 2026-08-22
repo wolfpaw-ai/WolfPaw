@@ -49,7 +49,12 @@ services:
       retries: 10
 
   migrate:
-    build: .
+    build: &app_build
+      context: .
+      args:
+        # Optional pip extras baked into the image, e.g. "ses" for the SES
+        # email backend or "s3,pdf". The Dockerfile installs none by default.
+        EXTRAS: ${WOLFPAW_IMAGE_EXTRAS:-}
     image: wolfpaw-app:local
     restart: "no"
     depends_on:
@@ -61,7 +66,7 @@ services:
     command: ["python", "-m", "scripts.migrate"]
 
   app:
-    build: .
+    build: *app_build
     image: wolfpaw-app:local
     restart: unless-stopped
     depends_on:
@@ -92,7 +97,7 @@ services:
       retries: 6
 
   worker:
-    build: .
+    build: *app_build
     image: wolfpaw-app:local
     restart: unless-stopped
     depends_on:

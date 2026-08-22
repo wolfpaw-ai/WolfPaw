@@ -37,6 +37,7 @@ dev = [
     "respx>=0.21",
 ]
 s3 = ["boto3>=1.34"]
+ses = ["boto3>=1.34"]
 docker = ["docker>=7.0"]
 e2b = ["e2b-code-interpreter>=1.0"]
 pdf = ["weasyprint>=62"]

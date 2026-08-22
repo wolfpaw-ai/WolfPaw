@@ -73,6 +73,12 @@ Set in `.env`:
   caps per-call payload size. Nothing leaves your deployment. Note that
   retention is enforced by a daily job in the arq worker — if you run the API
   without the worker, traces accumulate indefinitely.
+- `WOLFPAW_EMAIL_BACKEND=ses` (plus `WOLFPAW_SES_FROM_EMAIL` and
+  `WOLFPAW_SES_REGION`) — send real sign-in emails instead of logging
+  them. See "Real sign-in emails (SES)" below.
+- `WOLFPAW_ALLOWED_EMAILS` — comma-separated allowlist of addresses that
+  may sign in. Blank (default) leaves sign-up open. See "Restricting who
+  can sign in" below.
 - `WOLFPAW_E2B_API_KEY` (plus `WOLFPAW_SANDBOX_BACKEND=e2b`) — managed
   sandbox provider. The default `subprocess` backend is fine for
   single-user self-host but is **not a security boundary**.
@@ -99,6 +105,64 @@ your-domain.com {
     reverse_proxy localhost:3000
 }
 ```
+
+### Real sign-in emails (SES)
+
+The default `WOLFPAW_EMAIL_BACKEND=console` prints the verify URL to the
+app's logs instead of sending it — fine for one person who can `docker
+compose logs app`, useless once someone else needs to sign in. Set
+`ses` to send through Amazon SES:
+
+```bash
+WOLFPAW_EMAIL_BACKEND=ses
+WOLFPAW_SES_REGION=us-east-1
+WOLFPAW_SES_FROM_EMAIL=no-reply@your-domain.com
+```
+
+The `[ses]` extra (boto3) is **not** in the default image — the Dockerfile
+skips optional extras to stay slim. Set `WOLFPAW_IMAGE_EXTRAS=ses` in
+`.env` and rebuild (`docker compose up -d --build`), or the app will
+raise `ImportError` the first time someone requests a magic link.
+
+Setup, in order:
+
+1. **Verify the sender.** In the SES console, verify either the single
+   From address or the whole domain. Verifying the domain and publishing
+   its DKIM records is worth the extra few minutes — unsigned mail from a
+   fresh domain lands in spam, and a sign-in link in spam is a sign-in
+   link that doesn't work.
+2. **Grant the instance permission.** boto3 resolves credentials through
+   the standard chain, so on EC2 the clean move is an instance role with
+   `ses:SendEmail` — no keys in `.env` at all. Elsewhere, the usual
+   `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair works.
+3. **Decide about the sandbox.** New SES accounts can only send to
+   *verified* recipients. For a deployment with two or three known users
+   that's not a limitation, it's a second lock — just verify each person's
+   address. Request production access only if you need to mail strangers.
+
+A send failure is logged (`email.send.ses.failed`) and swallowed rather
+than returned to the browser, so a sandbox rejection can't be used to
+probe which addresses are verified. If someone reports no email, that log
+line is where to look.
+
+### Restricting who can sign in
+
+Sign-up is open by default: anyone who can reach the app can request a
+magic link and get an account. That's the right default for a box that
+isn't publicly routable, and the wrong one the moment you put it behind a
+real domain. Pin it to known addresses:
+
+```bash
+WOLFPAW_ALLOWED_EMAILS=you@example.com,partner@example.com
+```
+
+Unlisted addresses get the same `202` and the same silence as listed
+ones — no token is minted and no mail is sent, so the list can't be
+probed from outside. Removing an address also invalidates any link
+already in their inbox, so revoking access takes effect immediately
+rather than whenever the outstanding token expires.
+
+Leave it blank to keep sign-up open.
 
 ### Camera-driven tools (HTTPS required)
 
@@ -210,7 +274,14 @@ own fork or layered image:
   docker network failed, or the `app` service isn't healthy yet).
 - **Magic-link sign-in: I never see the verify URL.** The console email
   backend prints to `app`'s stdout: `docker compose logs -f app | grep verify`.
-  Set `WOLFPAW_EMAIL_BACKEND=` to your real provider when you're ready.
+  Set `WOLFPAW_EMAIL_BACKEND=ses` for real delivery when you're ready.
+- **SES is configured but no email arrives.** Check the logs for
+  `email.send.ses.failed` — sends are deliberately swallowed rather than
+  surfaced as HTTP errors. The usual causes are an unverified From
+  address, an unverified *recipient* while the account is still in the
+  SES sandbox, or a missing `ses:SendEmail` permission. If instead you
+  see `auth.magic_link.rejected`, the address isn't in
+  `WOLFPAW_ALLOWED_EMAILS`.
 - **`run_python` tool errors with "Permission denied".** The Subprocess
   sandbox writes to `/tmp` inside the app container. If you've mounted
   a read-only filesystem, it'll fail; either un-mount read-only or switch
