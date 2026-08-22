@@ -52,6 +52,16 @@ def configure_logging(level: str = "INFO") -> None:
             _add_trace_id,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            # Without this, `log.exception(...)` renders as the literal
+            # `"exc_info": true` and the traceback is dropped on the floor —
+            # every caught-and-logged error becomes undiagnosable. This
+            # formats it into an `exception` string instead.
+            #
+            # Deliberately `format_exc_info` and not `dict_tracebacks`: the
+            # latter serializes each frame's *locals*, which on these code
+            # paths means API keys, session tokens, and unexpired
+            # magic-link tokens written to stdout in plaintext.
+            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
