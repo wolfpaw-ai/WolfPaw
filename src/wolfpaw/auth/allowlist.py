@@ -1,14 +1,5 @@
-"""Sign-in allowlist.
-
-`WOLFPAW_ALLOWED_EMAILS` is a comma-separated list of addresses permitted
-to request a magic link. Empty (the default) means "no allowlist" — sign-up
-stays open, which is the right default for a single-user self-host where
-the deployment isn't reachable from the public internet anyway.
-
-When the list *is* set, a non-listed address gets the same 202 as a listed
-one: the caller can't tell an allowed address from a rejected one, so the
-allowlist can't be used to enumerate who has access.
-"""
+"""Sign-in allowlist. `WOLFPAW_ALLOWED_EMAILS`, comma-separated; empty
+means open sign-up."""
 
 from __future__ import annotations
 

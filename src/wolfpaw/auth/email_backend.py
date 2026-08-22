@@ -91,14 +91,8 @@ class SESEmailBackend(EmailBackend):
         try:
             message_id = await asyncio.to_thread(_send)
         except Exception as e:
-            # Swallow rather than propagate. In the SES sandbox an
-            # unverified recipient raises, so a 500 here would let a caller
-            # tell verified addresses from unverified ones — exactly the
-            # enumeration the allowlist's uniform 202 is there to prevent.
-            # The operator gets the failure from this log line.
-            # `error` is spelled out rather than left to the traceback: this
-            # is the line an operator greps when nobody's getting mail, and
-            # it should name the cause on its own.
+            # Swallowed: raising would let callers distinguish verified
+            # from unverified recipients in the SES sandbox.
             log.exception(
                 "email.send.ses.failed",
                 to=to,

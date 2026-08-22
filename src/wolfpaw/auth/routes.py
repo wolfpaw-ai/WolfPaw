@@ -143,7 +143,19 @@ async def me(user_id=Depends(require_user_id)) -> dict:
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(response: Response) -> Response:
+async def logout() -> Response:
+    """Clear the session cookie.
+
+    Attributes must match those used at verify time or browsers keep the
+    original cookie.
+    """
     settings = get_settings()
-    response.delete_cookie(settings.session_cookie_name)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(
+        settings.session_cookie_name,
+        path="/",
+        httponly=True,
+        secure=settings.env != "dev",
+        samesite="lax",
+    )
     return response
