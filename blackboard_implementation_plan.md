@@ -99,23 +99,11 @@ The output-side fix — the one that motivated this plan — is prompt-dependent
 
 So the deterministic half goes first. It exercises the schema, the scoping, and the spill behavior under real load **before** anything depends on a prompt landing correctly.
 
-### Phase 0 — Make the silent loss loud, and measure ✅ **completed**
+### Phase 0 — Make the silent loss loud ✅ **completed**
 
-Two halves, both cheap, neither depending on anything below.
+Instrument the clip sites. [`_format_prior_result`](src/wolfpaw/agents/executor.py) emits a structured warning (`executor.prior_result.truncated`, with `site`, `step_id`, `kind`, `original_bytes`, `cap`, `dropped_bytes`) whenever it actually clips — once per clipped step, on both the step-prompt and synthesis paths. No behavior change.
 
-- **Instrument the clip sites.** `_format_prior_result` emits a structured warning (`executor.prior_result.truncated`, with `step_id`, `kind`, `original_bytes`, `cap`) whenever it actually clips — on both the step-prompt and synthesis paths. This converts an invisible failure into a countable one.
-- **Query `model_call_logs`.** How often do tool-call arguments carry large payloads, and how many calls stop with `stop_reason=max_tokens`? Sizes the win.
-
-Together these produce the before/after baseline that Phase 5's tokens-saved metric needs. No behavior change.
-
-**Acceptance:** a week of logs answers "how often does this actually bite, and where."
-
-**As built.**
-
-- [`_format_prior_result`](src/wolfpaw/agents/executor.py) takes a `site` argument and warns on every clip, carrying `site` / `step_id` / `kind` / `original_bytes` / `cap` / `dropped_bytes`. `dropped_bytes` was added beyond the spec — it's the number that actually sizes the loss, and summing it across a window is the one-line answer to "how much did we lose." The two call sites pass `site="step_prompt"` and `site="synthesis"`, so the path the user reads is separable from the intermediate one. One warning per clipped step, not one per prompt: the question is *which* steps lose data.
-- [`scripts/blackboard_baseline.py`](scripts/blackboard_baseline.py) — read-only report, three queries: calls stopped by the output ceiling (by agent + model), bytes emitted as `tool_use` arguments (by agent + tool, with avg/p95/max/total), and the worst individual arguments with `trace_id` so each can be opened in `/monitor`. Run `python -m scripts.blackboard_baseline [--days N] [--threshold BYTES]`.
-- The report deliberately does **not** claim every counted byte is recoverable. Content the model *authors* has no handle to reference and correctly stays a model call; splitting authored from copied needs the trace_ids in the third table. The summary line says so rather than overstating the prize.
-- Tests: [`tests/test_executor_truncation_unit.py`](tests/test_executor_truncation_unit.py) — 6 unit tests pinning the warning's shape, the per-step counting, the two site labels, and the no-clip / failed-step paths that must stay silent. Phase 1's acceptance test asserts against this same event name.
+Phase 1's acceptance test asserts this event stops firing, so it has to exist first. Tests: [`tests/test_executor_truncation_unit.py`](tests/test_executor_truncation_unit.py).
 
 ### Phase 1 — Store + executor-side handles + the input/synthesis fix
 
