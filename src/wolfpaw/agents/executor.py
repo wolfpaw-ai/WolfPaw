@@ -911,7 +911,9 @@ def _build_step_prompt(step: Step, plan: Plan, prior: list[StepResult]) -> str:
         lines.append("(no prior steps)")
     else:
         for r in prior:
-            lines.append(_format_prior_result(r, cap=_PRIOR_RESULT_TRUNCATE))
+            lines.append(_format_prior_result(
+                r, cap=_PRIOR_RESULT_TRUNCATE, site="step_prompt",
+            ))
     lines.extend([
         "",
         "# Your current step",
@@ -933,7 +935,9 @@ def _build_synthesis_prompt(plan: Plan, results: list[StepResult]) -> str:
         "# Step results",
     ]
     for r in results:
-        lines.append(_format_prior_result(r, cap=_SYNTHESIS_TRUNCATE))
+        lines.append(_format_prior_result(
+            r, cap=_SYNTHESIS_TRUNCATE, site="synthesis",
+        ))
     lines.extend([
         "",
         "Write the final user-facing answer in plain markdown.",
@@ -941,11 +945,28 @@ def _build_synthesis_prompt(plan: Plan, results: list[StepResult]) -> str:
     return "\n".join(lines)
 
 
-def _format_prior_result(r: StepResult, *, cap: int) -> str:
+def _format_prior_result(r: StepResult, *, cap: int, site: str) -> str:
+    """Render one prior step result for inlining into a prompt.
+
+    Clipping here is silent data loss: the next step (or the final
+    synthesis) simply never sees the tail. The blackboard work removes
+    the clip entirely; until then it at least gets counted, so we know
+    how often it bites and where. `site` distinguishes the step-prompt
+    path from the synthesis path — the latter is what the user reads.
+    """
     if r.status != StepStatus.COMPLETED:
         return f"- {r.step_id} [{r.kind}]: ({r.status.value})"
     out = json.dumps(r.output, default=str)
     if len(out) > cap:
+        log.warning(
+            "executor.prior_result.truncated",
+            site=site,
+            step_id=r.step_id,
+            kind=r.kind,
+            original_bytes=len(out),
+            cap=cap,
+            dropped_bytes=len(out) - cap,
+        )
         out = out[:cap] + " …(truncated)"
     return f"- {r.step_id} [{r.kind}]: {out}"
 
