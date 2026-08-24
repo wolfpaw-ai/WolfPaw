@@ -1,10 +1,39 @@
 # Implementation Plan: Content-by-Reference (Blackboard)
 
-**Status:** Proposed
+**Status:** Proposed · Phase 0 complete · **Phase 1 blocked pending scope decision — see Open Issues below.**
 **Date:** 2026-07-23 · **Revised 2026-08-24** — phases reordered so deterministic
 work ships before prompt-dependent work; sentinel changed from `$ref` to
 `__ref__`; resolution failures now bypass the input-repair loop; the synthesis
 prompt added as a third truncation site.
+
+## Open Issues (paused mid-session, resume here)
+
+### 1. Phase 1's dependency signal doesn't exist
+
+Phase 1 as written says: un-clip prior-step content and inject the full bytes "for the steps the current step actually depends on." That framing assumes the executor knows which prior step a given step reads from. It doesn't. [`Step`](src/wolfpaw/schemas.py) has `id`, `kind`, `description`, `tool`, `inputs`, `parallel_group` — no dependency field. `_build_step_prompt` currently dumps **every** prior result (clipped to 2 KB each), and there is no signal available to narrow that.
+
+Consequence: Phase 1 as written can't do what its acceptance criterion says. Removing the clip without narrowing which steps get injected makes prompts strictly **bigger**, which is the opposite of what this whole plan is for. The "deterministic Phase 1 → prompt-dependent Phase 2" framing in the Phasing Principle table quietly assumed a dependency edge that isn't in the data model.
+
+### 2. Options for resolving it
+
+**A. Merge Phase 1 into Phase 2.** The refs in a step's `inputs` *are* the dependency signal: if step 4 carries `{"__ref__": "step:3.output"}`, then step 4 depends on step 3 and step 3 gets injected in full. Steps whose outputs nobody references don't get injected at all. But that needs the planner emitting refs, so there's no separable pre-Phase 2 phase — ship them as one.
+
+**B. Add `depends_on: list[str]` to `Step`.** Explicit dependency list the planner fills. Simpler planner-prompt change than teaching refs ("list which prior step ids this reads"), and the executor consumes it deterministically. Keeps Phase 1 as a real phase, but does need one planner prompt update — no longer purely deterministic.
+
+**C. Split Phase 1 into infrastructure-only (recommended).** Ship the store + handle-writing for step outputs. Don't touch `_build_step_prompt` at all. Acceptance changes from "step sees full content" to "step outputs are addressable by handle by end of Phase 1." Phase 2 then does both the output side (planner emits refs in `inputs`) **and** the input side un-clipping, using those refs as the dependency signal. Smallest honest Phase 1 — pure infra, no behavior change, no prompt work.
+
+Recommendation: **C**. Matches how the dependency signal actually enters the system (via refs), keeps Phase 1 side-effect-free, and puts both prompt-touching changes in one phase where they belong.
+
+### 3. Non-issue: prompt-versioning with two running instances
+
+Investigated during the same session, confirmed not a blocker. `prompt_versions` has one row per `(agent, label)`; `bump_prompt_version` upserts on that key at process startup. With two instances of Wolfpaw running, whichever booted last overwrites the row — but `get_active_prompt_version` has **zero callers**. The table is write-only bookkeeping today; agents use hardcoded in-code constants. So the row-clobbering only misattributes which prompt text produced a logged call, and doesn't affect behavior. Bumping `VERSION_LABEL` when Phase 2 lands is cosmetic; do it for hygiene, not correctness.
+
+Deeper implication (for a later ADR, not this plan): the versioning table was designed for an admin-editable, DB-driven prompt path that was never wired. Either build that read path or drop the table — carrying it as-is is a design half-move.
+
+### 4. Also captured for later
+
+- The "As built" note on Phase 0 originally cited a `scripts/blackboard_baseline.py` measurement tool. Deleted mid-session — nothing gated on the measurement, and the retention window on `model_call_logs` (14 days default) made a "run once before, once after" comparison shaky anyway. Warning-based counting from the structured logs is enough.
+- If Phase 2 lands as recommended: prompts get bigger for a step that references a large predecessor, and smaller for the step that produced the predecessor's content (because `write_doc` etc. no longer re-emit it). Net direction depends on plan shape. Worth measuring after Phase 2 rather than predicting.
 **Motivation:** the `write_doc` silent-failure bug (found via the model-call trace store) — a document routed through the model as tool-call arguments overran `max_tokens` and truncated. Raising the budget treated the symptom; this plan removes the root cause.
 
 ## Problem
