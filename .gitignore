@@ -19,6 +19,7 @@ venv/
 
 # Editor
 .DS_Store
+.vscode/
 
 # Private planning — hosted SaaS architecture notes.
 saas.md
