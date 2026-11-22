@@ -99,6 +99,8 @@ class QuickAgent:
             "schedule_task",
             "list_schedules",
             "cancel_schedule",
+            "announce",
+            "set_timer",
         }
     )
 
