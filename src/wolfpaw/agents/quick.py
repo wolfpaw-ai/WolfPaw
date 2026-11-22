@@ -244,7 +244,7 @@ class QuickAgent:
         if summary_block:
             role = role + "\n\n" + summary_block
         system_prompt = await build_for_agent(
-            user_id=ctx.user_id, agent_role=role,
+            user_id=ctx.user_id, agent_role=role, channel=ctx.channel,
         )
         for iteration in range(self._max_iterations):
             result = await self.model_client.call(

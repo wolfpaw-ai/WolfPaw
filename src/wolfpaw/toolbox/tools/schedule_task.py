@@ -35,7 +35,7 @@ from wolfpaw.toolbox.registry import (
     register_tool,
 )
 
-_VALID_CHANNELS = {"telegram"}  # only channel wired for proactive outbound
+_VALID_CHANNELS = {"telegram", "voice"}  # channels wired for proactive outbound
 
 
 def _parse_dt(raw: str, tz_name: str) -> datetime:
@@ -129,7 +129,10 @@ class ScheduleTaskTool(Tool):
             },
             "channel": {
                 "type": "string",
-                "description": "Delivery channel; defaults to 'telegram'.",
+                "description": (
+                    "Delivery channel: 'telegram' or 'voice'. Defaults to the"
+                    " channel the request came in on ('telegram' for web)."
+                ),
             },
             "max_runs": {
                 "type": "integer",
@@ -153,7 +156,9 @@ class ScheduleTaskTool(Tool):
         if recurrence not in ("once", "interval", "cron"):
             raise ToolError("`recurrence` must be once|interval|cron")
 
-        channel = (inputs.get("channel") or "telegram").lower()
+        # A reminder asked for by voice comes back by voice, unless told otherwise.
+        default_channel = ctx.channel if ctx.channel in _VALID_CHANNELS else "telegram"
+        channel = (inputs.get("channel") or default_channel).lower()
         if channel not in _VALID_CHANNELS:
             raise ToolError(
                 f"`channel` must be one of {sorted(_VALID_CHANNELS)}"
