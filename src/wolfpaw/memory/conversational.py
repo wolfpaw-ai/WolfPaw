@@ -42,7 +42,7 @@ import asyncpg
 from wolfpaw.tracing import get_logger
 
 MessageRole = Literal["user", "assistant", "system", "tool"]
-ChannelName = Literal["web", "telegram", "email", "slack"]
+ChannelName = Literal["web", "telegram", "email", "slack", "voice"]
 
 log = get_logger()
 

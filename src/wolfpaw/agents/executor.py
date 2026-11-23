@@ -670,7 +670,7 @@ class ExecutorAgent:
         settings = get_settings()
         prompt = _build_step_prompt(step, plan, prior)
         system = await build_for_agent(
-            user_id=ctx.user_id, agent_role=_AGENT_ROLE,
+            user_id=ctx.user_id, agent_role=_AGENT_ROLE, channel=ctx.channel,
         )
         result = await self.model_client.call(
             user_id=ctx.user_id,
@@ -881,6 +881,7 @@ class ExecutorAgent:
         prompt = _build_synthesis_prompt(plan, results)
         system = await build_for_agent(
             user_id=ctx.user_id, agent_role=_SYNTHESIS_AGENT_ROLE,
+            channel=ctx.channel,
         )
         result = await self.model_client.call(
             user_id=ctx.user_id,

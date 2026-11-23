@@ -12,6 +12,8 @@ from wolfpaw import __version__
 from wolfpaw.auth.routes import router as auth_router
 from wolfpaw.channels.slack import router as slack_channel_router
 from wolfpaw.channels.telegram import router as telegram_channel_router
+from wolfpaw.channels.voice import router as voice_channel_router
+from wolfpaw.channels.voice_hub import get_bus as get_voice_bus, get_hub as get_voice_hub
 from wolfpaw.channels.web import router as web_channel_router
 from wolfpaw.config import get_settings
 from wolfpaw.integrations import dropbox as _dropbox_integration  # noqa: F401 — registers Dropbox tools
@@ -70,7 +72,17 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    log = get_logger()
+    voice_bus = get_voice_bus()
+    try:
+        await voice_bus.start(get_voice_hub())
+    except Exception:  # noqa: BLE001 — voice is optional; the API must still boot
+        log.warning("voice.bus.start_failed", exc_info=True)
     yield
+    try:
+        await voice_bus.stop()
+    except Exception:  # noqa: BLE001
+        log.warning("voice.bus.stop_failed", exc_info=True)
     await close_queue_pool()
     await close_pool()
 
@@ -88,6 +100,7 @@ def create_app() -> FastAPI:
     app.add_middleware(TraceIdMiddleware)
     app.include_router(auth_router)
     app.include_router(web_channel_router)
+    app.include_router(voice_channel_router)
     app.include_router(telegram_channel_router)
     app.include_router(slack_channel_router)
     app.include_router(workspace_router)

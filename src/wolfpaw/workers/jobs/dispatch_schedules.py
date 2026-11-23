@@ -41,6 +41,13 @@ class DispatchResult:
     errors: int
 
 
+def _reach_out_hint(schedule: schedules_dao.Schedule) -> str:
+    """Which tool the headless run should use to contact the user."""
+    if schedule.channel == "voice":
+        return "e.g. via announce, which speaks on their voice device"
+    return "e.g. via send_telegram_message"
+
+
 def _render_content(schedule: schedules_dao.Schedule) -> str:
     """Build the Task content the agent sees for one scheduled run: the
     instruction, the resolved context, any cross-run notes, and a header
@@ -64,7 +71,7 @@ def _render_content(schedule: schedules_dao.Schedule) -> str:
         f"You are running as scheduled job {schedule.id} — there is no human"
         " available to answer questions, so do not ask any; act on the"
         " instruction and stop. Reach out to the user only if the"
-        " instruction says to (e.g. via send_telegram_message). If you need"
+        f" instruction says to ({_reach_out_hint(schedule)}). If you need"
         " to remember something so a future run doesn't repeat itself (for"
         " example, that you already notified the user), call"
         f' update_schedule_state with schedule_id="{schedule.id}".'
