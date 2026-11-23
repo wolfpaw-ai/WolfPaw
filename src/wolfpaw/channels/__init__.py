@@ -60,6 +60,7 @@ _BUILTIN_CHANNEL_MODULES = {
     "web": "wolfpaw.channels.web",
     "telegram": "wolfpaw.channels.telegram",
     "slack": "wolfpaw.channels.slack",
+    "voice": "wolfpaw.channels.voice",
 }
 
 

@@ -62,6 +62,13 @@ def _format_for_push(question: str, options: list[str] | None) -> str:
     return "\n".join(lines)
 
 
+def _format_for_voice(question: str, options: list[str] | None) -> str:
+    """Render the question to be spoken: options are read out in a sentence."""
+    if not options:
+        return question
+    return f"{question} Your choices are: " + ", ".join(options) + "."
+
+
 @register_tool
 class AskUserTool(Tool):
     name = "ask_user"
@@ -158,7 +165,9 @@ class AskUserTool(Tool):
 
         # Deliver the question to the user. A live stream takes the emit
         # path (web SSE); otherwise push proactively via the channel.
-        await self._deliver(ctx, pq.id, question, options, urgency)
+        await self._deliver(
+            ctx, pq.id, question, options, urgency, expires_at=getattr(pq, "expires_at", None),
+        )
 
         # Wait durably for the answer (LISTEN/NOTIFY, cross-process safe).
         resolved = await pq_dao.wait_for_answer(
@@ -212,6 +221,7 @@ class AskUserTool(Tool):
         question: str,
         options: list[str] | None,
         urgency: str,
+        expires_at: Any = None,
     ) -> None:
         """Surface the question to the user. Emit into a live stream if one
         exists; else push proactively through the originating channel. Best
@@ -243,9 +253,17 @@ class AskUserTool(Tool):
             )
             return
         try:
-            await channel.send(
-                ctx.user_id, _format_for_push(question, options),
-            )
+            if ctx.channel == "voice":
+                # A voice device answers by question id, not by "the next
+                # message", so it needs the id and the deadline.
+                await channel.send(
+                    ctx.user_id, _format_for_voice(question, options),
+                    question_id=question_id, expires_at=expires_at,
+                )
+            else:
+                await channel.send(
+                    ctx.user_id, _format_for_push(question, options),
+                )
         except NotImplementedError:
             # e.g. web with no live stream — no push transport yet.
             log.warning(

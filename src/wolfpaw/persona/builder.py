@@ -69,6 +69,27 @@ _CHAT_HISTORY_GUIDANCE = """# Conversation history — what it's for
 The recent messages and thread summaries are **conversational context**: use them to resolve references ("it", "that one", "do it again"), maintain continuity, and understand what the user is talking about. They are **not** a guide for *how* to perform a task. Do not treat a past turn as a template or instruction for execution, and do not repeat a past action just because it appears earlier in the thread. Your own previous messages are not authoritative — they may contain mistakes; never assume you did something because an earlier turn says you did. Decide how to act from the user's current request and your available tools (and any retrieved skills/plans), not by imitating prior turns."""
 
 
+# Extra guidance keyed on the channel the current turn arrived on. Voice replies
+# are read aloud by a device, so they must sound right when spoken.
+_CHANNEL_HINTS: dict[str, str] = {
+    "voice": (
+        "# This conversation is spoken aloud\n\n"
+        "The user is talking to you by voice and your reply will be read out by"
+        " a speaker or headset. Answer in one to three short, plain spoken"
+        " sentences. No markdown, bullet points, tables, code, emoji or URLs."
+        " Say numbers, times and dates the way a person would say them. If the"
+        " answer is long or visual (a list, a table, a document), say the key"
+        " point and offer to send the detail to Telegram or the web app"
+        " instead."
+    ),
+}
+
+
+def channel_hint(channel: str | None) -> str:
+    """Guidance for the channel a turn arrived on, or '' if it has none."""
+    return _CHANNEL_HINTS.get(channel or "", "")
+
+
 @dataclass(frozen=True)
 class _CachedProfile:
     profile: UserProfile
@@ -162,6 +183,7 @@ def build_system_prompt(
     user_profile: UserProfile,
     agent_role: str,
     now: datetime | None = None,
+    channel: str | None = None,
 ) -> str:
     """Pure assembly — no I/O. Useful for tests + for the runtime helper.
 
@@ -174,11 +196,16 @@ def build_system_prompt(
         parts.append(soul_block)
     parts.append(_format_user_block(user_profile, now))
     parts.append(_CHAT_HISTORY_GUIDANCE)
+    hint = channel_hint(channel)
+    if hint:
+        parts.append(hint)
     parts.append(f"# Your role\n\n{agent_role.strip()}")
     return "\n\n---\n\n".join(parts)
 
 
-async def build_for_agent(*, user_id: UUID, agent_role: str) -> str:
+async def build_for_agent(
+    *, user_id: UUID, agent_role: str, channel: str | None = None,
+) -> str:
     """Runtime helper used by every agent's call path. Falls back to a
     bare agent_role on Soul / DB load failures so the call still goes
     through in a degraded state."""
@@ -194,5 +221,5 @@ async def build_for_agent(*, user_id: UUID, agent_role: str) -> str:
         profile = DEFAULT_PROFILE
     return build_system_prompt(
         soul=soul, user_profile=profile, agent_role=agent_role,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(timezone.utc), channel=channel,
     )

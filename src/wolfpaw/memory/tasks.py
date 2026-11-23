@@ -28,7 +28,7 @@ TaskStatus = Literal[
     "pending", "running", "blocked", "awaiting_user",
     "completed", "failed", "cancelled",
 ]
-ChannelName = Literal["web", "telegram", "email", "slack"]
+ChannelName = Literal["web", "telegram", "email", "slack", "voice"]
 
 TERMINAL_STATUSES: frozenset[TaskStatus] = frozenset(
     {"completed", "failed", "cancelled"}

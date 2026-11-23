@@ -245,6 +245,13 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""             # X-Telegram-Bot-Api-Secret-Token
     telegram_link_token_ttl_minutes: int = 15
 
+    # Voice devices (Raspberry Pi etc.). A pairing code shown on the Profile
+    # page is valid this long, once. Device presence (used to decide whether
+    # to speak or fall back to Telegram) goes stale after the TTL if a device
+    # stops pinging.
+    voice_pair_code_ttl_minutes: int = 15
+    voice_presence_ttl_seconds: int = 120
+
     # Slack (step 21). One Slack app per deployment; each workspace
     # installs the app via the OAuth flow which stores a per-workspace
     # bot token in `slack_workspaces`. All three of these come from the

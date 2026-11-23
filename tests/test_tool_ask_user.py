@@ -178,3 +178,25 @@ async def test_timeout_marks_blocked_and_raises(stub):
 
 async def _noop_emit(event, data):
     return None
+
+
+async def test_voice_question_carries_its_id_and_is_spoken_naturally(stub, monkeypatch):
+    """A voice device answers by question id, so the push includes the id and
+    deadline, and options are read out in a sentence instead of a numbered list."""
+    tool = get_tool_registry().get("ask_user")
+    sent: list[tuple] = []
+
+    class FakeChannel:
+        async def send(self, user_id, content, **kwargs):
+            sent.append((content, kwargs))
+
+    monkeypatch.setattr(
+        "wolfpaw.toolbox.tools.ask_user.get_channel", lambda name: FakeChannel())
+
+    ctx = ToolContext(user_id=uuid4(), task_id=uuid4(), channel="voice")
+    await tool.run(ctx, question="Order milk?", options=["yes", "no"])
+
+    content, kwargs = sent[0]
+    assert content == "Order milk? Your choices are: yes, no."
+    assert kwargs["question_id"] == stub.created.id
+    assert "expires_at" in kwargs
