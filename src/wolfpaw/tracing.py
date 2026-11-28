@@ -7,6 +7,7 @@ handler picks it up automatically — no manual plumbing through call sites.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -38,6 +39,32 @@ def _add_trace_id(_logger: Any, _method: str, event_dict: dict) -> dict:
     return event_dict
 
 
+# Integration API credentials (Document Organizer keys are df_live_… /
+# df_test_…). Scrubbed from every log line so a key that leaks into an
+# error message or exception text never reaches stdout.
+_SECRET_PATTERNS = [re.compile(r"\bdf[a-z]?_(?:live|test)_[0-9A-Za-z]{8,}")]
+
+
+def redact_secrets(text: str) -> str:
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[redacted-key]", text)
+    return text
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_value(v) for v in value]
+    return value
+
+
+def _redact_processor(_logger: Any, _method: str, event_dict: dict) -> dict:
+    return {k: _redact_value(v) for k, v in event_dict.items()}
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Configure structlog → stdout JSON, one event per line. Idempotent."""
     logging.basicConfig(
@@ -55,6 +82,7 @@ def configure_logging(level: str = "INFO") -> None:
             # Not dict_tracebacks: it serializes frame locals, leaking
             # API keys and session tokens into stdout.
             structlog.processors.format_exc_info,
+            _redact_processor,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(

@@ -234,6 +234,17 @@ class Settings(BaseSettings):
     microsoft_client_secret: str = ""
     microsoft_tenant: str = "common"
 
+    # Document Organizer (Dmitri's Fabulous) public API integration. Off
+    # unless the operator sets a base URL, e.g.
+    #   WOLFPAW_DF_BASE_URL=https://api.dmitrisfabulous.com      (prod)
+    #   WOLFPAW_DF_BASE_URL=https://dev.api.dmitrisfabulous.com  (dev)
+    # Users then paste a personal API key (df_live_… / df_test_…) from
+    # Profile. A blank URL hides the integration entirely.
+    df_base_url: str = ""
+    # Seconds to wait on /v1/search and /v1/reports (the DF agent can take
+    # a minute); other calls use a short timeout.
+    df_agent_timeout_seconds: float = 120.0
+
     # Persona (step 17). Soul file path; empty → fall back to the
     # repo-root `soul.md` discovered via `persona.soul.default_soul_path()`.
     soul_path: str = ""

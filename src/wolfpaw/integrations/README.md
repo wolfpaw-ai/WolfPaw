@@ -20,6 +20,40 @@ Each subpackage follows the same three-file layout — `client.py` for the HTTP 
 - **`notion/`** — Workspace pages. Three tools: `notion_search` (workspace-scoped search), `notion_read_page` (metadata + child blocks merged into one normalized payload — nested blocks are NOT recursively expanded; agent drills in by id), `notion_create_page` (title + optional `body_markdown` rendered as a paragraph block; richer block types deferred). Tokens in `memory/notion_links`.
 - **`microsoft/`** — Outlook Calendar. Two tools: `outlook_calendar_list_events`, `outlook_calendar_create_event`. Tokens in `memory/microsoft_links`.
 
+## Integration framework (new integrations start here)
+
+Dropbox, Notion and Microsoft predate the framework and keep their own routes and link tables. Everything new plugs into one small contract in [`base.py`](base.py) instead:
+
+```python
+class MyIntegration(Integration):
+    name = "my_service"          # storage key + URL segment
+    display_name = "My Service"
+    auth_kind = "api_key"        # or "oauth"
+    tool_prefix = "my"           # tools are my_*
+
+    def is_configured(self): ...                 # operator env present?
+    async def connect_api_key(self, key): ...    # validate → Credentials(...)
+    def planner_hint(self): ...                  # optional one-liner
+
+register_integration(MyIntegration())
+from wolfpaw.integrations.my_service import tools  # registers @register_tool classes
+```
+
+What the framework gives you for free:
+
+- **Routes** (`build_router()`, mounted by `api.py` after the legacy routers): `GET /integrations`, `GET /integrations/{name}`, `POST /integrations/{name}/connect` (API-key integrations), `DELETE /integrations/{name}`. Credentials are stored but never returned.
+- **Storage:** the generic `integration_links` table ([`memory/integration_links.py`](../memory/integration_links.py), migration 023) — no per-provider table or migration.
+- **Planner wiring:** `connected_framework_integrations()` feeds the same "which providers are connected" block the Planner already reads, using your `tool_prefix` and `planner_hint()`.
+- **Profile page:** one card per *configured* integration, rendered from `GET /integrations`.
+- **Log redaction:** API keys matching `df_…` / `dfa_…` are scrubbed from every log line (`tracing.redact_secrets`); add a pattern there for a new provider's key format.
+- **Plugins:** an external package can expose a `wolfpaw.integrations` entry point whose module calls `register_integration(...)`, so a private integration doesn't need a fork.
+
+Integrations are **outbound tools**. Channels (web, Telegram, Slack, voice) are two-way messaging and stay under [`channels/`](../channels/README.md).
+
+### Worked example: [`dmitris_fabulous/`](dmitris_fabulous/)
+
+The Document Organizer (Dmitri's Fabulous) integration: personal API key → public `/v1` API (never internal routes). `client.py` maps the API's error envelope onto one exception, `tools.py` has `df_search`, `df_get_document`, `df_document_link`, `df_list_lists`, `df_report`. Off unless `WOLFPAW_DF_BASE_URL` is set. Search results are compact stubs and labelled as untrusted data; on the voice channel searches ask for a brief answer; reports save a CSV to the workspace.
+
 ## Flow — OAuth install (any provider)
 
 ```mermaid

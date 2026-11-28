@@ -40,6 +40,8 @@ from arq import cron
 from arq.connections import RedisSettings
 
 from wolfpaw.config import get_settings
+from wolfpaw.integrations import base as integrations_base
+from wolfpaw.integrations import dmitris_fabulous as _df_integration  # noqa: F401 — registers the Document Organizer tools
 from wolfpaw.memory.db import close_pool, get_pool
 from wolfpaw.tracing import get_logger
 from wolfpaw.workers.jobs.channel_dispatch import (
@@ -57,6 +59,7 @@ from wolfpaw.workers.jobs.run_task import run_task_job
 from wolfpaw.workers.jobs.sleep_cycle import sleep_cycle_job
 
 log = get_logger()
+integrations_base.load_entry_points()
 
 
 async def _on_startup(ctx: dict) -> None:

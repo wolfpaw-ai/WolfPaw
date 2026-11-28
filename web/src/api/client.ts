@@ -4,6 +4,7 @@
 
 import type {
   ChatHistoryPage,
+  IntegrationCard,
   MonitorCall,
   MonitorSummary,
   MonitorTrace,
@@ -176,6 +177,26 @@ export const telegram = {
       "/channels/telegram/link-token",
       { method: "POST", body: "{}" },
     );
+  },
+};
+
+// --- integrations (framework: Document Organizer, plugins) --------------
+
+export const integrations = {
+  async list(): Promise<IntegrationCard[]> {
+    const r = await call<{ integrations: IntegrationCard[] }>("/integrations");
+    return r.integrations;
+  },
+  async connectApiKey(name: string, apiKey: string): Promise<IntegrationCard> {
+    return call<IntegrationCard>(
+      `/integrations/${encodeURIComponent(name)}/connect`,
+      { method: "POST", body: JSON.stringify({ api_key: apiKey }) },
+    );
+  },
+  async disconnect(name: string): Promise<void> {
+    await call<unknown>(`/integrations/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
   },
 };
 

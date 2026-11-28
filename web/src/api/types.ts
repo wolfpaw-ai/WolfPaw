@@ -128,6 +128,20 @@ export interface TelegramLinkResponse {
   expires_in_minutes: number;
 }
 
+// Framework integrations (GET /integrations): outbound tool integrations
+// such as the Document Organizer. Credentials are never returned.
+export interface IntegrationCard {
+  name: string;
+  display_name: string;
+  description: string;
+  auth_kind: "api_key" | "oauth";
+  api_key_label: string;
+  connected: boolean;
+  scopes: string[];
+  display: Record<string, unknown>;
+  connected_at: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";

@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from wolfpaw.config import get_settings
+from wolfpaw.integrations import base as integrations_base
 from wolfpaw.memory import conversational as conv
 from wolfpaw.memory.db import acquire
 from wolfpaw.metering.model_client import ModelClient, get_model_client
@@ -128,6 +129,39 @@ class QuickAgent:
     @property
     def allowed_tools(self) -> list:
         return [self.registry.get(n) for n in sorted(self.ALLOWED_TOOL_NAMES)]
+
+    async def _integration_tools(
+        self, user_id: UUID,
+    ) -> tuple[list, list[str]]:
+        """Tools and prompt hints for the integrations this user has
+        connected. Resolved per turn (never cached on the agent, which is
+        shared between users). Best effort: a lookup failure means no
+        integration tools, not a failed turn."""
+        if not integrations_base.configured_integrations():
+            return [], []
+        try:
+            async with acquire() as conn:
+                names = await integrations_base.connected_framework_integrations(
+                    conn, user_id=user_id,
+                )
+        except Exception:  # noqa: BLE001
+            log.warning("agents.quick.integration_lookup_failed", exc_info=True)
+            return [], []
+        tools: list = []
+        hints: list[str] = []
+        for name in names:
+            integration = integrations_base.get_integration(name)
+            if integration is None:
+                continue
+            prefix = f"{integration.tool_prefix}_"
+            tools.extend(
+                self.registry.get(n)
+                for n in sorted(self.registry.names()) if n.startswith(prefix)
+            )
+            hint = integration.planner_hint()
+            if hint:
+                hints.append(hint)
+        return tools, hints
 
     async def _ensure_prompt_version(self) -> None:
         """Lazy-seed (and cache) the `quick:v1` prompt version row. Tolerant
@@ -241,7 +275,15 @@ class QuickAgent:
         # agent role + earlier-thread summaries). Stable across the
         # tool loop, so we don't re-fetch mid-loop even though it could
         # in principle change.
+        extra_tools, hints = await self._integration_tools(ctx.user_id)
+        tool_specs = tool_specs + [t.to_anthropic_schema() for t in extra_tools]
+        extra_names = frozenset(t.name for t in extra_tools)
         role = _AGENT_ROLE
+        if hints:
+            role = role + (
+                "\n\n**Connected integrations.** " + " ".join(hints)
+                + " `search_docs` only covers files in the Wolfpaw workspace."
+            )
         summary_block = conv.format_summaries_block(summaries)
         if summary_block:
             role = role + "\n\n" + summary_block
@@ -315,7 +357,9 @@ class QuickAgent:
                         emit("tool", f"{name}({_summarize_input(tool_input)})")
                     )
                 tool_results.append(
-                    await self._run_tool(ctx, name, tool_input, use_id)
+                    await self._run_tool(
+                        ctx, name, tool_input, use_id, extra_names=extra_names,
+                    )
                 )
             messages.append({"role": "user", "content": tool_results})
 
@@ -335,8 +379,10 @@ class QuickAgent:
         name: str | None,
         tool_input: dict[str, Any],
         use_id: str | None,
+        *,
+        extra_names: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
-        if not name or name not in self.ALLOWED_TOOL_NAMES:
+        if not name or name not in self.ALLOWED_TOOL_NAMES | extra_names:
             return {
                 "type": "tool_result",
                 "tool_use_id": use_id,

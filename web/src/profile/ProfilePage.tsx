@@ -3,8 +3,13 @@
 // edits here change the next turn's behavior.
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { ApiError, profile as profileApi, telegram } from "../api/client";
-import type { UserProfile } from "../api/types";
+import {
+  ApiError,
+  integrations as integrationsApi,
+  profile as profileApi,
+  telegram,
+} from "../api/client";
+import type { IntegrationCard, UserProfile } from "../api/types";
 
 export function ProfilePage() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -104,6 +109,8 @@ export function ProfilePage() {
 
       <h2>Channels</h2>
       <TelegramLinkButton />
+
+      <IntegrationCards />
     </main>
   );
 }
@@ -146,6 +153,112 @@ function TelegramLinkButton() {
           <br />
           <small>{url}</small>
         </p>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+
+// One card per configured framework integration (the Document Organizer
+// today). API-key integrations show a paste field; the key is validated
+// by the server and never shown again.
+function IntegrationCards() {
+  const [cards, setCards] = useState<IntegrationCard[]>([]);
+
+  const load = useCallback(async () => {
+    try {
+      setCards(await integrationsApi.list());
+    } catch {
+      setCards([]);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (cards.length === 0) return null;
+  return (
+    <>
+      <h2>Integrations</h2>
+      {cards.map((card) => (
+        <IntegrationCardView key={card.name} card={card} onChange={load} />
+      ))}
+    </>
+  );
+}
+
+function IntegrationCardView({
+  card,
+  onChange,
+}: {
+  card: IntegrationCard;
+  onChange: () => void;
+}) {
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function onConnect(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await integrationsApi.connectApiKey(card.name, apiKey);
+      setApiKey("");
+      onChange();
+    } catch (err) {
+      setError(err instanceof ApiError ? String(err.detail) : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    setBusy(true);
+    setError(null);
+    try {
+      await integrationsApi.disconnect(card.name);
+      onChange();
+    } catch (err) {
+      setError(err instanceof ApiError ? String(err.detail) : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const prefix =
+    typeof card.display.key_prefix === "string" ? card.display.key_prefix : null;
+
+  return (
+    <div>
+      <h3>{card.display_name}</h3>
+      <p>{card.description}</p>
+      {card.connected ? (
+        <>
+          <p>
+            Connected{prefix ? ` with key ${prefix}…` : ""}.
+          </p>
+          <button onClick={onDisconnect} disabled={busy}>
+            {busy ? "Working…" : "Disconnect"}
+          </button>
+        </>
+      ) : card.auth_kind === "api_key" ? (
+        <form onSubmit={onConnect}>
+          <label>
+            {card.api_key_label}
+            <input
+              type="password"
+              autoComplete="off"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </label>
+          <button type="submit" disabled={busy || apiKey.trim() === ""}>
+            {busy ? "Checking…" : "Connect"}
+          </button>
+        </form>
+      ) : (
+        <p>Connect from your account settings.</p>
       )}
       {error && <p className="error">{error}</p>}
     </div>

@@ -19,6 +19,8 @@ from wolfpaw.config import get_settings
 from wolfpaw.integrations import dropbox as _dropbox_integration  # noqa: F401 — registers Dropbox tools
 from wolfpaw.integrations import microsoft as _microsoft_integration  # noqa: F401 — registers Outlook tools
 from wolfpaw.integrations import notion as _notion_integration  # noqa: F401 — registers Notion tools
+from wolfpaw.integrations import dmitris_fabulous as _df_integration  # noqa: F401 — registers the Document Organizer integration + tools
+from wolfpaw.integrations import base as integrations_base
 from wolfpaw.integrations.dropbox.routes import router as dropbox_router
 from wolfpaw.integrations.microsoft.routes import router as microsoft_router
 from wolfpaw.integrations.notion.routes import router as notion_router
@@ -112,6 +114,10 @@ def create_app() -> FastAPI:
     app.include_router(dropbox_router)
     app.include_router(notion_router)
     app.include_router(microsoft_router)
+    # Framework integrations (Document Organizer, plugins). Mounted AFTER the
+    # legacy per-provider routers so their specific paths win.
+    integrations_base.load_entry_points()
+    app.include_router(integrations_base.build_router())
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -21,6 +21,7 @@ export default defineConfig({
       // Trailing slash: the SPA owns the bare `/monitor` route, while every
       // monitoring API path has a sub-segment. Same split as nginx.conf.
       "/monitor/": proxyTarget,
+      "/integrations": proxyTarget,
       "/me": proxyTarget,
       "/health": proxyTarget,
     },

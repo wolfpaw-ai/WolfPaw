@@ -34,6 +34,7 @@ from uuid import UUID
 
 from wolfpaw.config import get_settings
 from wolfpaw.embeddings import EmbeddingClient, get_embedder
+from wolfpaw.integrations import base as integrations_base
 from wolfpaw.memory import conversational as conv
 from wolfpaw.memory import (
     dropbox_links as dropbox_links_dao,
@@ -566,6 +567,13 @@ async def _resolve_connected_integrations(
         log.warning(
             "agents.planner.microsoft_link_lookup_failed", exc_info=True,
         )
+    # Framework integrations (Document Organizer, plugins) — one generic
+    # lookup instead of a branch per provider.
+    connected.extend(
+        await integrations_base.connected_framework_integrations(
+            conn, user_id=user_id,
+        )
+    )
     return connected
 
 
@@ -633,13 +641,22 @@ def _format_context_block(
     ]
     if connected_integrations:
         for provider in connected_integrations:
+            framework = integrations_base.get_integration(provider)
+            prefix = framework.tool_prefix if framework else provider
             integration_lines.append(
-                f"- `{provider}` connected — `{provider}_*` tools are usable."
+                f"- `{provider}` connected — `{prefix}_*` tools are usable."
             )
+            hint = framework.planner_hint() if framework else None
+            if hint:
+                integration_lines.append(f"  {hint}")
     else:
+        prefixes = ["dropbox_*", "notion_*", "outlook_*"] + [
+            f"{i.tool_prefix}_*" for i in integrations_base.configured_integrations()
+        ]
         integration_lines.append(
-            "- None connected. Do NOT pick `dropbox_*`, `notion_*`, or"
-            " `outlook_*` tools — they'll surface 'not connected'"
+            "- None connected. Do NOT pick "
+            + ", ".join(f"`{p}`" for p in prefixes)
+            + " tools — they'll surface 'not connected'"
             " errors. If a plan needs one, end the plan with a"
             " reasoning step telling the user how to connect."
         )
